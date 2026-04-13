@@ -249,8 +249,9 @@ def run_background_system():
     asyncio.set_event_loop(loop)
     loop.run_until_complete(scheduler())
 
+logger.info("🚀 啟動 3D 結構專用掃描系統 (純推播模式)...")
+bg_thread = threading.Thread(target=run_background_system, daemon=True)
+bg_thread.start()
+
 if __name__ == '__main__':
-    logger.info("🚀 啟動 3D 結構專用掃描系統 (純推播模式)...")
-    bg_thread = threading.Thread(target=run_background_system, daemon=True)
-    bg_thread.start()
     run_flask()
