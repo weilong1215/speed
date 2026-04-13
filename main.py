@@ -141,7 +141,7 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
             'low': 'min',
             'close': 'last',
             'vol': 'sum'
-        }).sort_values('ts').reset_index(drop=True)
+        }).sort_values('ts').reset_index()
         
         # 排除尚未收盤的 3D K棒 (比對當日 UTC 歸屬之 Group Key)
         now_utc = pd.Timestamp.now(tz='UTC')
