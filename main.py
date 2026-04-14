@@ -148,30 +148,33 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
         current_g_key = f"{now_utc.year}_{((now_utc.dayofyear - 1) // 3):03d}"
         df_3d = df_3d[df_3d['g_key'] < current_g_key].reset_index(drop=True)
         
-        if len(df_3d) < 21: return 0
+        if len(df_3d) < 23: return 0
         
         df_3d['ma20'] = df_3d['close'].rolling(window=20).mean()
         
-        # 嚴格取最新兩根完全閉合的 3D 棒作條件比對
+        # 嚴格取最新三根完全閉合的 3D 棒作條件比對
+        row_a = df_3d.iloc[-3]
         row_b = df_3d.iloc[-2]
         row_c = df_3d.iloc[-1]
         
-        if pd.isna(row_b['ma20']) or pd.isna(row_c['ma20']):
+        if pd.isna(row_c['ma20']):
             return 0
             
-        # Bar B (前一根): 陰線且收盤低於 MA20
-        b_is_bearish = row_b['close'] < row_b['open']
-        b_below_ma20 = row_b['close'] < row_b['ma20']
+        # Bar A (第1根): 陰線 (收盤 < 開盤)
+        a_is_bearish = row_a['close'] < row_a['open']
         
-        # Bar C (最新一根): 陽線且收盤高於 MA20
+        # Bar B (第2根): 陰線 (收盤 < 開盤) 且 陰吞噬 Bar A (收盤 < Bar A 收盤)
+        b_is_bearish = row_b['close'] < row_b['open']
+        b_engulf_a = row_b['close'] < row_a['close']
+        
+        # Bar C (第3根): 陽線 (收盤 > 開盤) 且 陽吞噬 Bar B (收盤 > Bar B 開盤)
         c_is_bullish = row_c['close'] > row_c['open']
+        c_engulf_b = row_c['close'] > row_b['open']
+        
+        # 指標條件: 最新一根 (第3根) 收盤大於 MA20
         c_above_ma20 = row_c['close'] > row_c['ma20']
         
-        # 吞噬防護: C 收盤必須越過 B 實體高位
-        b_body_high = max(row_b['open'], row_b['close'])
-        c_engulf_b = row_c['close'] > b_body_high
-        
-        if b_is_bearish and b_below_ma20 and c_is_bullish and c_above_ma20 and c_engulf_b:
+        if a_is_bearish and b_is_bearish and b_engulf_a and c_is_bullish and c_engulf_b and c_above_ma20:
             d1_date_str = row_c['dt'].strftime('%Y-%m-%d')
             send_signal_telegram(symbol, row_c['close'], row_c['ma20'], d1_date_str, precision)
             return 1
