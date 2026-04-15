@@ -16,6 +16,7 @@ from datetime import datetime
 from dotenv import load_dotenv
 import sys
 import io
+import json
 
 # ============================================================================
 # 系統初始化 (日誌與環境變數)
@@ -42,7 +43,7 @@ if sys.stdout.encoding != 'utf-8':
 TG_BOT_TOKEN = os.getenv("TG_BOT_TOKEN", "")
 TG_CHAT_ID = os.getenv("TG_CHAT_ID", "")
 
-# 非加密貨幣黑名單前綴 (Bitget 上混雜的股票/貴金屬/外匯標的)
+# 非加密貨幣黑名單前綴
 NON_CRYPTO_PREFIXES = frozenset([
     'XAU', 'XAG', 'WTI', 'BRENT',
     'SPX', 'NDX', 'DJI', 'VIX', 'DXY',
@@ -55,6 +56,28 @@ def is_crypto_symbol(symbol: str) -> bool:
     return not any(base == p or base.startswith(p) for p in NON_CRYPTO_PREFIXES)
 
 logger.info(f"✅ 系統配置檢查: TG_TOKEN={'已設定' if TG_BOT_TOKEN else '未設定'}, TG_CHAT_ID={'已設定' if TG_CHAT_ID else '未設定'}")
+
+# ============================================================================
+# 狀態持久化 (Watchlist)
+# ============================================================================
+
+WATCHLIST_FILE = "active_signals.json"
+
+def load_watchlist():
+    if os.path.exists(WATCHLIST_FILE):
+        try:
+            with open(WATCHLIST_FILE, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except Exception as e:
+            logger.error(f"讀取 watchlist 失敗: {e}")
+    return {}
+
+def save_watchlist(data):
+    try:
+        with open(WATCHLIST_FILE, 'w', encoding='utf-8') as f:
+            json.dump(data, f, indent=4, ensure_ascii=False)
+    except Exception as e:
+        logger.error(f"儲存 watchlist 失敗: {e}")
 
 # ============================================================================
 # 通知與資源獲取
@@ -116,12 +139,11 @@ def get_exchange():
 # 掃描模組
 # ============================================================================
 
-async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, total_coins=0):
+async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, total_coins=0, cached_info=None):
     try:
         if current_idx > 0 and (current_idx % 50 == 0 or current_idx == total_coins):
             logger.info(f"📊 掃描進度: {current_idx}/{total_coins}...")
             
-        # 抓取過去 200 天的 1D K線 (保證合成後涵蓋至少 60 根 3D 棒以避開均線暖機期)
         now_ms = int(time.time() * 1000)
         fetch_since_1d = now_ms - (200 * 24 * 3600 * 1000)
         
@@ -134,17 +156,15 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
             curr_1d = batch[-1][0] + (24 * 3600 * 1000)
             if curr_1d >= now_ms: break
 
-        if not ohlcv_1d: return 0
+        if not ohlcv_1d: return None
         df = pd.DataFrame(ohlcv_1d, columns=['ts', 'open', 'high', 'low', 'close', 'vol']).drop_duplicates(subset=['ts']).reset_index(drop=True)
         df['dt'] = pd.to_datetime(df['ts'], unit='ms', utc=True)
         
-        # 建立 3D 分組依據: 每年 1/1 為原點固定聚合
         df['year'] = df['dt'].dt.year
         df['doy'] = df['dt'].dt.dayofyear
         df['group_id'] = (df['doy'] - 1) // 3
         df['g_key'] = df['year'].astype(str) + "_" + df['group_id'].astype(str).str.zfill(3)
         
-        # 合成 3D K線
         df_3d = df.groupby('g_key').agg({
             'ts': 'first',
             'dt': 'first',
@@ -155,98 +175,111 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
             'vol': 'sum'
         }).sort_values('ts').reset_index()
         
-        # 排除尚未收盤的 3D K棒 (比對當日 UTC 歸屬之 Group Key)
         now_utc = pd.Timestamp.now(tz='UTC')
         current_g_key = f"{now_utc.year}_{((now_utc.dayofyear - 1) // 3):03d}"
         df_3d = df_3d[df_3d['g_key'] < current_g_key].reset_index(drop=True)
         
-        if len(df_3d) < 23: return 0
+        if len(df_3d) < 3: return None
         
         df_3d['ma20'] = df_3d['close'].rolling(window=20).mean()
-        
-        # 嚴格取最新三根完全閉合的 3D 棒作條件比對
-        row_a = df_3d.iloc[-3]
-        row_b = df_3d.iloc[-2]
         row_c = df_3d.iloc[-1]
         
-        if pd.isna(row_c['ma20']):
-            return 0
-            
-        # Bar A (第1根): 陰線 (收盤 < 開盤)
-        a_is_bearish = row_a['close'] < row_a['open']
+        target_info = None
+        action = None
         
-        # Bar B (第2根): 陰線 (收盤 < 開盤) 且 陰吞噬 Bar A (收盤 < Bar A 收盤)
-        b_is_bearish = row_b['close'] < row_b['open']
-        b_engulf_a = row_b['close'] < row_a['close']
-        
-        # Bar C (第3根): 陽線 (收盤 > 開盤) 且 陽吞噬 Bar B (收盤 > Bar B 開盤)
-        c_is_bullish = row_c['close'] > row_c['open']
-        c_engulf_b = row_c['close'] > row_b['open']
-        
-        # 指標條件: 最新一根 (第3根) 收盤大於 MA20
-        c_above_ma20 = row_c['close'] > row_c['ma20']
-        
-        if a_is_bearish and b_is_bearish and b_engulf_a and c_is_bullish and c_engulf_b and c_above_ma20:
+        # 1. 確認是否出現新的 3D 條件 (無條件覆蓋)
+        if len(df_3d) >= 23 and not pd.isna(row_c['ma20']):
+            row_a = df_3d.iloc[-3]
+            row_b = df_3d.iloc[-2]
             
-            # === 3H 條件進階判斷 ===
-            fetch_since_1h = now_ms - (10 * 24 * 3600 * 1000) # 抓最近 10 天，確保有足夠 1H 組成數根 3H K棒
-            batch_1h = await exchange.fetch_ohlcv(symbol, '1h', since=fetch_since_1h, limit=240)
+            a_is_bearish = row_a['close'] < row_a['open']
+            b_is_bearish = row_b['close'] < row_b['open']
+            b_engulf_a = row_b['close'] < row_a['close']
+            c_is_bullish = row_c['close'] > row_c['open']
+            c_engulf_b = row_c['close'] > row_b['open']
+            c_above_ma20 = row_c['close'] > row_c['ma20']
             
-            is_3h_met = False
-            entry_price = 0.0
-            stop_loss = 0.0
+            if a_is_bearish and b_is_bearish and b_engulf_a and c_is_bullish and c_engulf_b and c_above_ma20:
+                target_info = {
+                    'dt_str': row_c['dt'].isoformat(),
+                    'close': float(row_c['close']),
+                    'high': float(row_c['high']),
+                    'low': float(row_c['low']),
+                    'ma20': float(row_c['ma20'])
+                }
+                action = 'update'
+                
+        # 2. 如果沒有新訊號，但仍在追蹤名單中，執行剔除判斷
+        if target_info is None and cached_info is not None:
+            if row_c['close'] > cached_info['high'] or row_c['close'] < cached_info['low']:
+                return {'symbol': symbol, 'action': 'remove', 'pushed': False}
+            else:
+                target_info = cached_info
+                action = 'keep'
+                
+        # 如果既沒新訊號且也不在追蹤名單中，直接結束
+        if target_info is None:
+            return None
             
-            if batch_1h:
-                df_1h = pd.DataFrame(batch_1h, columns=['ts', 'open', 'high', 'low', 'close', 'vol']).drop_duplicates(subset=['ts']).reset_index(drop=True)
-                df_1h['dt'] = pd.to_datetime(df_1h['ts'], unit='ms', utc=True)
+        # === 3H 條件進階判斷 (針對 target_info 進行校驗) ===
+        fetch_since_1h = now_ms - (30 * 24 * 3600 * 1000) # 擴大至 30 天涵蓋殘留歷史紀錄
+        batch_1h = await exchange.fetch_ohlcv(symbol, '1h', since=fetch_since_1h, limit=720)
+        
+        is_3h_met = False
+        entry_price = 0.0
+        stop_loss = 0.0
+        
+        if batch_1h:
+            df_1h = pd.DataFrame(batch_1h, columns=['ts', 'open', 'high', 'low', 'close', 'vol']).drop_duplicates(subset=['ts']).reset_index(drop=True)
+            df_1h['dt'] = pd.to_datetime(df_1h['ts'], unit='ms', utc=True)
+            
+            df_1h['3h_period'] = df_1h['dt'].dt.floor('3h')
+            df_3h = df_1h.groupby('3h_period').agg({
+                'ts': 'first',
+                'dt': 'first',
+                'open': 'first',
+                'high': 'max',
+                'low': 'min',
+                'close': 'last',
+                'vol': 'sum'
+            }).sort_values('ts').reset_index()
+            
+            local_now_utc = pd.Timestamp.now(tz='UTC')
+            now_utc_3h_fl = local_now_utc.floor('3h')
+            df_3h = df_3h[df_3h['3h_period'] < now_utc_3h_fl].reset_index(drop=True)
+            
+            # 從當初成立的那根 3D 棒 (Bar C) 結束之後起算
+            target_dt = pd.to_datetime(target_info['dt_str'])
+            bar_c_end_time = target_dt + pd.Timedelta(days=3)
+            df_3h_after_c = df_3h[df_3h['3h_period'] >= bar_c_end_time]
+            
+            target_3d_high = target_info['high']
+            
+            for _, h3_row in df_3h_after_c.iterrows():
+                h3_open = h3_row['open']
+                h3_close = h3_row['close']
+                h3_low = h3_row['low']
                 
-                # 合成 3H K線 (以 UTC 00, 03, 06 為切割基準)
-                df_1h['3h_period'] = df_1h['dt'].dt.floor('3h')
-                df_3h = df_1h.groupby('3h_period').agg({
-                    'ts': 'first',
-                    'dt': 'first',
-                    'open': 'first',
-                    'high': 'max',
-                    'low': 'min',
-                    'close': 'last',
-                    'vol': 'sum'
-                }).sort_values('ts').reset_index()
-                
-                # 排除尚未收盤的 3H K棒
-                local_now_utc = pd.Timestamp.now(tz='UTC')
-                now_utc_3h_fl = local_now_utc.floor('3h')
-                df_3h = df_3h[df_3h['3h_period'] < now_utc_3h_fl].reset_index(drop=True)
-                
-                # 限定只看 3D 條件成立 (Bar C 結束) 之後產生的所有 3H K棒
-                bar_c_end_time = row_c['dt'] + pd.Timedelta(days=3)
-                df_3h_after_c = df_3h[df_3h['3h_period'] >= bar_c_end_time]
-                
-                target_3d_high = row_c['high']
-                
-                # 依序掃描所有 3H K棒，符合條件即覆寫，確保取到「最新一次」的突破紀錄
-                for _, h3_row in df_3h_after_c.iterrows():
-                    h3_open = h3_row['open']
-                    h3_close = h3_row['close']
-                    h3_low = h3_row['low']
-                    
-                    if h3_open < target_3d_high and h3_close > target_3d_high:
-                        is_3h_met = True
-                        entry_price = h3_close
-                        stop_loss = (h3_close + h3_low) / 2
-            # ========================
+                if h3_open < target_3d_high and h3_close > target_3d_high:
+                    is_3h_met = True
+                    entry_price = h3_close
+                    stop_loss = (h3_close + h3_low) / 2
+        # ========================
 
-            d1_date_str = row_c['dt'].strftime('%Y-%m-%d')
-            send_signal_telegram(symbol, row_c['close'], row_c['ma20'], d1_date_str, precision, is_3h_met, entry_price, stop_loss)
-            return 1
-            
-        return 0
+        d1_date_str = pd.to_datetime(target_info['dt_str']).strftime('%Y-%m-%d')
+        send_signal_telegram(symbol, target_info['close'], target_info['ma20'], d1_date_str, precision, is_3h_met, entry_price, stop_loss)
+        
+        return {'symbol': symbol, 'action': action, 'data': target_info, 'pushed': True}
+
     except Exception as e:
         logger.warning(f"掃描異常 ({symbol}): {type(e).__name__}: {e}")
-        return 0
+        return None
 
 async def run_scan():
-    logger.info("⏰ 開始執行 3D MA20 與 3H 條件掃描...")
+    logger.info("⏰ 開始執行 3D MA20 與 3H 條件長效追蹤掃描...")
     ex = get_exchange()
+    watchlist = load_watchlist()
+    
     try:
         try:
             markets = await ex.load_markets()
@@ -260,14 +293,30 @@ async def run_scan():
         total_coins = len(coins)
         for i in range(0, total_coins, 20):
             batch = coins[i:i+20]
-            tasks = [scan_for_symbol(ex, s, get_base_coin(s), precisions[s], i + idx + 1, total_coins) for idx, s in enumerate(batch)]
+            tasks = [scan_for_symbol(ex, s, get_base_coin(s), precisions[s], i + idx + 1, total_coins, watchlist.get(s)) for idx, s in enumerate(batch)]
             results = await asyncio.gather(*tasks)
-            count += sum(results)
+            
+            for res in results:
+                if res is None: continue
+                sym = res['symbol']
+                if res['action'] == 'update' or res['action'] == 'keep':
+                    watchlist[sym] = res['data']
+                elif res['action'] == 'remove':
+                    if sym in watchlist:
+                        del watchlist[sym]
+                
+                if res.get('pushed'):
+                    count += 1
+            
             await asyncio.sleep(0.5)
             
-        logger.info(f"✅ 掃描完成。本期發現符合 3D 條件訊號: {count} 個")
+        # 回寫快取
+        save_watchlist(watchlist)
+        active_count = len(watchlist)
+        
+        logger.info(f"✅ 掃描完成。推送訊號: {count} 個 / 當前追蹤名單總數: {active_count} 個")
         if count == 0:
-            send_telegram_message(f"✅ <b>條件掃描完成</b>\n本次共掃描 {total_coins} 個幣種，目前未發現符合 3D 條件之訊號。")
+            send_telegram_message(f"✅ <b>條件掃描完成</b>\n本次共掃描 {total_coins} 個幣種，無推播訊號。\n(當前清單追蹤中: {active_count} 個)")
     finally: 
         await ex.close()
 
@@ -314,7 +363,7 @@ def run_background_system():
     asyncio.set_event_loop(loop)
     loop.run_until_complete(scheduler())
 
-logger.info("🚀 啟動 3D 結構專用掃描系統 (純推播模式)...")
+logger.info("🚀 啟動 3D 結構專用掃描系統 (長效推播模式)...")
 bg_thread = threading.Thread(target=run_background_system, daemon=True)
 bg_thread.start()
 
