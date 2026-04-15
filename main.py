@@ -217,19 +217,22 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
                 now_utc_3h_fl = local_now_utc.floor('3h')
                 df_3h = df_3h[df_3h['3h_period'] < now_utc_3h_fl].reset_index(drop=True)
                 
-                if len(df_3h) > 0:
-                    latest_3h = df_3h.iloc[-1]
-                    latest_3h_open = latest_3h['open']
-                    latest_3h_close = latest_3h['close']
-                    latest_3h_low = latest_3h['low']
+                # 限定只看 3D 條件成立 (Bar C 結束) 之後產生的所有 3H K棒
+                bar_c_end_time = row_c['dt'] + pd.Timedelta(days=3)
+                df_3h_after_c = df_3h[df_3h['3h_period'] >= bar_c_end_time]
+                
+                target_3d_high = row_c['high']
+                
+                # 依序掃描所有 3H K棒，符合條件即覆寫，確保取到「最新一次」的突破紀錄
+                for _, h3_row in df_3h_after_c.iterrows():
+                    h3_open = h3_row['open']
+                    h3_close = h3_row['close']
+                    h3_low = h3_row['low']
                     
-                    target_3d_high = row_c['high']
-                    
-                    # 判斷 3H 必須為由下穿越：開盤 < 3D 高點 且 收盤 > 3D 高點
-                    if latest_3h_open < target_3d_high and latest_3h_close > target_3d_high:
+                    if h3_open < target_3d_high and h3_close > target_3d_high:
                         is_3h_met = True
-                        entry_price = latest_3h_close
-                        stop_loss = (latest_3h_close + latest_3h_low) / 2
+                        entry_price = h3_close
+                        stop_loss = (h3_close + h3_low) / 2
             # ========================
 
             d1_date_str = row_c['dt'].strftime('%Y-%m-%d')
