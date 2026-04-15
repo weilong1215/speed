@@ -219,13 +219,14 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
                 
                 if len(df_3h) > 0:
                     latest_3h = df_3h.iloc[-1]
+                    latest_3h_open = latest_3h['open']
                     latest_3h_close = latest_3h['close']
                     latest_3h_low = latest_3h['low']
                     
                     target_3d_high = row_c['high']
                     
-                    # 判斷最新收盤的 3H 收盤價有沒有大於 3D K棒 (Bar C) 的最高點
-                    if latest_3h_close > target_3d_high:
+                    # 判斷 3H 必須為由下穿越：開盤 < 3D 高點 且 收盤 > 3D 高點
+                    if latest_3h_open < target_3d_high and latest_3h_close > target_3d_high:
                         is_3h_met = True
                         entry_price = latest_3h_close
                         stop_loss = (latest_3h_close + latest_3h_low) / 2
