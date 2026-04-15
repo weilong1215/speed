@@ -80,15 +80,27 @@ def send_telegram_message(message: str) -> bool:
         logger.error(f"Telegram 連線異常: {e}")
         return False
 
-def send_signal_telegram(symbol: str, close_price: float, ma20: float, d1_date: str, precision: int):
+def send_signal_telegram(symbol: str, close_price: float, ma20: float, d1_date: str, precision: int, is_3h_met: bool = False, entry_price: float = 0.0, stop_loss: float = 0.0):
     display_symbol = get_base_coin(symbol)
+    
+    if is_3h_met:
+        extra_msg = (
+            f"🔄 <b>3H 條件:</b> ✅ 達成\n"
+            f"📍 <b>進場價格:</b> <code>{entry_price:.{precision}f}</code>\n"
+            f"🛡️ <b>止損價格:</b> <code>{stop_loss:.{precision}f}</code>"
+        )
+    else:
+        extra_msg = f"🔄 <b>3H 條件:</b> ❌ 未達成"
+
     msg = (
         f"🟢 <b>[做多] 3D MA20 吞噬轉換</b>\n\n"
         f"💎 <b>交易對:</b> {display_symbol}\n"
         f"📅 <b>3D K棒起始日期:</b> {d1_date}\n\n"
         f"━━━━━ 狀態資訊 ━━━━━\n"
         f"📌 <b>收盤觸發價:</b> <code>{close_price:.{precision}f}</code>\n"
-        f"📈 <b>3D MA20:</b> <code>{ma20:.{precision}f}</code>"
+        f"📈 <b>3D MA20:</b> <code>{ma20:.{precision}f}</code>\n\n"
+        f"━━━━━ 3H 確認 ━━━━━\n"
+        f"{extra_msg}"
     )
     send_telegram_message(msg)
 
@@ -175,8 +187,52 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
         c_above_ma20 = row_c['close'] > row_c['ma20']
         
         if a_is_bearish and b_is_bearish and b_engulf_a and c_is_bullish and c_engulf_b and c_above_ma20:
+            
+            # === 3H 條件進階判斷 ===
+            fetch_since_1h = now_ms - (10 * 24 * 3600 * 1000) # 抓最近 10 天，確保有足夠 1H 組成數根 3H K棒
+            batch_1h = await exchange.fetch_ohlcv(symbol, '1h', since=fetch_since_1h, limit=240)
+            
+            is_3h_met = False
+            entry_price = 0.0
+            stop_loss = 0.0
+            
+            if batch_1h:
+                df_1h = pd.DataFrame(batch_1h, columns=['ts', 'open', 'high', 'low', 'close', 'vol']).drop_duplicates(subset=['ts']).reset_index(drop=True)
+                df_1h['dt'] = pd.to_datetime(df_1h['ts'], unit='ms', utc=True)
+                
+                # 合成 3H K線 (以 UTC 00, 03, 06 為切割基準)
+                df_1h['3h_period'] = df_1h['dt'].dt.floor('3h')
+                df_3h = df_1h.groupby('3h_period').agg({
+                    'ts': 'first',
+                    'dt': 'first',
+                    'open': 'first',
+                    'high': 'max',
+                    'low': 'min',
+                    'close': 'last',
+                    'vol': 'sum'
+                }).sort_values('ts').reset_index()
+                
+                # 排除尚未收盤的 3H K棒
+                local_now_utc = pd.Timestamp.now(tz='UTC')
+                now_utc_3h_fl = local_now_utc.floor('3h')
+                df_3h = df_3h[df_3h['3h_period'] < now_utc_3h_fl].reset_index(drop=True)
+                
+                if len(df_3h) > 0:
+                    latest_3h = df_3h.iloc[-1]
+                    latest_3h_close = latest_3h['close']
+                    latest_3h_low = latest_3h['low']
+                    
+                    target_3d_high = row_c['high']
+                    
+                    # 判斷最新收盤的 3H 收盤價有沒有大於 3D K棒 (Bar C) 的最高點
+                    if latest_3h_close > target_3d_high:
+                        is_3h_met = True
+                        entry_price = latest_3h_close
+                        stop_loss = (latest_3h_close + latest_3h_low) / 2
+            # ========================
+
             d1_date_str = row_c['dt'].strftime('%Y-%m-%d')
-            send_signal_telegram(symbol, row_c['close'], row_c['ma20'], d1_date_str, precision)
+            send_signal_telegram(symbol, row_c['close'], row_c['ma20'], d1_date_str, precision, is_3h_met, entry_price, stop_loss)
             return 1
             
         return 0
@@ -185,7 +241,7 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
         return 0
 
 async def run_scan():
-    logger.info("⏰ 開始執行 3D MA20 條件掃描...")
+    logger.info("⏰ 開始執行 3D MA20 與 3H 條件掃描...")
     ex = get_exchange()
     try:
         try:
@@ -205,13 +261,14 @@ async def run_scan():
             count += sum(results)
             await asyncio.sleep(0.5)
             
-        logger.info(f"✅ 掃描完成。本期發現做多訊號: {count} 個")
+        logger.info(f"✅ 掃描完成。本期發現符合 3D 條件訊號: {count} 個")
         if count == 0:
-            send_telegram_message(f"✅ <b>3D 條件掃描完成</b>\n本次共掃描 {total_coins} 個幣種，目前未發現符合條件之訊號。")
+            send_telegram_message(f"✅ <b>條件掃描完成</b>\n本次共掃描 {total_coins} 個幣種，目前未發現符合 3D 條件之訊號。")
     finally: 
         await ex.close()
 
 async def scheduler():
+    last_exec_hour = -1
     last_day = -1
     try:
         await run_scan()
@@ -221,13 +278,14 @@ async def scheduler():
     while True:
         try:
             now = datetime.utcnow()
-            # 每日 UTC 00:01 掃描一次，配合 3D K線週期確保不重疊浪費
-            if now.hour == 0 and now.minute == 1 and now.day != last_day:
+            # 每日 UTC 整點 (且須能被 3 整除的小時) 的第 1 分鐘觸發 (00:01, 03:01, 06:01...)
+            if now.minute == 1 and now.hour % 3 == 0 and (now.day != last_day or now.hour != last_exec_hour):
                 try:
                     await run_scan()
                 except Exception as e:
                     logger.error(f"定時掃描異常: {e}")
                 last_day = now.day
+                last_exec_hour = now.hour
         except Exception as e:
             logger.critical(f"💥 Scheduler 頂層異常 (已攔截): {e}")
         await asyncio.sleep(60)
@@ -258,3 +316,4 @@ bg_thread.start()
 
 if __name__ == '__main__':
     run_flask()
+
