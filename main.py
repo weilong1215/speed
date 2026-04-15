@@ -61,7 +61,7 @@ logger.info(f"✅ 系統配置檢查: TG_TOKEN={'已設定' if TG_BOT_TOKEN else
 # 狀態持久化 (Watchlist)
 # ============================================================================
 
-WATCHLIST_FILE = "active_signals.json"
+WATCHLIST_FILE = "/app/data/active_signals.json"
 
 def load_watchlist():
     if os.path.exists(WATCHLIST_FILE):
