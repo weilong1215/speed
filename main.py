@@ -861,9 +861,9 @@ def send_system_settings_message(config):
     
     reply_markup = {
         "inline_keyboard": [
-            [{"text": "📝 修改預設虧損", "callback_data": "action_set_loss"}],
-            [{"text": "➕ 新增黑名單", "callback_data": "action_add_bl"},
-             {"text": "➖ 移除黑名單", "callback_data": "action_rm_bl"}]
+            [{"text": "📝 修改預設虧損", "switch_inline_query_current_chat": "/set_loss "}],
+            [{"text": "➕ 新增黑名單", "switch_inline_query_current_chat": "/add_blacklist "},
+             {"text": "➖ 移除黑名單", "switch_inline_query_current_chat": "/remove_blacklist "}]
         ]
     }
     
@@ -896,38 +896,6 @@ def poll_telegram_commands():
         for update in data.get("result", []):
             _tg_update_offset = update["update_id"] + 1
 
-            # 1. 處理 Callback Query
-            if "callback_query" in update:
-                cq = update["callback_query"]
-                chat_id = str(cq.get("message", {}).get("chat", {}).get("id", ""))
-                if chat_id != str(TG_CHAT_ID):
-                    continue
-                
-                # 回應 callback，消除按鈕等待圈圈
-                cb_id = cq.get("id")
-                req_url = f"https://api.telegram.org/bot{TG_BOT_TOKEN}/answerCallbackQuery"
-                requests.post(req_url, json={"callback_query_id": cb_id}, timeout=5)
-
-                action = cq.get("data", "")
-                prompt_text = ""
-                if action == "action_set_loss":
-                    prompt_text = "👉 請「回覆」此訊息，輸入新的【預設虧損金額】(純數字):"
-                elif action == "action_add_bl":
-                    prompt_text = "👉 請「回覆」此訊息，輸入要【加入黑名單】的幣種 (如 DOGE):"
-                elif action == "action_rm_bl":
-                    prompt_text = "👉 請「回覆」此訊息，輸入要【移除黑名單】的幣種:"
-
-                if prompt_text:
-                    send_url = f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendMessage"
-                    payload = {
-                        "chat_id": chat_id,
-                        "text": prompt_text,
-                        "reply_markup": {"force_reply": True, "selective": True}
-                    }
-                    requests.post(send_url, json=payload, timeout=10)
-                continue
-
-            # 2. 處理 Message
             message = update.get("message", {})
             text = message.get("text", "").strip()
             chat_id = str(message.get("chat", {}).get("id", ""))
@@ -936,17 +904,10 @@ def poll_telegram_commands():
             if chat_id != str(TG_CHAT_ID) or not text:
                 continue
 
-            # 判斷是否為針對 Prompt 的回覆
-            if "reply_to_message" in message:
-                reply_text = message["reply_to_message"].get("text", "")
-                if "【預設虧損金額】" in reply_text:
-                    text = f"/set_loss {text}"
-                elif "【加入黑名單】" in reply_text:
-                    text = f"/add_blacklist {text}"
-                elif "【移除黑名單】" in reply_text:
-                    text = f"/remove_blacklist {text}"
+            # 支援 inline_query_current_chat 自動帶入的 @botname 前綴
+            text = re.sub(r'^@\w+\s*', '', text).strip()
 
-            # 處理指令 (同時兼容手動輸入與按鈕回覆)
+            # 處理指令
             reply = ""
             if text.startswith("/set_loss"):
                 parts = text.split()
@@ -1158,9 +1119,6 @@ async def scheduler():
                 finally:
                     await ex.close()
 
-            # 每次迴圈都輪詢 Telegram 指令
-            poll_telegram_commands()
-
         except Exception as e:
             # 頂層防護：確保背景執行緒在任何罕見異常下不會死亡
             logger.critical(f"💥 Scheduler 頂層異常 (已攔截): {e}")
@@ -1186,10 +1144,21 @@ def run_background_system():
     asyncio.set_event_loop(loop)
     loop.run_until_complete(scheduler())
 
+def tg_polling_background():
+    while True:
+        try:
+            poll_telegram_commands()
+        except Exception as e:
+            logger.error(f"Telegram polling 異常: {e}")
+        time.sleep(2)
+
 logger.info("🚀 啟動 3D 結構掃描 + 自動交易系統...")
 ensure_data_dir()
 bg_thread = threading.Thread(target=run_background_system, daemon=True)
 bg_thread.start()
+
+tg_thread = threading.Thread(target=tg_polling_background, daemon=True)
+tg_thread.start()
 
 if __name__ == '__main__':
     run_flask()
