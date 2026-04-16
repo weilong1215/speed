@@ -80,6 +80,29 @@ def save_watchlist(data):
         logger.error(f"儲存 watchlist 失敗: {e}")
 
 # ============================================================================
+# 系統設定持久化
+# ============================================================================
+
+CONFIG_FILE = "/app/data/system_config.json"
+
+def load_config():
+    if os.path.exists(CONFIG_FILE):
+        try:
+            with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except Exception as e:
+            logger.error(f"讀取設定檔失敗: {e}")
+    return {"default_loss_amount": 6}
+
+def save_config(data):
+    try:
+        os.makedirs(os.path.dirname(CONFIG_FILE), exist_ok=True)
+        with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
+            json.dump(data, f, indent=4, ensure_ascii=False)
+    except Exception as e:
+        logger.error(f"儲存設定檔失敗: {e}")
+
+# ============================================================================
 # 通知與資源獲取
 # ============================================================================
 
@@ -102,30 +125,6 @@ def send_telegram_message(message: str) -> bool:
     except Exception as e:
         logger.error(f"Telegram 連線異常: {e}")
         return False
-
-def send_signal_telegram(symbol: str, close_price: float, ma20: float, d1_date: str, precision: int, is_3h_met: bool = False, entry_price: float = 0.0, stop_loss: float = 0.0):
-    display_symbol = get_base_coin(symbol)
-    
-    if is_3h_met:
-        extra_msg = (
-            f"🔄 <b>3H 條件:</b> ✅ 達成\n"
-            f"📍 <b>進場價格:</b> <code>{entry_price:.{precision}f}</code>\n"
-            f"🛡️ <b>止損價格:</b> <code>{stop_loss:.{precision}f}</code>"
-        )
-    else:
-        extra_msg = f"🔄 <b>3H 條件:</b> ❌ 未達成"
-
-    msg = (
-        f"🟢 <b>[做多] 3D MA20 吞噬轉換</b>\n\n"
-        f"💎 <b>交易對:</b> {display_symbol}\n"
-        f"📅 <b>3D K棒起始日期:</b> {d1_date}\n\n"
-        f"━━━━━ 狀態資訊 ━━━━━\n"
-        f"📌 <b>收盤觸發價:</b> <code>{close_price:.{precision}f}</code>\n"
-        f"📈 <b>3D MA20:</b> <code>{ma20:.{precision}f}</code>\n\n"
-        f"━━━━━ 3H 確認 ━━━━━\n"
-        f"{extra_msg}"
-    )
-    send_telegram_message(msg)
 
 def get_exchange():
     exchange_config = {
@@ -212,7 +211,7 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
         # 2. 如果沒有新訊號，但仍在追蹤名單中，執行剔除判斷
         if target_info is None and cached_info is not None:
             if row_c['close'] > cached_info['high'] or row_c['close'] < cached_info['low']:
-                return {'symbol': symbol, 'action': 'remove', 'pushed': False}
+                return {'symbol': symbol, 'action': 'remove'}
             else:
                 target_info = cached_info
                 action = 'keep'
@@ -222,7 +221,7 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
             return None
             
         # === 3H 條件進階判斷 (針對 target_info 進行校驗) ===
-        fetch_since_1h = now_ms - (30 * 24 * 3600 * 1000) # 擴大至 30 天涵蓋殘留歷史紀錄
+        fetch_since_1h = now_ms - (30 * 24 * 3600 * 1000)
         batch_1h = await exchange.fetch_ohlcv(symbol, '1h', since=fetch_since_1h, limit=720)
         
         is_3h_met = False
@@ -263,22 +262,152 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
                 if h3_open < target_3d_high and h3_close > target_3d_high:
                     is_3h_met = True
                     entry_price = h3_close
-                    stop_loss = (h3_close + h3_low) / 2
+                    # 止損 = 該根 3H K棒最低點
+                    stop_loss = h3_low
         # ========================
 
         d1_date_str = pd.to_datetime(target_info['dt_str']).strftime('%Y-%m-%d')
-        send_signal_telegram(symbol, target_info['close'], target_info['ma20'], d1_date_str, precision, is_3h_met, entry_price, stop_loss)
         
-        return {'symbol': symbol, 'action': action, 'data': target_info, 'pushed': True}
+        return {
+            'symbol': symbol,
+            'action': action,
+            'data': target_info,
+            'is_3h_met': is_3h_met,
+            'entry_price': entry_price,
+            'stop_loss': stop_loss,
+            'precision': precision,
+            'd1_date': d1_date_str
+        }
 
     except Exception as e:
         logger.warning(f"掃描異常 ({symbol}): {type(e).__name__}: {e}")
         return None
 
+# ============================================================================
+# 訊息推送模組
+# ============================================================================
+
+def send_watching_message(watching_list):
+    """合併所有 3H 未成立的幣種為一則關注中訊息，按日期排列"""
+    if not watching_list:
+        return
+    
+    # 按 d1_date 分組
+    date_groups = {}
+    for item in watching_list:
+        d = item['d1_date']
+        if d not in date_groups:
+            date_groups[d] = []
+        date_groups[d].append(get_base_coin(item['symbol']))
+    
+    lines = ["👀 <b>[關注中]</b>\n"]
+    for date_key in sorted(date_groups.keys()):
+        coins = " · ".join(date_groups[date_key])
+        lines.append(f"📅 {date_key}")
+        lines.append(f"💎 {coins}\n")
+    
+    send_telegram_message("\n".join(lines))
+
+def send_triggered_message(item, default_loss):
+    """3H 已成立的幣種，獨立一則訊息，含倉位價值"""
+    display_symbol = get_base_coin(item['symbol'])
+    precision = item['precision']
+    entry = item['entry_price']
+    sl = item['stop_loss']
+    
+    # 倉位價值 = 預設虧損金額 / |(進場價 - 止損價) / 進場價|
+    loss_pct = abs((entry - sl) / entry) if entry != 0 else 0
+    position_value = default_loss / loss_pct if loss_pct > 0 else 0
+    
+    msg = (
+        f"🟢 <b>[做多] 3D MA20 吞噬轉換</b>\n\n"
+        f"💎 <b>交易對:</b> {display_symbol}\n"
+        f"📅 <b>3D K棒起始日期:</b> {item['d1_date']}\n\n"
+        f"📍 <b>進場價格:</b> <code>{entry:.{precision}f}</code>\n"
+        f"🛡️ <b>止損價格:</b> <code>{sl:.{precision}f}</code>\n"
+        f"💰 <b>倉位價值:</b> <code>{position_value:.2f} USDT</code>"
+    )
+    send_telegram_message(msg)
+
+def send_system_settings_message(config):
+    """獨立一則系統設定訊息"""
+    loss = config.get("default_loss_amount", 6)
+    msg = (
+        f"⚙️ <b>系統快速設定</b>\n\n"
+        f"💵 <b>預設虧損金額:</b> {loss} USDT\n\n"
+        f"📝 回覆 <code>/set_loss 10</code> 更改預設虧損金額"
+    )
+    send_telegram_message(msg)
+
+# ============================================================================
+# Telegram 指令處理
+# ============================================================================
+
+# 全域 offset，避免重複處理同一條訊息
+_tg_update_offset = 0
+
+def poll_telegram_commands():
+    """輪詢 Telegram getUpdates，處理 /set_loss 指令"""
+    global _tg_update_offset
+    if not TG_BOT_TOKEN:
+        return
+    
+    url = f"https://api.telegram.org/bot{TG_BOT_TOKEN}/getUpdates"
+    params = {"offset": _tg_update_offset, "timeout": 0, "limit": 20}
+    
+    try:
+        resp = requests.get(url, params=params, timeout=10)
+        if resp.status_code != 200:
+            return
+        data = resp.json()
+        if not data.get("ok"):
+            return
+        
+        for update in data.get("result", []):
+            _tg_update_offset = update["update_id"] + 1
+            message = update.get("message", {})
+            text = message.get("text", "").strip()
+            chat_id = str(message.get("chat", {}).get("id", ""))
+            
+            # 僅處理來自目標 chat 的指令
+            if chat_id != TG_CHAT_ID:
+                continue
+            
+            if text.startswith("/set_loss"):
+                parts = text.split()
+                if len(parts) == 2:
+                    try:
+                        new_val = float(parts[1])
+                        if new_val <= 0:
+                            raise ValueError("金額必須大於 0")
+                        config = load_config()
+                        config["default_loss_amount"] = new_val
+                        save_config(config)
+                        reply = f"✅ 預設虧損金額已更新為 <b>{new_val} USDT</b>"
+                        logger.info(f"⚙️ /set_loss 指令: 虧損金額更新為 {new_val}")
+                    except ValueError:
+                        reply = "❌ 格式錯誤，請使用: <code>/set_loss 數字</code>"
+                else:
+                    reply = "❌ 格式錯誤，請使用: <code>/set_loss 數字</code>"
+                
+                # 回覆訊息
+                send_url = f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendMessage"
+                payload = {"chat_id": chat_id, "text": reply, "parse_mode": "HTML"}
+                requests.post(send_url, json=payload, timeout=10)
+                
+    except Exception as e:
+        logger.warning(f"Telegram 指令輪詢異常: {e}")
+
+# ============================================================================
+# 主掃描流程
+# ============================================================================
+
 async def run_scan():
     logger.info("⏰ 開始執行 3D MA20 與 3H 條件長效追蹤掃描...")
     ex = get_exchange()
     watchlist = load_watchlist()
+    config = load_config()
+    default_loss = config.get("default_loss_amount", 6)
     
     try:
         try:
@@ -289,7 +418,7 @@ async def run_scan():
             coins = ["BTC/USDT:USDT", "ETH/USDT:USDT", "SOL/USDT:USDT", "XRP/USDT:USDT", "DOGE/USDT:USDT", "ADA/USDT:USDT"]
             precisions = {s: 4 for s in coins}; precisions.update({"BTC/USDT:USDT": 2, "ETH/USDT:USDT": 2})
 
-        count = 0
+        all_results = []
         total_coins = len(coins)
         for i in range(0, total_coins, 20):
             batch = coins[i:i+20]
@@ -301,12 +430,10 @@ async def run_scan():
                 sym = res['symbol']
                 if res['action'] == 'update' or res['action'] == 'keep':
                     watchlist[sym] = res['data']
+                    all_results.append(res)
                 elif res['action'] == 'remove':
                     if sym in watchlist:
                         del watchlist[sym]
-                
-                if res.get('pushed'):
-                    count += 1
             
             await asyncio.sleep(0.5)
             
@@ -314,8 +441,24 @@ async def run_scan():
         save_watchlist(watchlist)
         active_count = len(watchlist)
         
-        logger.info(f"✅ 掃描完成。推送訊號: {count} 個 / 當前追蹤名單總數: {active_count} 個")
-        if count == 0:
+        # === 分組推送 ===
+        watching_list = [r for r in all_results if not r.get('is_3h_met')]
+        triggered_list = [r for r in all_results if r.get('is_3h_met')]
+        
+        if watching_list:
+            send_watching_message(watching_list)
+        
+        for item in triggered_list:
+            send_triggered_message(item, default_loss)
+        
+        # 有任何結果時才發送系統設定訊息
+        if watching_list or triggered_list:
+            send_system_settings_message(config)
+        
+        pushed_count = len(watching_list) + len(triggered_list)
+        logger.info(f"✅ 掃描完成。關注中: {len(watching_list)} / 已觸發: {len(triggered_list)} / 追蹤總數: {active_count}")
+        
+        if not all_results:
             send_telegram_message(f"✅ <b>條件掃描完成</b>\n本次共掃描 {total_coins} 個幣種，無推播訊號。\n(當前清單追蹤中: {active_count} 個)")
     finally: 
         await ex.close()
@@ -339,6 +482,10 @@ async def scheduler():
                     logger.error(f"定時掃描異常: {e}")
                 last_day = now.day
                 last_exec_hour = now.hour
+            
+            # 每次迴圈都輪詢 Telegram 指令
+            poll_telegram_commands()
+            
         except Exception as e:
             logger.critical(f"💥 Scheduler 頂層異常 (已攔截): {e}")
         await asyncio.sleep(60)
@@ -369,4 +516,3 @@ bg_thread.start()
 
 if __name__ == '__main__':
     run_flask()
-
