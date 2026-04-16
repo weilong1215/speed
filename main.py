@@ -486,6 +486,45 @@ async def monitor_positions(exchange):
 
                 has_entry = any(str(o.get('clientOid') or o.get('clientOrderId')) == str(signal_id)
                                 for o in open_orders)
+
+                # ==============================================================
+                # 新增追高防護：尚未進場，但價格已達 10R 目標 -> 撤銷掛單
+                # ==============================================================
+                if not has_pos and has_entry:
+                    try:
+                        ticker = await exchange.fetch_ticker(symbol)
+                        current_price = float(ticker['last'])
+                        sl_price = float(sig['sl_price'])
+                        entry_price = float(sig['entry_price'])
+                        risk = abs(entry_price - sl_price)
+
+                        if risk > 0:
+                            is_runaway = False
+                            if direction == 'LONG' and current_price >= entry_price + 10 * risk:
+                                is_runaway = True
+                            elif direction == 'SHORT' and current_price <= entry_price - 10 * risk:
+                                is_runaway = True
+
+                            if is_runaway:
+                                logger.info(f"🏃 價格已達 10R ({symbol})，撤銷未成交進場單 {signal_id}")
+                                entry_orders = [o for o in open_orders if str(o.get('clientOrderId') or o.get('info', {}).get('clientOid') or "") == str(signal_id)]
+                                for eo in entry_orders:
+                                    try:
+                                        await exchange.cancel_order(eo['id'], symbol)
+                                    except Exception as e:
+                                        logger.warning(f"撤銷未成交單失敗 {eo['id']}: {e}")
+
+                                send_telegram_message(
+                                    f"<b>🏃 價格已達 10R (錯失進場)</b>\n\n"
+                                    f"💎 <b>交易對:</b> {get_base_coin(symbol)} [{direction}]\n"
+                                    f"📉 <b>狀態: 已自動撤銷未成交之進場單</b>"
+                                )
+                                sig['status'] = 'closed'
+                                continue
+                    except Exception as e:
+                        logger.warning(f"檢查未成交單價格異常 ({symbol}): {e}")
+                # ==============================================================
+
                 if not has_pos and not has_entry:
                     logger.info(f"🧹 偵測到歸零/孤兒訊號 {sig_key}，開始溯源清理...")
 
