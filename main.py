@@ -259,7 +259,7 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
                 h3_close = h3_row['close']
                 h3_low = h3_row['low']
                 
-                if h3_open < target_3d_high and h3_close > target_3d_high:
+                if h3_open <= target_3d_high and h3_close > target_3d_high:
                     is_3h_met = True
                     entry_price = h3_close
                     # 止損 = 該根 3H K棒最低點
