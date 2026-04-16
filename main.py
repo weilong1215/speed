@@ -150,12 +150,14 @@ def get_base_coin(symbol: str) -> str:
 def get_coid(o: dict) -> str:
     return str(o.get('clientOid') or o.get('info', {}).get('clientOid') or o.get('clientOrderId') or "")
 
-def send_telegram_message(message: str) -> bool:
+def send_telegram_message(message: str, reply_markup: dict = None) -> bool:
     if not TG_BOT_TOKEN or not TG_CHAT_ID:
         logger.warning("Telegram 配置缺失，跳過通知。")
         return False
     url = f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendMessage"
     payload = {"chat_id": TG_CHAT_ID, "text": message, "parse_mode": "HTML"}
+    if reply_markup is not None:
+        payload["reply_markup"] = reply_markup
     try:
         response = requests.post(url, json=payload, timeout=10)
         if response.status_code != 200:
@@ -854,12 +856,18 @@ def send_system_settings_message(config):
     msg = (
         f"⚙️ <b>系統快速設定</b>\n\n"
         f"💵 <b>預設虧損金額:</b> {loss} USDT\n"
-        f"🚫 <b>黑名單前綴:</b> {bl_str}\n\n"
-        f"📝 <b>修改預設虧損:</b> 回覆 <code>/set_loss 金額</code>\n"
-        f"➕ <b>新增黑名單:</b> 回覆 <code>/add_blacklist 名稱</code>\n"
-        f"➖ <b>移除黑名單:</b> 回覆 <code>/remove_blacklist 名稱</code>"
+        f"🚫 <b>黑名單前綴:</b> {bl_str}"
     )
-    send_telegram_message(msg)
+    
+    reply_markup = {
+        "inline_keyboard": [
+            [{"text": "📝 修改預設虧損", "callback_data": "action_set_loss"}],
+            [{"text": "➕ 新增黑名單", "callback_data": "action_add_bl"},
+             {"text": "➖ 移除黑名單", "callback_data": "action_rm_bl"}]
+        ]
+    }
+    
+    send_telegram_message(msg, reply_markup=reply_markup)
 
 # ============================================================================
 # Telegram 指令處理
@@ -869,7 +877,7 @@ def send_system_settings_message(config):
 _tg_update_offset = 0
 
 def poll_telegram_commands():
-    """輪詢 Telegram getUpdates，處理 /set_loss 指令"""
+    """輪詢 Telegram getUpdates，處理指令與 Callback Queries"""
     global _tg_update_offset
     if not TG_BOT_TOKEN:
         return
@@ -887,17 +895,62 @@ def poll_telegram_commands():
 
         for update in data.get("result", []):
             _tg_update_offset = update["update_id"] + 1
+
+            # 1. 處理 Callback Query
+            if "callback_query" in update:
+                cq = update["callback_query"]
+                chat_id = str(cq.get("message", {}).get("chat", {}).get("id", ""))
+                if chat_id != str(TG_CHAT_ID):
+                    continue
+                
+                # 回應 callback，消除按鈕等待圈圈
+                cb_id = cq.get("id")
+                req_url = f"https://api.telegram.org/bot{TG_BOT_TOKEN}/answerCallbackQuery"
+                requests.post(req_url, json={"callback_query_id": cb_id}, timeout=5)
+
+                action = cq.get("data", "")
+                prompt_text = ""
+                if action == "action_set_loss":
+                    prompt_text = "👉 請「回覆」此訊息，輸入新的【預設虧損金額】(純數字):"
+                elif action == "action_add_bl":
+                    prompt_text = "👉 請「回覆」此訊息，輸入要【加入黑名單】的幣種 (如 DOGE):"
+                elif action == "action_rm_bl":
+                    prompt_text = "👉 請「回覆」此訊息，輸入要【移除黑名單】的幣種:"
+
+                if prompt_text:
+                    send_url = f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendMessage"
+                    payload = {
+                        "chat_id": chat_id,
+                        "text": prompt_text,
+                        "reply_markup": {"force_reply": True, "selective": True}
+                    }
+                    requests.post(send_url, json=payload, timeout=10)
+                continue
+
+            # 2. 處理 Message
             message = update.get("message", {})
             text = message.get("text", "").strip()
             chat_id = str(message.get("chat", {}).get("id", ""))
 
-            # 僅處理來自目標 chat 的指令
-            if chat_id != TG_CHAT_ID:
+            # 僅處理來自目標 chat 的訊息
+            if chat_id != str(TG_CHAT_ID) or not text:
                 continue
 
+            # 判斷是否為針對 Prompt 的回覆
+            if "reply_to_message" in message:
+                reply_text = message["reply_to_message"].get("text", "")
+                if "【預設虧損金額】" in reply_text:
+                    text = f"/set_loss {text}"
+                elif "【加入黑名單】" in reply_text:
+                    text = f"/add_blacklist {text}"
+                elif "【移除黑名單】" in reply_text:
+                    text = f"/remove_blacklist {text}"
+
+            # 處理指令 (同時兼容手動輸入與按鈕回覆)
+            reply = ""
             if text.startswith("/set_loss"):
                 parts = text.split()
-                if len(parts) == 2:
+                if len(parts) >= 2:
                     try:
                         new_val = float(parts[1])
                         if new_val <= 0:
@@ -908,18 +961,17 @@ def poll_telegram_commands():
                         reply = f"✅ 預設虧損金額已更新為 <b>{new_val} USDT</b>"
                         logger.info(f"⚙️ /set_loss 指令: 虧損金額更新為 {new_val}")
                     except ValueError:
-                        reply = "❌ 格式錯誤，請使用: <code>/set_loss 數字</code>"
+                        reply = "❌ 格式錯誤，請輸入大於零的數字。"
                 else:
-                    reply = "❌ 格式錯誤，請使用: <code>/set_loss 數字</code>"
+                    reply = "❌ 格式錯誤，未提供數字。"
 
-                # 回覆訊息
                 send_url = f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendMessage"
                 payload = {"chat_id": chat_id, "text": reply, "parse_mode": "HTML"}
                 requests.post(send_url, json=payload, timeout=10)
 
             elif text.startswith("/add_blacklist"):
                 parts = text.split()
-                if len(parts) == 2:
+                if len(parts) >= 2:
                     new_bl = parts[1].upper()
                     config = load_config()
                     bl = config.get("blacklist", [])
@@ -932,7 +984,7 @@ def poll_telegram_commands():
                     else:
                         reply = f"⚠️ <b>{new_bl}</b> 已經在黑名單中"
                 else:
-                    reply = "❌ 格式錯誤，請使用: <code>/add_blacklist 幣種</code>"
+                    reply = "❌ 格式錯誤，未提供幣種名稱。"
 
                 send_url = f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendMessage"
                 payload = {"chat_id": chat_id, "text": reply, "parse_mode": "HTML"}
@@ -940,7 +992,7 @@ def poll_telegram_commands():
 
             elif text.startswith("/remove_blacklist"):
                 parts = text.split()
-                if len(parts) == 2:
+                if len(parts) >= 2:
                     rm_bl = parts[1].upper()
                     config = load_config()
                     bl = config.get("blacklist", [])
@@ -953,7 +1005,7 @@ def poll_telegram_commands():
                     else:
                         reply = f"⚠️ <b>{rm_bl}</b> 不在黑名單中"
                 else:
-                    reply = "❌ 格式錯誤，請使用: <code>/remove_blacklist 幣種</code>"
+                    reply = "❌ 格式錯誤，未提供幣種名稱。"
 
                 send_url = f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendMessage"
                 payload = {"chat_id": chat_id, "text": reply, "parse_mode": "HTML"}
