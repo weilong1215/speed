@@ -260,9 +260,9 @@ async def place_order(exchange, symbol, direction, entry, sl, precision, fixed_l
 
                 actual_risk = qty * risk_per_unit
                 if actual_risk < fixed_loss_usdt * 0.9:
-                    msg = f"⚠️ 資金不足以建立標準部位 ({actual_risk:.2f}/{fixed_loss_usdt})\\n可用餘額: {available:.2f} USDT"
+                    msg = f"⚠️ 資金不足以建立標準部位 ({actual_risk:.2f}/{fixed_loss_usdt})\n可用餘額: {available:.2f} USDT"
                     logger.warning(msg)
-                    send_telegram_message(f"<b>⚠️ 資金不足</b>\\n{get_base_coin(symbol)}\\n可用: {available:.2f} USDT")
+                    send_telegram_message(f"<b>⚠️ 資金不足</b>\n{get_base_coin(symbol)}\n可用: {available:.2f} USDT")
                     break
 
                 side = 'buy' if direction == 'LONG' else 'sell'
@@ -287,9 +287,9 @@ async def place_order(exchange, symbol, direction, entry, sl, precision, fixed_l
                 })
                 save_active_signals(signals)
                 send_telegram_message(
-                    f"<b>🤖 自動下單 ({leverage}x)</b>\\n\\n"
-                    f"💎 {get_base_coin(symbol)} [{direction}]\\n"
-                    f"🎯 進場: <code>{entry:.{precision}f}</code>\\n"
+                    f"<b>🤖 自動下單 ({leverage}x)</b>\n\n"
+                    f"💎 {get_base_coin(symbol)} [{direction}]\n"
+                    f"🎯 進場: <code>{entry:.{precision}f}</code>\n"
                     f"🛑 止損: <code>{sl:.{precision}f}</code>"
                 )
                 return order
@@ -354,8 +354,8 @@ async def ensure_next_tp(exchange, symbol, side, sig, size, saved_signals, open_
 
             # 通知
             send_telegram_message(
-                f"<b>🎯 TP{next_tier} 成交</b>\\n\\n"
-                f"💎 {get_base_coin(symbol)} [{direction}]\\n"
+                f"<b>🎯 TP{next_tier} 成交</b>\n\n"
+                f"💎 {get_base_coin(symbol)} [{direction}]\n"
                 f"📊 剩餘倉位: {size:.{precision}f}"
             )
 
@@ -537,8 +537,8 @@ async def monitor_positions(exchange):
                             logger.warning(f"撤銷殘留單失敗 {oo['id']}: {e}")
 
                     if close_reason:
-                        msg = (f"<b>{close_reason}</b>\\n\\n"
-                               f"💎 <b>交易對:</b> {get_base_coin(symbol)}\\n"
+                        msg = (f"<b>{close_reason}</b>\n\n"
+                               f"💎 <b>交易對:</b> {get_base_coin(symbol)}\n"
                                f"📉 <b>當前狀態: 倉位已清結</b>")
                         send_telegram_message(msg)
 
@@ -724,6 +724,17 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
                         entry_price = h3_close
                         stop_loss = h3_low
                         trigger_ts = int(h3_row['ts'])
+
+            # 額外檢查：當前未收盤的 3H K 棒是否已碰觸止損
+            if is_3h_met:
+                current_3h_candles = df_1h[df_1h['3h_period'] >= now_utc_3h_fl]
+                if not current_3h_candles.empty:
+                    current_3h_low = current_3h_candles['low'].min()
+                    if current_3h_low <= stop_loss:
+                        is_3h_met = False
+                        entry_price = 0.0
+                        stop_loss = 0.0
+                        trigger_ts = 0
         # ========================
 
         d1_date_str = pd.to_datetime(target_info['dt_str']).strftime('%Y-%m-%d')
@@ -761,13 +772,13 @@ def send_watching_message(watching_list):
             date_groups[d] = []
         date_groups[d].append(get_base_coin(item['symbol']))
 
-    lines = ["👀 <b>[關注中]</b>\\n"]
+    lines = ["👀 <b>[關注中]</b>\n"]
     for date_key in sorted(date_groups.keys()):
         coins = " · ".join(date_groups[date_key])
         lines.append(f"📅 {date_key}")
-        lines.append(f"💎 {coins}\\n")
+        lines.append(f"💎 {coins}\n")
 
-    send_telegram_message("\\n".join(lines))
+    send_telegram_message("\n".join(lines))
 
 def send_triggered_message(item, default_loss):
     """3H 已成立的幣種，獨立一則訊息，含倉位價值"""
@@ -781,11 +792,11 @@ def send_triggered_message(item, default_loss):
     position_value = default_loss / loss_pct if loss_pct > 0 else 0
 
     msg = (
-        f"🟢 <b>[做多] 3D MA20 吞噬轉換</b>\\n\\n"
-        f"💎 <b>交易對:</b> {display_symbol}\\n"
-        f"📅 <b>3D K棒起始日期:</b> {item['d1_date']}\\n\\n"
-        f"📍 <b>進場價格:</b> <code>{entry:.{precision}f}</code>\\n"
-        f"🛡️ <b>止損價格:</b> <code>{sl:.{precision}f}</code>\\n"
+        f"🟢 <b>[做多] 3D MA20 吞噬轉換</b>\n\n"
+        f"💎 <b>交易對:</b> {display_symbol}\n"
+        f"📅 <b>3D K棒起始日期:</b> {item['d1_date']}\n\n"
+        f"📍 <b>進場價格:</b> <code>{entry:.{precision}f}</code>\n"
+        f"🛡️ <b>止損價格:</b> <code>{sl:.{precision}f}</code>\n"
         f"💰 <b>倉位價值:</b> <code>{position_value:.2f} USDT</code>"
     )
     send_telegram_message(msg)
@@ -797,11 +808,11 @@ def send_system_settings_message(config):
     bl_str = ", ".join(bl) if bl else "無"
 
     msg = (
-        f"⚙️ <b>系統快速設定</b>\\n\\n"
-        f"💵 <b>預設虧損金額:</b> {loss} USDT\\n"
-        f"🚫 <b>黑名單前綴:</b> {bl_str}\\n\\n"
-        f"📝 <b>修改預設虧損:</b> 回覆 <code>/set_loss 金額</code>\\n"
-        f"➕ <b>新增黑名單:</b> 回覆 <code>/add_blacklist 名稱</code>\\n"
+        f"⚙️ <b>系統快速設定</b>\n\n"
+        f"💵 <b>預設虧損金額:</b> {loss} USDT\n"
+        f"🚫 <b>黑名單前綴:</b> {bl_str}\n\n"
+        f"📝 <b>修改預設虧損:</b> 回覆 <code>/set_loss 金額</code>\n"
+        f"➕ <b>新增黑名單:</b> 回覆 <code>/add_blacklist 名稱</code>\n"
         f"➖ <b>移除黑名單:</b> 回覆 <code>/remove_blacklist 名稱</code>"
     )
     send_telegram_message(msg)
@@ -966,7 +977,11 @@ async def run_scan():
         if watching_list:
             send_watching_message(watching_list)
 
-        # === 3H 觸發後下單邏輯 ===
+        # 所有 3H 觸發都先推送通知 (不受下單防護影響)
+        for item in triggered_list:
+            send_triggered_message(item, default_loss)
+
+        # === 3H 觸發後下單邏輯 (獨立防護) ===
         signals = load_active_signals()
         for item in triggered_list:
             sym = item['symbol']
@@ -992,9 +1007,6 @@ async def run_scan():
                 logger.debug(f"  {sym} 交易所已有持倉，跳過下單")
                 continue
 
-            # 通知 + 下單
-            send_triggered_message(item, default_loss)
-
             if BITGET_API_KEY:
                 order = await place_order(
                     ex, sym, 'LONG', item['entry_price'], item['stop_loss'],
@@ -1016,7 +1028,7 @@ async def run_scan():
         logger.info(f"✅ 掃描完成。關注中: {len(watching_list)} / 已觸發: {len(triggered_list)} / 追蹤總數: {active_count}")
 
         if not all_results:
-            send_telegram_message(f"✅ <b>條件掃描完成</b>\\n本次共掃描 {total_coins} 個幣種，無推播訊號。\\n(當前清單追蹤中: {active_count} 個)")
+            send_telegram_message(f"✅ <b>條件掃描完成</b>\n本次共掃描 {total_coins} 個幣種，無推播訊號。\n(當前清單追蹤中: {active_count} 個)")
     finally:
         await ex.close()
 
