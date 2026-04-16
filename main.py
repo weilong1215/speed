@@ -43,14 +43,9 @@ if sys.stdout.encoding != 'utf-8':
 TG_BOT_TOKEN = os.getenv("TG_BOT_TOKEN", "")
 TG_CHAT_ID = os.getenv("TG_CHAT_ID", "")
 
-DEFAULT_BLACKLIST = [
-    'XAU', 'XAG', 'WTI', 'BRENT',
-    'SPX', 'NDX', 'DJI', 'VIX', 'DXY',
-    'EUR', 'GBP', 'JPY', 'AUD', 'CAD', 'CHF',
-    'AAPL', 'TSLA', 'AMZN', 'GOOG', 'MSFT', 'META', 'NVDA', 'MSTR'
-]
-
 def is_crypto_symbol(symbol: str, blacklist: list) -> bool:
+    if not blacklist:
+        return True
     base = symbol.split('/')[0]
     return not any(base == p or base.startswith(p) for p in blacklist)
 
@@ -90,11 +85,11 @@ def load_config():
             with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
                 config = json.load(f)
             if "blacklist" not in config:
-                config["blacklist"] = DEFAULT_BLACKLIST.copy()
+                config["blacklist"] = []
             return config
         except Exception as e:
             logger.error(f"讀取設定檔失敗: {e}")
-    return {"default_loss_amount": 6, "blacklist": DEFAULT_BLACKLIST.copy()}
+    return {"default_loss_amount": 6, "blacklist": []}
 
 def save_config(data):
     try:
