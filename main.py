@@ -362,6 +362,7 @@ async def ensure_next_tp(exchange, symbol, side, sig, size, saved_signals, open_
         # 計算當階 TP 價格與數量
         tp_price = entry + (next_tier + 1) * TP_STEP_R * risk if direction == 'LONG' \
             else entry - (next_tier + 1) * TP_STEP_R * risk
+        tp_price = round(tp_price, precision)
         tp_qty = float(exchange.amount_to_precision(symbol, size * TP_CLOSE_PCT))
 
         # 最小名義價值檢查
@@ -704,15 +705,17 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
 
             target_3d_high = target_info['high']
 
-            # 3H 觸發 + SL 失效回退邏輯
+            # 3H 觸發 + SL/10R 失效回退邏輯
             for _, h3_row in df_3h_after_c.iterrows():
                 h3_open = h3_row['open']
                 h3_close = h3_row['close']
                 h3_low = h3_row['low']
+                h3_high = h3_row['high']
 
                 if is_3h_met:
-                    # 已觸發，檢查後續 K 棒是否碰到止損 → 失效回退
-                    if h3_low <= stop_loss:
+                    # 已觸發，檢查後續 K 棒是否碰到止損或止盈(10R) → 失效回退
+                    risk = entry_price - stop_loss
+                    if h3_low <= stop_loss or (risk > 0 and h3_high >= entry_price + 10 * risk):
                         is_3h_met = False
                         entry_price = 0.0
                         stop_loss = 0.0
@@ -725,12 +728,14 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
                         stop_loss = h3_low
                         trigger_ts = int(h3_row['ts'])
 
-            # 額外檢查：當前未收盤的 3H K 棒是否已碰觸止損
+            # 額外檢查：當前未收盤的 3H K 棒是否已碰觸止損或止盈(10R)
             if is_3h_met:
                 current_3h_candles = df_1h[df_1h['3h_period'] >= now_utc_3h_fl]
                 if not current_3h_candles.empty:
                     current_3h_low = current_3h_candles['low'].min()
-                    if current_3h_low <= stop_loss:
+                    current_3h_high = current_3h_candles['high'].max()
+                    risk = entry_price - stop_loss
+                    if current_3h_low <= stop_loss or (risk > 0 and current_3h_high >= entry_price + 10 * risk):
                         is_3h_met = False
                         entry_price = 0.0
                         stop_loss = 0.0
