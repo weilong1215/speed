@@ -207,7 +207,7 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
                 
         # 2. 如果沒有新訊號，但仍在追蹤名單中，執行剔除判斷
         if target_info is None and cached_info is not None:
-            if row_c['close'] > cached_info['high'] or row_c['close'] < cached_info['low']:
+            if row_c['close'] > cached_info['high'] or row_c['close'] < cached_info['low'] or row_c['close'] < row_c['ma20']:
                 return {'symbol': symbol, 'action': 'remove'}
             else:
                 target_info = cached_info
@@ -336,9 +336,9 @@ def send_system_settings_message(config):
         f"⚙️ <b>系統快速設定</b>\n\n"
         f"💵 <b>預設虧損金額:</b> {loss} USDT\n"
         f"🚫 <b>黑名單前綴:</b> {bl_str}\n\n"
-        f"📝 <b>修改預設虧損:</b> 回覆 <code>/set_loss 10</code>\n"
-        f"➕ <b>新增黑名單:</b> 回覆 <code>/add_blacklist BTC</code>\n"
-        f"➖ <b>移除黑名單:</b> 回覆 <code>/remove_blacklist BTC</code>"
+        f"📝 <b>修改預設虧損:</b> 回覆 <code>/set_loss 金額</code>\n"
+        f"➕ <b>新增黑名單:</b> 回覆 <code>/add_blacklist 名稱</code>\n"
+        f"➖ <b>移除黑名單:</b> 回覆 <code>/remove_blacklist 名稱</code>"
     )
     send_telegram_message(msg)
 
