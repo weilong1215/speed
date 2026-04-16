@@ -513,6 +513,7 @@ async def monitor_positions(exchange):
                                 for eo in entry_orders:
                                     try:
                                         await exchange.cancel_order(eo['id'], symbol)
+                                        open_orders = [o for o in open_orders if o['id'] != eo['id']]
                                     except Exception as e:
                                         logger.warning(f"撤銷未成交單失敗 {eo['id']}: {e}")
 
@@ -575,8 +576,10 @@ async def monitor_positions(exchange):
                             is_plan = cid_str.startswith("sl_") or cid_str.startswith("tp")
                             await exchange.cancel_order(oo['id'], symbol, params={'stop': True} if is_plan else {})
                             logger.info(f"🚫 已撤銷殘留單: {oo['id']} (Stop: {is_plan})")
+                            open_orders = [o for o in open_orders if o['id'] != oo['id']]
                         except Exception as e:
-                            logger.warning(f"撤銷殘留單失敗 {oo['id']}: {e}")
+                            if "43001" not in str(e) and "does not exist" not in str(e).lower():
+                                logger.warning(f"撤銷殘留單失敗 {oo['id']}: {e}")
 
                     if close_reason:
                         msg = (f"<b>{close_reason}</b>\n\n"
@@ -616,10 +619,12 @@ async def monitor_positions(exchange):
                         try:
                             is_plan = not is_entry
                             await exchange.cancel_order(oo['id'], symbol, params={'stop': True} if is_plan else {})
+                            open_orders = [o for o in open_orders if o['id'] != oo['id']]
                         except IndexError:
                             logger.info(f"孤兒單 {co_id} 已自行消失 (API 空回應)，視為安全。")
                         except Exception as e:
-                            logger.error(f"盲目清理失敗 {co_id}: {e}")
+                            if "43001" not in str(e) and "does not exist" not in str(e).lower():
+                                logger.error(f"盲目清理失敗 {co_id}: {e}")
 
         save_active_signals(saved_signals)
     except Exception as e:
