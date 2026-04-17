@@ -810,20 +810,20 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
 # 訊息推送模組
 # ============================================================================
 
-def send_watching_message(watching_list):
-    """合併所有 3H 未成立的幣種為一則關注中訊息，按日期排列"""
-    if not watching_list:
+def send_grouped_message(item_list, title):
+    """合併傳入的幣種清單為一則群組訊息，按日期排列"""
+    if not item_list:
         return
 
     # 按 d1_date 分組
     date_groups = {}
-    for item in watching_list:
-        d = item['d1_date']
+    for item in item_list:
+        d = item.get('d1_date', '未知日期')
         if d not in date_groups:
             date_groups[d] = []
         date_groups[d].append(get_base_coin(item['symbol']))
 
-    lines = ["👀 <b>[關注中]</b>\n"]
+    lines = [f"<b>{title}</b>\n"]
     for date_key in sorted(date_groups.keys()):
         coins = " · ".join(date_groups[date_key])
         lines.append(f"📅 {date_key}")
@@ -1031,65 +1031,88 @@ async def run_scan():
         save_watchlist(watchlist)
         active_count = len(watchlist)
 
-        # === 分組推送 ===
-        watching_list = [r for r in all_results if not r.get('is_3h_met')]
-        triggered_list = [r for r in all_results if r.get('is_3h_met')]
-
-        if watching_list:
-            send_watching_message(watching_list)
-
-        # 所有 3H 觸發都先推送通知 (不受下單防護影響)
-        for item in triggered_list:
-            send_triggered_message(item, default_loss)
-
-        # === 3H 觸發後下單邏輯 (獨立防護) ===
+        # === 分組歸類與下單邏輯 ===
         signals = load_active_signals()
-        for item in triggered_list:
+        
+        # 收集當前所有已持倉或有 active 掛單的幣種
+        holding_map = {}
+        for slist in signals.values():
+            for s in slist:
+                if s['status'] == 'active':
+                    sym = s['symbol']
+                    ts = s.get('timestamp', 0)
+                    dt_str = datetime.fromtimestamp(ts/1000).strftime('%Y-%m-%d') if ts > 0 else '持續追蹤'
+                    holding_map[sym] = {'symbol': sym, 'd1_date': dt_str}
+                    
+        for p in existing_positions:
+            if p['side'].upper() == 'LONG':
+                sym = p['symbol']
+                if sym not in holding_map:
+                    holding_map[sym] = {'symbol': sym, 'd1_date': '外部建倉'}
+
+        holding_items = []
+        real_watching = []
+        real_new_triggers = []
+
+        for sym, data in holding_map.items():
+            holding_items.append(data)
+        
+        holding_items_dict = {item['symbol']: item for item in holding_items}
+
+        for item in all_results:
             sym = item['symbol']
-            trigger_ts = item.get('trigger_ts', 0)
-            name = get_base_coin(sym)
+            
+            if sym in holding_items_dict:
+                # 已經在持倉中，更新其 3D 日期標籤
+                holding_items_dict[sym]['d1_date'] = item.get('d1_date', holding_items_dict[sym]['d1_date'])
+            elif item.get('is_3h_met'):
+                cached = watchlist.get(sym, {})
+                trigger_ts = item.get('trigger_ts', 0)
+                # 若同一觸發已處理過，不再進場，視為錯失後持續關注
+                if cached.get('last_trigger_ts') == trigger_ts and trigger_ts > 0:
+                    real_watching.append(item)
+                else:
+                    real_new_triggers.append(item)
+            else:
+                real_watching.append(item)
 
-            # 防護 1：同一觸發已處理過 (last_trigger_ts 比對)
-            cached = watchlist.get(sym, {})
-            if cached.get('last_trigger_ts') == trigger_ts and trigger_ts > 0:
-                logger.debug(f"  {sym} 觸發 ts={trigger_ts} 已處理過，跳過")
-                continue
+        holding_items = list(holding_items_dict.values())
 
-            # 防護 2：active_signals 已有此幣的 active 訊號 (掛單中或持倉中)
-            sig_key = f"{name}_LONG"
-            has_active_signal = any(s['status'] == 'active' for s in signals.get(sig_key, []))
-            if has_active_signal:
-                logger.debug(f"  {sym} 已有 active signal，跳過下單")
-                continue
-
-            # 防護 3：交易所已有此幣的持倉
-            has_position = any(p['symbol'] == sym and p['side'].upper() == 'LONG' for p in existing_positions)
-            if has_position:
-                logger.debug(f"  {sym} 交易所已有持倉，跳過下單")
-                continue
-
+        # === 執行下單 ===
+        for item in real_new_triggers:
+            sym = item['symbol']
             if BITGET_API_KEY:
                 order = await place_order(
                     ex, sym, 'LONG', item['entry_price'], item['stop_loss'],
                     item['precision'], default_loss
                 )
                 if order:
-                    # 記錄 trigger_ts 防重複
                     if sym in watchlist:
-                        watchlist[sym]['last_trigger_ts'] = trigger_ts
+                        watchlist[sym]['last_trigger_ts'] = item.get('trigger_ts', 0)
                     save_watchlist(watchlist)
-                    # 重新載入 signals (place_order 內部已寫入)
-                    signals = load_active_signals()
 
-        # 有任何結果時才發送系統設定訊息
-        if watching_list or triggered_list:
+        # === 排序與推播 ===
+        # 1. 新進場訊號 (Triggered)
+        for item in real_new_triggers:
+            send_triggered_message(item, default_loss)
+            
+        # 2. 持倉中 (Holding)
+        if holding_items:
+            send_grouped_message(holding_items, "💼 <b>[持倉中]</b>")
+            
+        # 3. 關注中 (Watching)
+        if real_watching:
+            send_grouped_message(real_watching, "👀 <b>[關注中]</b>")
+
+        # 4. 系統設定 (System Settings)
+        if real_new_triggers or holding_items or real_watching:
             send_system_settings_message(config)
 
-        pushed_count = len(watching_list) + len(triggered_list)
-        logger.info(f"✅ 掃描完成。關注中: {len(watching_list)} / 已觸發: {len(triggered_list)} / 追蹤總數: {active_count}")
+        active_count = len(watchlist)
+        logger.info(f"✅ 掃描完成。新觸發: {len(real_new_triggers)} / 持倉: {len(holding_items)} / 關注: {len(real_watching)} / 追蹤總數: {active_count}")
 
-        if not all_results:
-            send_telegram_message(f"✅ <b>條件掃描完成</b>\n本次共掃描 {total_coins} 個幣種，無推播訊號。\n(當前清單追蹤中: {active_count} 個)")
+        if not real_new_triggers and not holding_items and not real_watching:
+            send_telegram_message(f"✅ <b>條件掃描完成</b>\n本次共掃描 {total_coins} 個幣種，無滿足條件標的。\n(當前清單追蹤中: {active_count} 個)")
     finally:
         await ex.close()
 
