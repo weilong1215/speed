@@ -843,9 +843,8 @@ def send_triggered_message(item, default_loss):
     position_value = default_loss / loss_pct if loss_pct > 0 else 0
 
     msg = (
-        f"🟢 <b>[做多] 3D MA20 吞噬轉換</b>\n\n"
         f"💎 <b>交易對:</b> {display_symbol}\n"
-        f"📅 <b>3D K棒起始日期:</b> {item['d1_date']}\n\n"
+        f"📅 <b>吞噬轉換起始日期:</b> {item['d1_date']}\n\n"
         f"📍 <b>進場價格:</b> <code>{entry:.{precision}f}</code>\n"
         f"🛡️ <b>止損價格:</b> <code>{sl:.{precision}f}</code>\n"
         f"💰 <b>倉位價值:</b> <code>{position_value:.2f} USDT</code>"
