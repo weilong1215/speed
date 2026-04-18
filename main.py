@@ -757,15 +757,34 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
                 h3_close = h3_row['close']
                 h3_low = h3_row['low']
                 h3_high = h3_row['high']
+                h3_ts = h3_row['ts']
 
                 if is_3h_met:
-                    # 已觸發，檢查後續 K 棒是否碰到止損或止盈(10R) → 失效回退
+                    # 1. 已觸發，檢查後續 K 棒是否碰到原始止損或止盈(10R) → 失效回退
                     risk = entry_price - stop_loss
                     if h3_low <= stop_loss or (risk > 0 and h3_high >= entry_price + 10 * risk):
                         is_3h_met = False
                         entry_price = 0.0
                         stop_loss = 0.0
                         trigger_ts = 0
+                        continue
+                        
+                    # 2. 日線保護止損檢查
+                    closed_1d = df[df['ts'] + 86400000 <= h3_ts]
+                    if len(closed_1d) >= 2:
+                        last_closed = closed_1d.iloc[-1]
+                        prev_closed = closed_1d.iloc[-2]
+                        last_close_time = last_closed['ts'] + 86400000
+                        if last_close_time > trigger_ts:
+                            prev_body_high = max(prev_closed['open'], prev_closed['close'])
+                            if last_closed['close'] > prev_body_high and last_closed['low'] > entry_price:
+                                protect_sl = last_closed['low']
+                                if h3_low <= protect_sl:
+                                    is_3h_met = False
+                                    entry_price = 0.0
+                                    stop_loss = 0.0
+                                    trigger_ts = 0
+                                    continue
                 else:
                     # 尋找新觸發：開盤在 3D High 以下，收盤突破 3D High
                     if h3_open <= target_3d_high and h3_close > target_3d_high:
@@ -780,12 +799,28 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
                 if not current_3h_candles.empty:
                     current_3h_low = current_3h_candles['low'].min()
                     current_3h_high = current_3h_candles['high'].max()
+                    current_ts = int(time.time() * 1000)
                     risk = entry_price - stop_loss
                     if current_3h_low <= stop_loss or (risk > 0 and current_3h_high >= entry_price + 10 * risk):
                         is_3h_met = False
                         entry_price = 0.0
                         stop_loss = 0.0
                         trigger_ts = 0
+                    else:
+                        closed_1d = df[df['ts'] + 86400000 <= current_ts]
+                        if len(closed_1d) >= 2:
+                            last_closed = closed_1d.iloc[-1]
+                            prev_closed = closed_1d.iloc[-2]
+                            last_close_time = last_closed['ts'] + 86400000
+                            if last_close_time > trigger_ts:
+                                prev_body_high = max(prev_closed['open'], prev_closed['close'])
+                                if last_closed['close'] > prev_body_high and last_closed['low'] > entry_price:
+                                    protect_sl = last_closed['low']
+                                    if current_3h_low <= protect_sl:
+                                        is_3h_met = False
+                                        entry_price = 0.0
+                                        stop_loss = 0.0
+                                        trigger_ts = 0
         # ========================
 
         d1_date_str = pd.to_datetime(target_info['dt_str']).strftime('%Y-%m-%d')
