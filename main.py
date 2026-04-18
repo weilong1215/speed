@@ -346,7 +346,7 @@ async def ensure_next_tp(exchange, symbol, side, sig, size, saved_signals, open_
         original_qty = sig['quantity']
         expected_remaining = original_qty * (0.75 ** (next_tier + 1))
 
-        if size <= expected_remaining * 1.05 and next_tier > 0:
+        if size <= expected_remaining * 1.05:
             # 倉位已縮減至預期水準 → 上一階已成交，推進至下一階
             sig['tp_next_tier'] = next_tier + 1
             next_tier = sig['tp_next_tier']
@@ -821,11 +821,20 @@ def send_grouped_message(item_list, title):
         d = item.get('d1_date', '未知日期')
         if d not in date_groups:
             date_groups[d] = []
-        date_groups[d].append(get_base_coin(item['symbol']))
+        date_groups[d].append(item)
 
     lines = [f"<b>{title}</b>\n"]
     for date_key in sorted(date_groups.keys()):
-        coins = " · ".join(date_groups[date_key])
+        coin_strs = []
+        for item in date_groups[date_key]:
+            base = get_base_coin(item['symbol'])
+            if 'protect_sl' in item:
+                psl = item['protect_sl']
+                psl_str = f"{int(psl)}" if isinstance(psl, float) and psl.is_integer() else f"{psl}"
+                coin_strs.append(f"{base} (保護止損：{psl_str})")
+            else:
+                coin_strs.append(base)
+        coins = " · ".join(coin_strs)
         lines.append(f"📅 {date_key}")
         lines.append(f"💎 {coins}\n")
 
@@ -1090,6 +1099,36 @@ async def run_scan():
                     if sym in watchlist:
                         watchlist[sym]['last_trigger_ts'] = item.get('trigger_ts', 0)
                     save_watchlist(watchlist)
+
+        # === 處理持倉保護止損提示 ===
+        if holding_items and BITGET_API_KEY:
+            for item in holding_items:
+                sym = item['symbol']
+                try:
+                    entry_price = 0
+                    entry_time = 0
+                    for slist in signals.values():
+                        for s in slist:
+                            if s['symbol'] == sym and s['status'] == 'active':
+                                entry_price = float(s['entry_price'])
+                                entry_time = int(s.get('timestamp', 0))
+                                break
+                    if entry_price > 0:
+                        batch = await ex.fetch_ohlcv(sym, '1d', limit=10)
+                        if batch:
+                            df_1d = pd.DataFrame(batch, columns=['ts', 'open', 'high', 'low', 'close', 'vol'])
+                            now_utc_1d_fl = int(pd.Timestamp.now(tz='UTC').floor('1d').timestamp() * 1000)
+                            closed_1d = df_1d[df_1d['ts'] < now_utc_1d_fl]
+                            if len(closed_1d) >= 2:
+                                last_closed = closed_1d.iloc[-1]
+                                prev_closed = closed_1d.iloc[-2]
+                                last_close_time = last_closed['ts'] + 24 * 3600 * 1000
+                                if last_close_time > entry_time:
+                                    prev_body_high = max(prev_closed['open'], prev_closed['close'])
+                                    if last_closed['close'] > prev_body_high and last_closed['low'] > entry_price:
+                                        item['protect_sl'] = last_closed['low']
+                except Exception as e:
+                    logger.warning(f"獲取保護止損失敗 ({sym}): {e}")
 
         # === 排序與推播 ===
         # 1. 新進場訊號 (Triggered)
