@@ -700,14 +700,26 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
             c_above_ma20 = row_c['close'] > row_c['ma20']
 
             if a_is_bearish and b_is_bearish and b_engulf_a and c_is_bullish and c_engulf_b and c_above_ma20:
-                target_info = {
-                    'dt_str': row_c['dt'].isoformat(),
-                    'close': float(row_c['close']),
-                    'high': float(row_c['high']),
-                    'low': float(row_c['low']),
-                    'ma20': float(row_c['ma20'])
-                }
-                action = 'update'
+                # 找到最新發生的圖型，立即檢驗是否被後續 3D K 棒淘汰
+                is_invalid = False
+                for j in range(1, i):
+                    check_bar = df_3d.iloc[-j]
+                    if check_bar['close'] > row_c['high'] or check_bar['close'] < row_c['low'] or check_bar['close'] < check_bar['ma20']:
+                        is_invalid = True
+                        break
+                
+                if not is_invalid:
+                    target_info = {
+                        'dt_str': row_c['dt'].isoformat(),
+                        'close': float(row_c['close']),
+                        'high': float(row_c['high']),
+                        'low': float(row_c['low']),
+                        'ma20': float(row_c['ma20'])
+                    }
+                    action = 'update'
+                else:
+                    # 選項A：最新發生的圖型已被淘汰，直接放棄，不尋找更舊的圖型
+                    return {'symbol': symbol, 'action': 'remove'}
                 break
 
         # 2. 如果沒有新訊號，但仍在追蹤名單中，執行剔除判斷 (針對最新已收盤 3D 進行檢驗)
