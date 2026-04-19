@@ -677,15 +677,20 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
         if len(df_3d) < 3: return None
 
         df_3d['ma20'] = df_3d['close'].rolling(window=20).mean()
-        row_c = df_3d.iloc[-1]
+        latest_closed_3d = df_3d.iloc[-1]
 
         target_info = None
         action = None
 
-        # 1. 確認是否出現新的 3D 條件 (無條件覆蓋)
-        if len(df_3d) >= 23 and not pd.isna(row_c['ma20']):
-            row_a = df_3d.iloc[-3]
-            row_b = df_3d.iloc[-2]
+        # 1. 掃描過去 10 根已收盤的 3D K 棒 (由新到舊，找到最新發生的即停止)
+        scan_limit = min(10, len(df_3d) - 2)
+        for i in range(1, scan_limit + 1):
+            row_c = df_3d.iloc[-i]
+            row_b = df_3d.iloc[-i - 1]
+            row_a = df_3d.iloc[-i - 2]
+
+            if pd.isna(row_c['ma20']):
+                continue
 
             a_is_bearish = row_a['close'] < row_a['open']
             b_is_bearish = row_b['close'] < row_b['open']
@@ -703,10 +708,11 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
                     'ma20': float(row_c['ma20'])
                 }
                 action = 'update'
+                break
 
-        # 2. 如果沒有新訊號，但仍在追蹤名單中，執行剔除判斷
+        # 2. 如果沒有新訊號，但仍在追蹤名單中，執行剔除判斷 (針對最新已收盤 3D 進行檢驗)
         if target_info is None and cached_info is not None:
-            if row_c['close'] > cached_info['high'] or row_c['close'] < cached_info['low'] or row_c['close'] < row_c['ma20']:
+            if latest_closed_3d['close'] > cached_info['high'] or latest_closed_3d['close'] < cached_info['low'] or latest_closed_3d['close'] < latest_closed_3d['ma20']:
                 return {'symbol': symbol, 'action': 'remove'}
             else:
                 target_info = cached_info
@@ -717,16 +723,24 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
             return None
 
         # === 3H 條件進階判斷 (針對 target_info 進行校驗) ===
-        fetch_since_1h = now_ms - (30 * 24 * 3600 * 1000)
-        batch_1h = await exchange.fetch_ohlcv(symbol, '1h', since=fetch_since_1h, limit=720)
+        # 擴大獲取 45 天 1H 資料 (約 1080 筆)，使用迴圈分批拉取
+        fetch_since_1h = now_ms - (45 * 24 * 3600 * 1000)
+        ohlcv_1h = []
+        curr_1h = fetch_since_1h
+        for _ in range(3):
+            batch_1h = await exchange.fetch_ohlcv(symbol, '1h', since=curr_1h, limit=500)
+            if not batch_1h: break
+            ohlcv_1h.extend(batch_1h)
+            curr_1h = batch_1h[-1][0] + (3600 * 1000)
+            if curr_1h >= now_ms: break
 
         is_3h_met = False
         entry_price = 0.0
         stop_loss = 0.0
         trigger_ts = 0
 
-        if batch_1h:
-            df_1h = pd.DataFrame(batch_1h, columns=['ts', 'open', 'high', 'low', 'close', 'vol']).drop_duplicates(subset=['ts']).reset_index(drop=True)
+        if ohlcv_1h:
+            df_1h = pd.DataFrame(ohlcv_1h, columns=['ts', 'open', 'high', 'low', 'close', 'vol']).drop_duplicates(subset=['ts']).reset_index(drop=True)
             df_1h['dt'] = pd.to_datetime(df_1h['ts'], unit='ms', utc=True)
 
             df_1h['3h_period'] = df_1h['dt'].dt.floor('3h')
