@@ -455,7 +455,19 @@ async def monitor_positions(exchange):
                         for dup in my_sl_orders[1:]:
                             await exchange.cancel_order(dup['id'], symbol, params={'stop': True})
 
-                    # B. 確保止損單掛出
+                    # B. SL 價格不一致偵測：保護止損上移後，撤銷舊單讓補掛機制用新價格重新掛出
+                    if len(my_sl_orders) == 1:
+                        existing_trig = float(my_sl_orders[0].get('triggerPrice', 0) or my_sl_orders[0].get('info', {}).get('triggerPrice') or 0)
+                        if abs(existing_trig - sl_price_target) > 1e-6:
+                            logger.info(f"🔄 SL 價格不一致 ({symbol}): 掛單={existing_trig} vs 目標={sl_price_target}，撤銷舊單")
+                            try:
+                                await exchange.cancel_order(my_sl_orders[0]['id'], symbol, params={'stop': True})
+                            except Exception as e:
+                                if "43001" not in str(e) and "does not exist" not in str(e).lower():
+                                    logger.error(f"撤銷舊 SL 失敗: {e}")
+                            my_sl_orders = []
+
+                    # C. 確保止損單掛出
                     if not my_sl_orders:
                         logger.info(f"🛡️ 補掛止損單: {symbol} @ {sl_price_target}")
                         try:
@@ -778,6 +790,7 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
             target_3d_high = target_info['high']
 
             # 3H 觸發 + SL/10R 失效回退邏輯
+            best_protect_sl = 0.0
             for _, h3_row in df_3h_after_c.iterrows():
                 h3_open = h3_row['open']
                 h3_close = h3_row['close']
@@ -786,16 +799,10 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
                 h3_ts = h3_row['ts']
 
                 if is_3h_met:
-                    # 1. 已觸發，檢查後續 K 棒是否碰到原始止損或止盈(10R) → 失效回退
+                    # 原始風險 (用於 10R 計算，不受保護止損影響)
                     risk = entry_price - stop_loss
-                    if h3_low <= stop_loss or (risk > 0 and h3_high >= entry_price + 10 * risk):
-                        is_3h_met = False
-                        entry_price = 0.0
-                        stop_loss = 0.0
-                        trigger_ts = 0
-                        continue
-                        
-                    # 2. 日線保護止損檢查
+
+                    # 日線保護止損更新 (只能往上，不能往下)
                     closed_1d = df[df['ts'] + 86400000 <= h3_ts]
                     if len(closed_1d) >= 2:
                         last_closed = closed_1d.iloc[-1]
@@ -804,13 +811,21 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
                         if last_close_time > trigger_ts:
                             prev_body_high = max(prev_closed['open'], prev_closed['close'])
                             if last_closed['close'] > prev_body_high and last_closed['low'] > entry_price:
-                                protect_sl = last_closed['low']
-                                if h3_low <= protect_sl:
-                                    is_3h_met = False
-                                    entry_price = 0.0
-                                    stop_loss = 0.0
-                                    trigger_ts = 0
-                                    continue
+                                candidate_sl = last_closed['low']
+                                if candidate_sl > best_protect_sl:
+                                    best_protect_sl = candidate_sl
+
+                    # 有效止損 = 原始 SL 與保護 SL 取較高者
+                    effective_sl = max(stop_loss, best_protect_sl) if best_protect_sl > 0 else stop_loss
+
+                    # 碰觸有效止損或價格已達 10R → 失效回退
+                    if h3_low <= effective_sl or (risk > 0 and h3_high >= entry_price + 10 * risk):
+                        is_3h_met = False
+                        entry_price = 0.0
+                        stop_loss = 0.0
+                        trigger_ts = 0
+                        best_protect_sl = 0.0
+                        continue
                 else:
                     # 尋找新觸發：開盤在 3D High 以下，收盤突破 3D High
                     if h3_open <= target_3d_high and h3_close > target_3d_high:
@@ -818,6 +833,7 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
                         entry_price = h3_close
                         stop_loss = h3_low
                         trigger_ts = int(h3_row['ts'])
+                        best_protect_sl = 0.0
 
             # 額外檢查：當前未收盤的 3H K 棒是否已碰觸止損或止盈(10R)
             if is_3h_met:
@@ -827,26 +843,26 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
                     current_3h_high = current_3h_candles['high'].max()
                     current_ts = int(time.time() * 1000)
                     risk = entry_price - stop_loss
-                    if current_3h_low <= stop_loss or (risk > 0 and current_3h_high >= entry_price + 10 * risk):
+
+                    # 日線保護止損更新 (只能往上，不能往下)
+                    closed_1d = df[df['ts'] + 86400000 <= current_ts]
+                    if len(closed_1d) >= 2:
+                        last_closed = closed_1d.iloc[-1]
+                        prev_closed = closed_1d.iloc[-2]
+                        last_close_time = last_closed['ts'] + 86400000
+                        if last_close_time > trigger_ts:
+                            prev_body_high = max(prev_closed['open'], prev_closed['close'])
+                            if last_closed['close'] > prev_body_high and last_closed['low'] > entry_price:
+                                candidate_sl = last_closed['low']
+                                if candidate_sl > best_protect_sl:
+                                    best_protect_sl = candidate_sl
+
+                    effective_sl = max(stop_loss, best_protect_sl) if best_protect_sl > 0 else stop_loss
+                    if current_3h_low <= effective_sl or (risk > 0 and current_3h_high >= entry_price + 10 * risk):
                         is_3h_met = False
                         entry_price = 0.0
                         stop_loss = 0.0
                         trigger_ts = 0
-                    else:
-                        closed_1d = df[df['ts'] + 86400000 <= current_ts]
-                        if len(closed_1d) >= 2:
-                            last_closed = closed_1d.iloc[-1]
-                            prev_closed = closed_1d.iloc[-2]
-                            last_close_time = last_closed['ts'] + 86400000
-                            if last_close_time > trigger_ts:
-                                prev_body_high = max(prev_closed['open'], prev_closed['close'])
-                                if last_closed['close'] > prev_body_high and last_closed['low'] > entry_price:
-                                    protect_sl = last_closed['low']
-                                    if current_3h_low <= protect_sl:
-                                        is_3h_met = False
-                                        entry_price = 0.0
-                                        stop_loss = 0.0
-                                        trigger_ts = 0
         # ========================
 
         d1_date_str = pd.to_datetime(target_info['dt_str']).strftime('%Y-%m-%d')
@@ -1161,20 +1177,23 @@ async def run_scan():
                         watchlist[sym]['last_trigger_ts'] = item.get('trigger_ts', 0)
                     save_watchlist(watchlist)
 
-        # === 處理持倉保護止損提示 ===
+        # === 處理持倉保護止損 (持久化 + 實際更新 SL 單) ===
         if holding_items and BITGET_API_KEY:
             for item in holding_items:
                 sym = item['symbol']
                 try:
                     entry_price = 0
                     entry_time = 0
+                    matched_sig = None
                     for slist in signals.values():
                         for s in slist:
                             if s['symbol'] == sym and s['status'] == 'active':
                                 entry_price = float(s['entry_price'])
                                 entry_time = int(s.get('timestamp', 0))
+                                matched_sig = s
                                 break
-                    if entry_price > 0:
+                    if entry_price > 0 and matched_sig:
+                        current_sl = float(matched_sig['sl_price'])
                         batch = await ex.fetch_ohlcv(sym, '1d', limit=10)
                         if batch:
                             df_1d = pd.DataFrame(batch, columns=['ts', 'open', 'high', 'low', 'close', 'vol'])
@@ -1187,7 +1206,21 @@ async def run_scan():
                                 if last_close_time > entry_time:
                                     prev_body_high = max(prev_closed['open'], prev_closed['close'])
                                     if last_closed['close'] > prev_body_high and last_closed['low'] > entry_price:
-                                        item['protect_sl'] = last_closed['low']
+                                        candidate_sl = last_closed['low']
+                                        # 保護止損只能往上，新值必須高於現有 sl_price 才替換
+                                        if candidate_sl > current_sl:
+                                            precision = matched_sig.get('precision', 4)
+                                            old_sl = current_sl
+                                            matched_sig['sl_price'] = candidate_sl
+                                            save_active_signals(signals)
+                                            logger.info(f"🛡️ 保護止損上移: {sym} | {old_sl:.{precision}f} → {candidate_sl:.{precision}f}")
+                                            send_telegram_message(
+                                                f"🛡️ <b>保護止損已上移</b>\n\n"
+                                                f"💎 {get_base_coin(sym)}\n"
+                                                f"📍 <code>{old_sl:.{precision}f}</code> → <code>{candidate_sl:.{precision}f}</code>"
+                                            )
+                                        # 無論是否更新，顯示當前保護止損
+                                        item['protect_sl'] = float(matched_sig['sl_price'])
                 except Exception as e:
                     logger.warning(f"獲取保護止損失敗 ({sym}): {e}")
 
@@ -1227,8 +1260,8 @@ async def scheduler():
     while True:
         try:
             now = datetime.utcnow()
-            # 每日 UTC 整點 (且須能被 3 整除的小時) 的第 1 分鐘觸發 (00:01, 03:01, 06:01...)
-            if now.minute == 1 and now.hour % 3 == 0 and (now.day != last_day or now.hour != last_exec_hour):
+            # 每日 UTC 整點 (且須能被 3 整除的小時) 的前 10 分鐘內觸發，防止迴圈耗時導致跳過
+            if now.minute <= 10 and now.hour % 3 == 0 and (now.day != last_day or now.hour != last_exec_hour):
                 try:
                     await run_scan()
                 except Exception as e:
