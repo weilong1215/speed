@@ -716,7 +716,7 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
                 is_invalid = False
                 for j in range(1, i):
                     check_bar = df_3d.iloc[-j]
-                    if check_bar['close'] > row_c['high'] or check_bar['close'] < row_c['low'] or check_bar['close'] < check_bar['ma20']:
+                    if check_bar['close'] > row_c['high'] or check_bar['low'] <= row_c['low'] or check_bar['close'] < check_bar['ma20']:
                         is_invalid = True
                         break
                 
@@ -736,7 +736,7 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
 
         # 2. 如果沒有新訊號，但仍在追蹤名單中，執行剔除判斷 (針對最新已收盤 3D 進行檢驗)
         if target_info is None and cached_info is not None:
-            if latest_closed_3d['close'] > cached_info['high'] or latest_closed_3d['close'] < cached_info['low'] or latest_closed_3d['close'] < latest_closed_3d['ma20']:
+            if latest_closed_3d['close'] > cached_info['high'] or latest_closed_3d['low'] <= cached_info['low'] or latest_closed_3d['close'] < latest_closed_3d['ma20']:
                 return {'symbol': symbol, 'action': 'remove'}
             else:
                 target_info = cached_info
