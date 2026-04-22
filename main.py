@@ -693,6 +693,8 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
 
         target_info = None
         action = None
+        # 延遲淘汰旗標：3D 淘汰條件觸發時先暫存，等 3H 進場檢查後再決定
+        pending_removal = False
 
         # 1. 掃描過去 10 根已收盤的 3D K 棒 (由新到舊，找到最新發生的即停止)
         scan_limit = min(10, len(df_3d) - 2)
@@ -720,24 +722,27 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
                         is_invalid = True
                         break
                 
+                # 無論是否被淘汰，都先保留 target_info 供後續 3H 進場檢查
+                target_info = {
+                    'dt_str': row_c['dt'].isoformat(),
+                    'close': float(row_c['close']),
+                    'high': float(row_c['high']),
+                    'low': float(row_c['low']),
+                    'ma20': float(row_c['ma20'])
+                }
                 if not is_invalid:
-                    target_info = {
-                        'dt_str': row_c['dt'].isoformat(),
-                        'close': float(row_c['close']),
-                        'high': float(row_c['high']),
-                        'low': float(row_c['low']),
-                        'ma20': float(row_c['ma20'])
-                    }
                     action = 'update'
                 else:
-                    # 選項A：最新發生的圖型已被淘汰，直接放棄，不尋找更舊的圖型
-                    return {'symbol': symbol, 'action': 'remove'}
+                    # 3D 圖型已被後續 K 棒淘汰，但需等 3H 檢查完才能最終決定
+                    pending_removal = True
                 break
 
         # 2. 如果沒有新訊號，但仍在追蹤名單中，執行剔除判斷 (針對最新已收盤 3D 進行檢驗)
         if target_info is None and cached_info is not None:
             if latest_closed_3d['close'] > cached_info['high'] or latest_closed_3d['low'] <= cached_info['low'] or latest_closed_3d['close'] < latest_closed_3d['ma20']:
-                return {'symbol': symbol, 'action': 'remove'}
+                # 3D 淘汰條件觸發，但需等 3H 檢查完才能最終決定
+                target_info = cached_info
+                pending_removal = True
             else:
                 target_info = cached_info
                 action = 'keep'
@@ -864,6 +869,15 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
                         stop_loss = 0.0
                         trigger_ts = 0
         # ========================
+
+        # 延遲淘汰最終裁決：3H 已成立則無視 3D 淘汰條件
+        if pending_removal:
+            if is_3h_met:
+                # 3H 進場優先，覆蓋 3D 淘汰決策
+                action = 'update'
+                logger.info(f"🔀 {symbol}: 3D 淘汰條件觸發但 3H 進場已成立，保留追蹤並執行進場")
+            else:
+                return {'symbol': symbol, 'action': 'remove'}
 
         d1_date_str = pd.to_datetime(target_info['dt_str']).strftime('%Y-%m-%d')
 
