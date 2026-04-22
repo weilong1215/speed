@@ -733,8 +733,12 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
                 if not is_invalid:
                     action = 'update'
                 else:
-                    # 3D 圖型已被後續 K 棒淘汰，但需等 3H 檢查完才能最終決定
-                    pending_removal = True
+                    if j == 1:
+                        # 造成淘汰的是最新已收盤 3D 棒 → 可能為 00:00 邊界，延遲至 3H 檢查
+                        pending_removal = True
+                    else:
+                        # 造成淘汰的是更早的 3D 棒，不可能是邊界情境，直接淘汰
+                        return {'symbol': symbol, 'action': 'remove'}
                 break
 
         # 2. 如果沒有新訊號，但仍在追蹤名單中，執行剔除判斷 (針對最新已收盤 3D 進行檢驗)
@@ -870,13 +874,22 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
                         trigger_ts = 0
         # ========================
 
-        # 延遲淘汰最終裁決：僅當 3H 進場來自「最新收盤的那根 3H K 棒」才覆蓋淘汰
-        # 精確鎖定 00:00 邊界情境：3H 收盤與 3D 收盤同時發生
+        # 延遲淘汰最終裁決：精確鎖定 00:00 邊界情境
+        # 條件：3H 進場來自最新 3H 棒，且該 3H 棒落在最新已收盤 3D 棒的區間內
         if pending_removal:
             last_3h_ts = int(df_3h.iloc[-1]['ts']) if (ohlcv_1h and len(df_3h) > 0) else 0
-            if is_3h_met and trigger_ts == last_3h_ts and last_3h_ts > 0:
+            latest_3d_ts = int(latest_closed_3d['ts'])
+            latest_3d_end_ts = latest_3d_ts + 3 * 86400 * 1000
+            is_boundary = (
+                is_3h_met and
+                last_3h_ts > 0 and
+                trigger_ts == last_3h_ts and
+                last_3h_ts >= latest_3d_ts and
+                last_3h_ts < latest_3d_end_ts
+            )
+            if is_boundary:
                 action = 'update'
-                logger.info(f"🔀 {symbol}: 3H 進場來自最新 3H K 棒 (00:00 邊界)，覆蓋 3D 淘汰")
+                logger.info(f"🔀 {symbol}: 3H 進場於最新 3D 收盤邊界成立，覆蓋淘汰")
             else:
                 return {'symbol': symbol, 'action': 'remove'}
 
