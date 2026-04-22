@@ -695,6 +695,8 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
         action = None
         # 延遲淘汰旗標：3D 淘汰條件觸發時先暫存，等 3H 進場檢查後再決定
         pending_removal = False
+        # 造成淘汰的 3D K 棒起始時間，用於限定 3H 覆蓋的有效範圍
+        removal_3d_start_ts = 0
 
         # 1. 掃描過去 10 根已收盤的 3D K 棒 (由新到舊，找到最新發生的即停止)
         scan_limit = min(10, len(df_3d) - 2)
@@ -735,6 +737,7 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
                 else:
                     # 3D 圖型已被後續 K 棒淘汰，但需等 3H 檢查完才能最終決定
                     pending_removal = True
+                    removal_3d_start_ts = int(check_bar['ts'])
                 break
 
         # 2. 如果沒有新訊號，但仍在追蹤名單中，執行剔除判斷 (針對最新已收盤 3D 進行檢驗)
@@ -743,6 +746,7 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
                 # 3D 淘汰條件觸發，但需等 3H 檢查完才能最終決定
                 target_info = cached_info
                 pending_removal = True
+                removal_3d_start_ts = int(latest_closed_3d['ts'])
             else:
                 target_info = cached_info
                 action = 'keep'
@@ -870,12 +874,13 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
                         trigger_ts = 0
         # ========================
 
-        # 延遲淘汰最終裁決：3H 已成立則無視 3D 淘汰條件
+        # 延遲淘汰最終裁決：僅當 3H 進場發生在造成淘汰的那根 3D K 棒期間內，才覆蓋淘汰
         if pending_removal:
-            if is_3h_met:
-                # 3H 進場優先，覆蓋 3D 淘汰決策
+            removal_3d_end_ts = removal_3d_start_ts + 3 * 86400 * 1000
+            if is_3h_met and trigger_ts >= removal_3d_start_ts and trigger_ts < removal_3d_end_ts:
+                # 3H 進場發生在淘汰 3D K 棒的同一週期內 (00:00 邊界情境)，覆蓋淘汰
                 action = 'update'
-                logger.info(f"🔀 {symbol}: 3D 淘汰條件觸發但 3H 進場已成立，保留追蹤並執行進場")
+                logger.info(f"🔀 {symbol}: 3H 進場於淘汰 3D 同週期內成立，保留追蹤並執行進場")
             else:
                 return {'symbol': symbol, 'action': 'remove'}
 
