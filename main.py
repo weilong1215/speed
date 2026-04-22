@@ -877,7 +877,14 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
         # 延遲淘汰最終裁決：精確鎖定 00:00 邊界情境
         # 條件：3H 進場來自最新 3H 棒，且該 3H 棒落在最新已收盤 3D 棒的區間內
         if pending_removal:
-            last_3h_ts = int(df_3h.iloc[-1]['ts']) if (ohlcv_1h and len(df_3h) > 0) else 0
+            # 1H 資料缺失或 df_3h 為空時無法進行 3H 判斷，直接淘汰
+            try:
+                has_3h_data = ohlcv_1h and len(df_3h) > 0
+            except NameError:
+                has_3h_data = False
+            if not has_3h_data:
+                return {'symbol': symbol, 'action': 'remove'}
+            last_3h_ts = int(df_3h.iloc[-1]['ts']) if (len(df_3h) > 0) else 0
             latest_3d_ts = int(latest_closed_3d['ts'])
             latest_3d_end_ts = latest_3d_ts + 3 * 86400 * 1000
             is_boundary = (
