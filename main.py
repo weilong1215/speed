@@ -1105,7 +1105,7 @@ def poll_telegram_commands():
 # ============================================================================
 
 async def run_scan():
-    logger.info("⏰ 開始執行 3D MA20 與 3H 條件長效追蹤掃描...")
+    logger.info("⏰ 開始執行 極速系統...")
     ex = get_exchange()
     watchlist = load_watchlist()
     config = load_config()
@@ -1347,7 +1347,7 @@ def tg_polling_background():
             logger.error(f"Telegram polling 異常: {e}")
         time.sleep(2)
 
-logger.info("🚀 啟動 3D 結構掃描 + 自動交易系統...")
+logger.info("🚀 啟動 極速系統...")
 ensure_data_dir()
 bg_thread = threading.Thread(target=run_background_system, daemon=True)
 bg_thread.start()
