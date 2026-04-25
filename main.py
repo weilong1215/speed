@@ -695,10 +695,11 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
         action = None
         # 延遲淘汰旗標：3D 淘汰條件觸發時先暫存，等 3H 進場檢查後再決定
         pending_removal = False
+        must_remove = False
 
-        # 1. 掃描過去 10 根已收盤的 3D K 棒 (由新到舊，找到最新發生的即停止)
-        scan_limit = min(10, len(df_3d) - 2)
-        for i in range(1, scan_limit + 1):
+        # 1. 掃描過去 20 根已收盤的 3D K 棒 (由舊到新，找到存活的最舊圖型即鎖定)
+        scan_limit = min(20, len(df_3d) - 2)
+        for i in range(scan_limit, 0, -1):
             row_c = df_3d.iloc[-i]
             row_b = df_3d.iloc[-i - 1]
             row_a = df_3d.iloc[-i - 2]
@@ -714,7 +715,7 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
             c_above_ma20 = row_c['close'] > row_c['ma20']
 
             if a_is_bearish and b_is_bearish and b_engulf_a and c_is_bullish and c_engulf_b and c_above_ma20:
-                # 找到最新發生的圖型，立即檢驗是否被後續 3D K 棒淘汰
+                # 找到圖型，立即檢驗是否被後續 3D K 棒淘汰
                 is_invalid = False
                 for j in range(1, i):
                     check_bar = df_3d.iloc[-j]
@@ -722,24 +723,41 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
                         is_invalid = True
                         break
                 
-                # 無論是否被淘汰，都先保留 target_info 供後續 3H 進場檢查
-                target_info = {
-                    'dt_str': row_c['dt'].isoformat(),
-                    'close': float(row_c['close']),
-                    'high': float(row_c['high']),
-                    'low': float(row_c['low']),
-                    'ma20': float(row_c['ma20'])
-                }
                 if not is_invalid:
+                    # 存活的最舊訊號，保留 target_info 供後續 3H 檢查，並提早鎖定
+                    target_info = {
+                        'dt_str': row_c['dt'].isoformat(),
+                        'close': float(row_c['close']),
+                        'high': float(row_c['high']),
+                        'low': float(row_c['low']),
+                        'ma20': float(row_c['ma20'])
+                    }
                     action = 'update'
+                    pending_removal = False
+                    must_remove = False
+                    break
                 else:
                     if j == 1:
                         # 造成淘汰的是最新已收盤 3D 棒 → 可能為 00:00 邊界，延遲至 3H 檢查
+                        target_info = {
+                            'dt_str': row_c['dt'].isoformat(),
+                            'close': float(row_c['close']),
+                            'high': float(row_c['high']),
+                            'low': float(row_c['low']),
+                            'ma20': float(row_c['ma20'])
+                        }
                         pending_removal = True
+                        must_remove = False
                     else:
-                        # 造成淘汰的是更早的 3D 棒，不可能是邊界情境，直接淘汰
-                        return {'symbol': symbol, 'action': 'remove'}
-                break
+                        # 造成淘汰的是更早的 3D 棒，標記必刪，但繼續往近期尋找是否有存活的新訊號
+                        must_remove = True
+                        target_info = None
+                        pending_removal = False
+                    continue
+
+        # 如果整個區間掃描完都沒有存活訊號，且中間曾發現過已確定死透的舊訊號，直接淘汰
+        if target_info is None and must_remove:
+            return {'symbol': symbol, 'action': 'remove'}
 
         # 2. 如果沒有新訊號，但仍在追蹤名單中，執行剔除判斷 (針對最新已收盤 3D 進行檢驗)
         if target_info is None and cached_info is not None:
@@ -756,8 +774,8 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
             return None
 
         # === 3H 條件進階判斷 (針對 target_info 進行校驗) ===
-        # 擴大獲取 45 天 1H 資料 (約 1080 筆)，使用迴圈分批拉取
-        fetch_since_1h = now_ms - (45 * 24 * 3600 * 1000)
+        # 擴大獲取 60 天 1H 資料 (約 1440 筆)，使用迴圈分批拉取
+        fetch_since_1h = now_ms - (60 * 24 * 3600 * 1000)
         ohlcv_1h = []
         curr_1h = fetch_since_1h
         for _ in range(3):
