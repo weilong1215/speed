@@ -853,8 +853,8 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
                         stop_loss = 0.0
                         trigger_ts = 0
                         best_protect_sl = 0.0
-                        continue
-                else:
+                
+                if not is_3h_met:
                     # 尋找新觸發：開盤在 3D High 以下，收盤突破 3D High
                     if h3_open <= target_3d_high and h3_close > target_3d_high:
                         is_3h_met = True
