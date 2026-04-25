@@ -426,7 +426,8 @@ async def monitor_positions(exchange):
 
             found_signal = False
             for sig_key, sig_list in list(saved_signals.items()):
-                if not sig_key.startswith(name):
+                expected_key = f"{name}_{side.upper()}"
+                if sig_key != expected_key:
                     continue
                 for sig in sig_list:
                     if sig['status'] != 'active' or sig['direction'].lower() != side.lower():
