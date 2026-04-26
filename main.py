@@ -1382,6 +1382,18 @@ def tg_polling_background():
 
 logger.info("🚀 啟動 極速系統...")
 ensure_data_dir()
+
+# 啟動遷移：凍結缺少 original_sl_price 的既有信號
+_signals = load_active_signals()
+_migrated = 0
+for _key, _slist in _signals.items():
+    for _sig in _slist:
+        if _sig.get('status') == 'active' and 'original_sl_price' not in _sig:
+            _sig['original_sl_price'] = _sig['sl_price']
+            _migrated += 1
+if _migrated > 0:
+    save_active_signals(_signals)
+    logger.info(f"🔧 啟動遷移完成: {_migrated} 筆信號已凍結 original_sl_price")
 bg_thread = threading.Thread(target=run_background_system, daemon=True)
 bg_thread.start()
 
