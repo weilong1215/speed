@@ -284,6 +284,7 @@ async def place_order(exchange, symbol, direction, entry, sl, precision, fixed_l
                 signals[key].append({
                     'signal_id': signal_id, 'symbol': symbol, 'side': side, 'direction': direction,
                     'quantity': qty, 'entry_price': entry, 'sl_price': sl,
+                    'original_sl_price': sl,
                     'tp_next_tier': 0, 'status': 'active', 'precision': precision,
                     'timestamp': int(time.time() * 1000)
                 })
@@ -325,8 +326,9 @@ async def ensure_next_tp(exchange, symbol, side, sig, size, saved_signals, open_
     try:
         signal_id = sig.get('signal_id', str(sig.get('timestamp')))
         entry = sig['entry_price']
-        sl = sig['sl_price']
-        risk = abs(entry - sl)
+        # 使用原始止損計算 R，避免保護止損上移後壓縮階梯間距
+        original_sl = sig.get('original_sl_price', sig['sl_price'])
+        risk = abs(entry - original_sl)
         if risk == 0:
             return
         direction = sig['direction']
@@ -509,9 +511,9 @@ async def monitor_positions(exchange):
                     try:
                         ticker = await exchange.fetch_ticker(symbol)
                         current_price = float(ticker['last'])
-                        sl_price = float(sig['sl_price'])
+                        original_sl = float(sig.get('original_sl_price', sig['sl_price']))
                         entry_price = float(sig['entry_price'])
-                        risk = abs(entry_price - sl_price)
+                        risk = abs(entry_price - original_sl)
 
                         if risk > 0:
                             is_runaway = False
