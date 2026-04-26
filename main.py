@@ -49,9 +49,9 @@ BITGET_API_KEY = os.getenv("BITGET_API_KEY", "")
 BITGET_SECRET_KEY = os.getenv("BITGET_API_SECRET", "") or os.getenv("BITGET_SECRET_KEY", "")
 BITGET_PASSWORD = os.getenv("BITGET_API_PASSWORD", "") or os.getenv("BITGET_PASSWORD", "")
 
-# 無限階梯 TP：每 10R 平掉剩餘倉位的 25%
-TP_STEP_R = 10
-TP_CLOSE_PCT = 0.25
+# 無限階梯 TP：每 5R 平掉剩餘倉位的 20%
+TP_STEP_R = 5
+TP_CLOSE_PCT = 0.20
 
 def is_crypto_symbol(symbol: str, blacklist: list) -> bool:
     if not blacklist:
@@ -318,7 +318,7 @@ async def place_order(exchange, symbol, direction, entry, sl, precision, fixed_l
 
 async def ensure_next_tp(exchange, symbol, side, sig, size, saved_signals, open_orders):
     """
-    無限階梯 TP：每 10R 平掉剩餘倉位的 25%。
+    無限階梯 TP：每 5R 平掉剩餘倉位的 20%。
     同一時間只存在一張 TP 觸發單，成交後自動推進至下一階。
     當 TP 數量低於最小名義價值時停止，剩餘粉塵由 SL 保護。
     """
@@ -344,7 +344,7 @@ async def ensure_next_tp(exchange, symbol, side, sig, size, saved_signals, open_
         # TP 單不存在：判斷是已成交還是從未掛出
         # 依原始數量推算該階成交後的預期剩餘
         original_qty = sig['quantity']
-        expected_remaining = original_qty * (0.75 ** (next_tier + 1))
+        expected_remaining = original_qty * (0.80 ** (next_tier + 1))
 
         if size <= expected_remaining * 1.05:
             # 倉位已縮減至預期水準 → 上一階已成交，推進至下一階
@@ -503,7 +503,7 @@ async def monitor_positions(exchange):
                                 for o in open_orders)
 
                 # ==============================================================
-                # 新增追高防護：尚未進場，但價格已達 10R 目標 -> 撤銷掛單
+                # 新增追高防護：尚未進場，但價格已達 5R 目標 -> 撤銷掛單
                 # ==============================================================
                 if not has_pos and has_entry:
                     try:
@@ -515,13 +515,13 @@ async def monitor_positions(exchange):
 
                         if risk > 0:
                             is_runaway = False
-                            if direction == 'LONG' and current_price >= entry_price + 10 * risk:
+                            if direction == 'LONG' and current_price >= entry_price + 5 * risk:
                                 is_runaway = True
-                            elif direction == 'SHORT' and current_price <= entry_price - 10 * risk:
+                            elif direction == 'SHORT' and current_price <= entry_price - 5 * risk:
                                 is_runaway = True
 
                             if is_runaway:
-                                logger.info(f"🏃 價格已達 10R ({symbol})，撤銷未成交進場單 {signal_id}")
+                                logger.info(f"🏃 價格已達 5R ({symbol})，撤銷未成交進場單 {signal_id}")
                                 entry_orders = [o for o in open_orders if str(o.get('clientOrderId') or o.get('info', {}).get('clientOid') or "") == str(signal_id)]
                                 for eo in entry_orders:
                                     try:
@@ -531,7 +531,7 @@ async def monitor_positions(exchange):
                                         logger.warning(f"撤銷未成交單失敗 {eo['id']}: {e}")
 
                                 send_telegram_message(
-                                    f"<b>🏃 價格已達 10R (錯失進場)</b>\n\n"
+                                    f"<b>🏃 價格已達 5R (錯失進場)</b>\n\n"
                                     f"💎 <b>交易對:</b> {get_base_coin(symbol)} [{direction}]\n"
                                     f"📉 <b>狀態: 已自動撤銷未成交之進場單</b>"
                                 )
@@ -846,8 +846,8 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
                     # 有效止損 = 原始 SL 與保護 SL 取較高者
                     effective_sl = max(stop_loss, best_protect_sl) if best_protect_sl > 0 else stop_loss
 
-                    # 碰觸有效止損或價格已達 10R → 失效回退
-                    if h3_low <= effective_sl or (risk > 0 and h3_high >= entry_price + 10 * risk):
+                    # 碰觸有效止損或價格已達 5R → 失效回退
+                    if h3_low <= effective_sl or (risk > 0 and h3_high >= entry_price + 5 * risk):
                         is_3h_met = False
                         entry_price = 0.0
                         stop_loss = 0.0
@@ -863,7 +863,7 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
                         trigger_ts = int(h3_row['ts'])
                         best_protect_sl = 0.0
 
-            # 額外檢查：當前未收盤的 3H K 棒是否已碰觸止損或止盈(10R)
+            # 額外檢查：當前未收盤的 3H K 棒是否已碰觸止損或止盈(5R)
             if is_3h_met:
                 current_3h_candles = df_1h[df_1h['3h_period'] >= now_utc_3h_fl]
                 if not current_3h_candles.empty:
@@ -886,7 +886,7 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
                                     best_protect_sl = candidate_sl
 
                     effective_sl = max(stop_loss, best_protect_sl) if best_protect_sl > 0 else stop_loss
-                    if current_3h_low <= effective_sl or (risk > 0 and current_3h_high >= entry_price + 10 * risk):
+                    if current_3h_low <= effective_sl or (risk > 0 and current_3h_high >= entry_price + 5 * risk):
                         is_3h_met = False
                         entry_price = 0.0
                         stop_loss = 0.0
