@@ -251,7 +251,19 @@ async def place_order(exchange, symbol, direction, entry, sl, precision, fixed_l
                         break
 
                 balance = await exchange.fetch_balance()
-                available = float(balance.get('USDT', {}).get('free', 0))
+                # 優先使用全倉可用保證金 (含未實現盈虧)，fallback 回錢包可用餘額
+                available = 0.0
+                try:
+                    info_data = balance.get('info', {}).get('data', [])
+                    if isinstance(info_data, list):
+                        for acct in info_data:
+                            if acct.get('marginCoin', '').upper() == 'USDT':
+                                available = float(acct.get('crossedMaxAvailable', 0))
+                                break
+                except Exception:
+                    pass
+                if available <= 0:
+                    available = float(balance.get('USDT', {}).get('free', 0))
                 max_q = (available * 0.9) * leverage / entry
                 qty = min(qty_risk_ideal, max_q)
                 qty = float(exchange.amount_to_precision(symbol, qty))
