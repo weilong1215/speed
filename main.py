@@ -867,6 +867,7 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
                 df_3h_after_a['bb_lower'] = sma - (2 * std)
 
                 has_touched_high = False
+                touch_ts = 0
                 
                 for i in range(2, len(df_3h_after_a)):
                     bar_c = df_3h_after_a.iloc[i]
@@ -876,6 +877,7 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
                     if not has_touched_high:
                         if bar_c['high'] >= target_18d_high:
                             has_touched_high = True
+                            touch_ts = int(bar_c['ts'])
                         continue
                         
                     if has_touched_high:
@@ -907,13 +909,18 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
                                 stop_loss = float(bar_c['low']) # SL 設在 C 棒最低點
                                 trigger_ts = int(bar_c['ts'])
 
-        d1_date_str = pd.to_datetime(target_info['dt_str']).strftime('%Y-%m-%d')
+        if has_touched_high:
+            # 轉換為 UTC+8 時區供 Telegram 群組顯示使用
+            d1_date_str = pd.to_datetime(touch_ts, unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d')
+        else:
+            d1_date_str = pd.to_datetime(target_info['dt_str']).strftime('%Y-%m-%d')
 
         return {
             'symbol': symbol,
             'action': action,
             'data': target_info,
             'is_3h_met': is_3h_met,
+            'has_touched_high': has_touched_high,
             'entry_price': entry_price,
             'stop_loss': stop_loss,
             'trigger_ts': trigger_ts,
@@ -971,8 +978,7 @@ def send_triggered_message(item, default_loss):
     position_value = default_loss / loss_pct if loss_pct > 0 else 0
 
     msg = (
-        f"💎 <b>交易對:</b> {display_symbol}\n"
-        f"📅 <b>吞噬轉換起始日期:</b> {item['d1_date']}\n\n"
+        f"💎 <b>交易對:</b> {display_symbol}\n\n"
         f"📍 <b>進場價格:</b> <code>{entry:.{precision}f}</code>\n"
         f"🛡️ <b>止損價格:</b> <code>{sl:.{precision}f}</code>\n"
         f"💰 <b>倉位價值:</b> <code>{position_value:.2f} USDT</code>"
@@ -1146,10 +1152,12 @@ async def run_scan():
             for res in results:
                 if res is None: continue
                 sym = res['symbol']
-                if res['action'] == 'update' or res['action'] == 'keep':
-                    watchlist[sym] = res['data']
-                    all_results.append(res)
-                elif res['action'] == 'remove':
+                
+                if res.get('has_touched_high'):
+                    if res['action'] == 'update' or res['action'] == 'keep':
+                        watchlist[sym] = res['data']
+                        all_results.append(res)
+                else:
                     if sym in watchlist:
                         del watchlist[sym]
 
