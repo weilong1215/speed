@@ -572,6 +572,40 @@ async def monitor_positions(exchange):
                                 )
                                 sig['status'] = 'closed'
                                 continue
+
+                        # 保護止損條件撤單：日線已形成保護結構，進場時機已過
+                        if not is_runaway:
+                            try:
+                                entry_ts = int(sig.get('timestamp', 0))
+                                ohlcv_1d = await exchange.fetch_ohlcv(symbol, '1d', limit=5)
+                                if ohlcv_1d and len(ohlcv_1d) >= 3:
+                                    df_1d = pd.DataFrame(ohlcv_1d, columns=['ts', 'open', 'high', 'low', 'close', 'vol'])
+                                    now_utc_fl = int(pd.Timestamp.now(tz='UTC').floor('1d').timestamp() * 1000)
+                                    closed_1d = df_1d[df_1d['ts'] < now_utc_fl]
+                                    if len(closed_1d) >= 2:
+                                        last_d = closed_1d.iloc[-1]
+                                        prev_d = closed_1d.iloc[-2]
+                                        last_close_time = int(last_d['ts']) + 86400000
+                                        prev_body_high = max(prev_d['open'], prev_d['close'])
+                                        if last_close_time > entry_ts and last_d['close'] > prev_body_high and last_d['low'] > entry_price:
+                                            logger.info(f"🛡️ 保護止損條件已成立 ({symbol})，撤銷未成交進場單 {signal_id}")
+                                            entry_orders = [o for o in open_orders if str(o.get('clientOrderId') or o.get('info', {}).get('clientOid') or "") == str(signal_id)]
+                                            for eo in entry_orders:
+                                                try:
+                                                    await exchange.cancel_order(eo['id'], symbol)
+                                                    open_orders = [o for o in open_orders if o['id'] != eo['id']]
+                                                except Exception as e:
+                                                    logger.warning(f"撤銷未成交單失敗 {eo['id']}: {e}")
+                                            send_telegram_message(
+                                                f"<b>🛡️ 保護止損條件已成立 (撤銷進場)</b>\n\n"
+                                                f"💎 <b>交易對:</b> {get_base_coin(symbol)} [{direction}]\n"
+                                                f"📉 <b>狀態: 已自動撤銷未成交之進場單</b>"
+                                            )
+                                            sig['status'] = 'closed'
+                                            continue
+                            except Exception as e:
+                                logger.warning(f"檢查保護止損撤單異常 ({symbol}): {e}")
+
                     except Exception as e:
                         logger.warning(f"檢查未成交單價格異常 ({symbol}): {e}")
                 # ==============================================================
