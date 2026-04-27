@@ -586,21 +586,33 @@ async def monitor_positions(exchange):
                                 sig['status'] = 'closed'
                                 continue
 
-                        # 保護止損條件撤單：日線已形成保護結構，進場時機已過
+                        # 保護止損條件撤單：3D 線已形成保護結構，進場時機已過
                         if not is_runaway:
                             try:
                                 entry_ts = int(sig.get('timestamp', 0))
-                                ohlcv_1d = await exchange.fetch_ohlcv(symbol, '1d', limit=5)
-                                if ohlcv_1d and len(ohlcv_1d) >= 3:
+                                ohlcv_1d = await exchange.fetch_ohlcv(symbol, '1d', limit=15)
+                                if ohlcv_1d and len(ohlcv_1d) >= 6:
                                     df_1d = pd.DataFrame(ohlcv_1d, columns=['ts', 'open', 'high', 'low', 'close', 'vol'])
-                                    now_utc_fl = int(pd.Timestamp.now(tz='UTC').floor('1d').timestamp() * 1000)
-                                    closed_1d = df_1d[df_1d['ts'] < now_utc_fl]
-                                    if len(closed_1d) >= 2:
-                                        last_d = closed_1d.iloc[-1]
-                                        prev_d = closed_1d.iloc[-2]
-                                        last_close_time = int(last_d['ts']) + 86400000
-                                        prev_body_high = max(prev_d['open'], prev_d['close'])
-                                        if last_close_time > entry_ts and last_d['close'] > prev_body_high and last_d['low'] > entry_price:
+                                    df_1d['dt'] = pd.to_datetime(df_1d['ts'], unit='ms', utc=True)
+                                    df_1d['year'] = df_1d['dt'].dt.year
+                                    df_1d['doy'] = df_1d['dt'].dt.dayofyear
+                                    df_1d['group_id'] = (df_1d['doy'] - 1) // 3
+                                    df_1d['g_key'] = df_1d['year'].astype(str) + "_" + df_1d['group_id'].astype(str).str.zfill(3)
+                                    
+                                    df_3d = df_1d.groupby('g_key').agg({
+                                        'ts': 'first', 'open': 'first', 'high': 'max', 'low': 'min', 'close': 'last'
+                                    }).sort_values('ts').reset_index()
+
+                                    now_utc = pd.Timestamp.now(tz='UTC')
+                                    current_g_key = f"{now_utc.year}_{((now_utc.dayofyear - 1) // 3):03d}"
+                                    closed_3d = df_3d[df_3d['g_key'] < current_g_key]
+                                    
+                                    if len(closed_3d) >= 2:
+                                        last_3d = closed_3d.iloc[-1]
+                                        prev_3d = closed_3d.iloc[-2]
+                                        last_close_time = int(last_3d['ts']) + (3 * 86400000)
+                                        prev_body_high = max(prev_3d['open'], prev_3d['close'])
+                                        if last_close_time > entry_ts and last_3d['close'] > prev_body_high and last_3d['low'] > entry_price:
                                             logger.info(f"🛡️ 保護止損條件已成立 ({symbol})，撤銷未成交進場單 {signal_id}")
                                             entry_orders = [o for o in open_orders if str(o.get('clientOrderId') or o.get('info', {}).get('clientOid') or "") == str(signal_id)]
                                             for eo in entry_orders:
@@ -851,6 +863,7 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
                 # 計算 3H 布林帶 (20, 2)
                 sma = df_3h_after_a['close'].rolling(window=20).mean()
                 std = df_3h_after_a['close'].rolling(window=20).std()
+                df_3h_after_a['bb_middle'] = sma
                 df_3h_after_a['bb_lower'] = sma - (2 * std)
 
                 has_touched_high = False
@@ -883,7 +896,10 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
                         b_body_high = max(bar_b['open'], bar_b['close'])
                         c_engulf_b = bar_c['close'] >= b_body_high
                         
-                        if b_is_lowest_low and b_is_lowest_high and touch_lower_band and c_engulf_b:
+                        # C 棒收盤價在 3H 中軌之下
+                        c_below_middle_band = bar_c['close'] < bar_c['bb_middle']
+                        
+                        if b_is_lowest_low and b_is_lowest_high and touch_lower_band and c_engulf_b and c_below_middle_band:
                             # 觸發進場 (僅在最新一根 3H 收盤時)
                             if i == len(df_3h_after_a) - 1:
                                 is_3h_met = True
