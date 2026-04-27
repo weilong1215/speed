@@ -752,10 +752,10 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
 
         df['year'] = df['dt'].dt.year
         df['doy'] = df['dt'].dt.dayofyear
-        df['group_id'] = (df['doy'] - 1) // 3
+        df['group_id'] = (df['doy'] - 1) // 18
         df['g_key'] = df['year'].astype(str) + "_" + df['group_id'].astype(str).str.zfill(3)
 
-        df_3d = df.groupby('g_key').agg({
+        df_18d = df.groupby('g_key').agg({
             'ts': 'first',
             'dt': 'first',
             'open': 'first',
@@ -766,107 +766,57 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
         }).sort_values('ts').reset_index()
 
         now_utc = pd.Timestamp.now(tz='UTC')
-        current_g_key = f"{now_utc.year}_{((now_utc.dayofyear - 1) // 3):03d}"
-        df_3d = df_3d[df_3d['g_key'] < current_g_key].reset_index(drop=True)
+        current_g_key = f"{now_utc.year}_{((now_utc.dayofyear - 1) // 18):03d}"
+        df_18d = df_18d[df_18d['g_key'] < current_g_key].reset_index(drop=True)
 
-        if len(df_3d) < 3: return None
-
-        df_3d['ma20'] = df_3d['close'].rolling(window=20).mean()
-        latest_closed_3d = df_3d.iloc[-1]
+        if len(df_18d) < 2: return None
 
         target_info = None
-        action = None
-        # 延遲淘汰旗標：3D 淘汰條件觸發時先暫存，等 3H 進場檢查後再決定
-        pending_removal = False
-        must_remove = False
+        
+        # 1. 掃描過去 18D K 棒 (由新到舊，找到第一個吞噬型態)
+        for i in range(len(df_18d) - 1, 0, -1):
+            row_a = df_18d.iloc[i]     # 新 (吞噬棒)
+            row_b = df_18d.iloc[i - 1] # 舊 (被吞噬棒)
+            
+            b_body_high = max(row_b['open'], row_b['close'])
+            b_body_low = min(row_b['open'], row_b['close'])
+            
+            # 實體吞噬：陽包陰 或 陰包陽
+            is_engulfing = (row_a['close'] >= b_body_high) or (row_a['close'] <= b_body_low)
+            
+            if is_engulfing:
+                target_info = {
+                    'dt_str': row_a['dt'].isoformat(),
+                    'ts': int(row_a['ts']),
+                    'close': float(row_a['close']),
+                    'high': float(row_a['high']),
+                    'low': float(row_a['low'])
+                }
+                break
 
-        # 1. 掃描過去 20 根已收盤的 3D K 棒 (由舊到新，找到存活的最舊圖型即鎖定)
-        scan_limit = min(20, len(df_3d) - 2)
-        for i in range(scan_limit, 0, -1):
-            row_c = df_3d.iloc[-i]
-            row_b = df_3d.iloc[-i - 1]
-            row_a = df_3d.iloc[-i - 2]
-
-            if pd.isna(row_c['ma20']):
-                continue
-
-            a_is_bearish = row_a['close'] < row_a['open']
-            b_is_bearish = row_b['close'] < row_b['open']
-            b_engulf_a = row_b['close'] < row_a['close']
-            c_is_bullish = row_c['close'] > row_c['open']
-            c_engulf_b = row_c['close'] > row_b['open']
-            c_above_ma20 = row_c['close'] > row_c['ma20']
-
-            if a_is_bearish and b_is_bearish and b_engulf_a and c_is_bullish and c_engulf_b and c_above_ma20:
-                # 找到圖型，立即檢驗是否被後續 3D K 棒淘汰
-                is_invalid = False
-                for j in range(1, i):
-                    check_bar = df_3d.iloc[-j]
-                    if check_bar['close'] > row_c['high'] or check_bar['low'] <= row_c['low'] or check_bar['close'] < check_bar['ma20']:
-                        is_invalid = True
-                        break
-                
-                if not is_invalid:
-                    # 存活的最舊訊號，保留 target_info 供後續 3H 檢查，並提早鎖定
-                    target_info = {
-                        'dt_str': row_c['dt'].isoformat(),
-                        'close': float(row_c['close']),
-                        'high': float(row_c['high']),
-                        'low': float(row_c['low']),
-                        'ma20': float(row_c['ma20'])
-                    }
-                    action = 'update'
-                    pending_removal = False
-                    must_remove = False
-                    break
-                else:
-                    if j == 1:
-                        # 造成淘汰的是最新已收盤 3D 棒 → 可能為 00:00 邊界，延遲至 3H 檢查
-                        target_info = {
-                            'dt_str': row_c['dt'].isoformat(),
-                            'close': float(row_c['close']),
-                            'high': float(row_c['high']),
-                            'low': float(row_c['low']),
-                            'ma20': float(row_c['ma20'])
-                        }
-                        pending_removal = True
-                        must_remove = False
-                    else:
-                        # 造成淘汰的是更早的 3D 棒，標記必刪，但繼續往近期尋找是否有存活的新訊號
-                        must_remove = True
-                        target_info = None
-                        pending_removal = False
-                    continue
-
-        # 如果整個區間掃描完都沒有存活訊號，且中間曾發現過已確定死透的舊訊號，直接淘汰
-        if target_info is None and must_remove:
+        if target_info is None:
             return {'symbol': symbol, 'action': 'remove'}
 
-        # 2. 如果沒有新訊號，但仍在追蹤名單中，執行剔除判斷 (針對最新已收盤 3D 進行檢驗)
-        if target_info is None and cached_info is not None:
-            if latest_closed_3d['close'] > cached_info['high'] or latest_closed_3d['low'] <= cached_info['low'] or latest_closed_3d['close'] < latest_closed_3d['ma20']:
-                # 3D 淘汰條件觸發，但需等 3H 檢查完才能最終決定
-                target_info = cached_info
-                pending_removal = True
-            else:
-                target_info = cached_info
-                action = 'keep'
+        action = 'update'
+        if cached_info and target_info['ts'] == cached_info.get('ts', 0):
+            action = 'keep'
 
-        # 如果既沒新訊號且也不在追蹤名單中，直接結束
-        if target_info is None:
-            return None
-
-        # === 3H 條件進階判斷 (針對 target_info 進行校驗) ===
-        # 擴大獲取 60 天 1H 資料 (約 1440 筆)，使用迴圈分批拉取
-        fetch_since_1h = now_ms - (60 * 24 * 3600 * 1000)
+        # === 3H 條件進階判斷 ===
+        target_18d_high = target_info['high']
+        # 從 A 棒開始的時間之後抓取 1H 轉換 3H
+        fetch_since_1h = int(target_info['ts'])
         ohlcv_1h = []
         curr_1h = fetch_since_1h
-        for _ in range(3):
-            batch_1h = await exchange.fetch_ohlcv(symbol, '1h', since=curr_1h, limit=500)
-            if not batch_1h: break
-            ohlcv_1h.extend(batch_1h)
-            curr_1h = batch_1h[-1][0] + (3600 * 1000)
-            if curr_1h >= now_ms: break
+        for _ in range(6): # 最多抓 6 次，對應約 250 天的 1H 資料
+            try:
+                batch_1h = await exchange.fetch_ohlcv(symbol, '1h', since=curr_1h, limit=1000)
+                if not batch_1h: break
+                ohlcv_1h.extend(batch_1h)
+                curr_1h = batch_1h[-1][0] + (3600 * 1000)
+                if curr_1h >= now_ms: break
+            except Exception as e:
+                if "40017" in str(e): break # 上市時間不足
+                raise e
 
         is_3h_met = False
         entry_price = 0.0
@@ -892,114 +842,54 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
             now_utc_3h_fl = local_now_utc.floor('3h')
             df_3h = df_3h[df_3h['3h_period'] < now_utc_3h_fl].reset_index(drop=True)
 
-            # 從當初成立的那根 3D 棒 (Bar C) 結束之後起算
+            # 從當初成立的那根 18D 棒 (A 棒) 結束之後起算 (ts + 18天)
             target_dt = pd.to_datetime(target_info['dt_str'])
-            bar_c_end_time = target_dt + pd.Timedelta(days=3)
-            df_3h_after_c = df_3h[df_3h['3h_period'] >= bar_c_end_time]
+            bar_a_end_time = target_dt + pd.Timedelta(days=18)
+            df_3h_after_a = df_3h[df_3h['3h_period'] >= bar_a_end_time].reset_index(drop=True)
 
-            target_3d_high = target_info['high']
+            if len(df_3h_after_a) >= 3:
+                # 計算 3H 布林帶 (20, 2)
+                sma = df_3h_after_a['close'].rolling(window=20).mean()
+                std = df_3h_after_a['close'].rolling(window=20).std()
+                df_3h_after_a['bb_lower'] = sma - (2 * std)
 
-            # 3H 觸發 + SL/10R 失效回退邏輯
-            best_protect_sl = 0.0
-            for _, h3_row in df_3h_after_c.iterrows():
-                h3_open = h3_row['open']
-                h3_close = h3_row['close']
-                h3_low = h3_row['low']
-                h3_high = h3_row['high']
-                h3_ts = h3_row['ts']
-
-                if is_3h_met:
-                    # 原始風險 (用於 10R 計算，不受保護止損影響)
-                    risk = entry_price - stop_loss
-
-                    # 日線保護止損更新 (只能往上，不能往下)
-                    closed_1d = df[df['ts'] + 86400000 <= h3_ts]
-                    if len(closed_1d) >= 2:
-                        last_closed = closed_1d.iloc[-1]
-                        prev_closed = closed_1d.iloc[-2]
-                        last_close_time = last_closed['ts'] + 86400000
-                        if last_close_time > trigger_ts:
-                            prev_body_high = max(prev_closed['open'], prev_closed['close'])
-                            if last_closed['close'] > prev_body_high and last_closed['low'] > entry_price:
-                                candidate_sl = last_closed['low']
-                                if candidate_sl > best_protect_sl:
-                                    best_protect_sl = candidate_sl
-
-                    # 有效止損 = 原始 SL 與保護 SL 取較高者
-                    effective_sl = max(stop_loss, best_protect_sl) if best_protect_sl > 0 else stop_loss
-
-                    # 碰觸有效止損或價格已達 5R → 失效回退
-                    if h3_low <= effective_sl or (risk > 0 and h3_high >= entry_price + 5 * risk):
-                        is_3h_met = False
-                        entry_price = 0.0
-                        stop_loss = 0.0
-                        trigger_ts = 0
-                        best_protect_sl = 0.0
+                has_touched_high = False
                 
-                if not is_3h_met:
-                    # 尋找新觸發：開盤在 3D High 以下，收盤突破 3D High
-                    if h3_open <= target_3d_high and h3_close > target_3d_high:
-                        is_3h_met = True
-                        entry_price = h3_close
-                        stop_loss = h3_low
-                        trigger_ts = int(h3_row['ts'])
-                        best_protect_sl = 0.0
-
-            # 額外檢查：當前未收盤的 3H K 棒是否已碰觸止損或止盈(5R)
-            if is_3h_met:
-                current_3h_candles = df_1h[df_1h['3h_period'] >= now_utc_3h_fl]
-                if not current_3h_candles.empty:
-                    current_3h_low = current_3h_candles['low'].min()
-                    current_3h_high = current_3h_candles['high'].max()
-                    current_ts = int(time.time() * 1000)
-                    risk = entry_price - stop_loss
-
-                    # 日線保護止損更新 (只能往上，不能往下)
-                    closed_1d = df[df['ts'] + 86400000 <= current_ts]
-                    if len(closed_1d) >= 2:
-                        last_closed = closed_1d.iloc[-1]
-                        prev_closed = closed_1d.iloc[-2]
-                        last_close_time = last_closed['ts'] + 86400000
-                        if last_close_time > trigger_ts:
-                            prev_body_high = max(prev_closed['open'], prev_closed['close'])
-                            if last_closed['close'] > prev_body_high and last_closed['low'] > entry_price:
-                                candidate_sl = last_closed['low']
-                                if candidate_sl > best_protect_sl:
-                                    best_protect_sl = candidate_sl
-
-                    effective_sl = max(stop_loss, best_protect_sl) if best_protect_sl > 0 else stop_loss
-                    if current_3h_low <= effective_sl or (risk > 0 and current_3h_high >= entry_price + 5 * risk):
-                        is_3h_met = False
-                        entry_price = 0.0
-                        stop_loss = 0.0
-                        trigger_ts = 0
-        # ========================
-
-        # 延遲淘汰最終裁決：精確鎖定 00:00 邊界情境
-        # 條件：3H 進場來自最新 3H 棒，且該 3H 棒落在最新已收盤 3D 棒的區間內
-        if pending_removal:
-            # 1H 資料缺失或 df_3h 為空時無法進行 3H 判斷，直接淘汰
-            try:
-                has_3h_data = ohlcv_1h and len(df_3h) > 0
-            except NameError:
-                has_3h_data = False
-            if not has_3h_data:
-                return {'symbol': symbol, 'action': 'remove'}
-            last_3h_ts = int(df_3h.iloc[-1]['ts']) if (len(df_3h) > 0) else 0
-            latest_3d_ts = int(latest_closed_3d['ts'])
-            latest_3d_end_ts = latest_3d_ts + 3 * 86400 * 1000
-            is_boundary = (
-                is_3h_met and
-                last_3h_ts > 0 and
-                trigger_ts == last_3h_ts and
-                last_3h_ts >= latest_3d_ts and
-                last_3h_ts < latest_3d_end_ts
-            )
-            if is_boundary:
-                action = 'update'
-                logger.info(f"🔀 {symbol}: 3H 進場於最新 3D 收盤邊界成立，覆蓋淘汰")
-            else:
-                return {'symbol': symbol, 'action': 'remove'}
+                for i in range(2, len(df_3h_after_a)):
+                    bar_c = df_3h_after_a.iloc[i]
+                    bar_b = df_3h_after_a.iloc[i-1]
+                    bar_a_3h = df_3h_after_a.iloc[i-2]
+                    
+                    if not has_touched_high:
+                        if bar_c['high'] >= target_18d_high:
+                            has_touched_high = True
+                        continue
+                        
+                    if has_touched_high:
+                        if pd.isna(bar_c['bb_lower']):
+                            continue
+                            
+                        # B 棒低點局部最低
+                        b_is_lowest_low = (bar_b['low'] < bar_a_3h['low']) and (bar_b['low'] < bar_c['low'])
+                        # B 棒高點局部最低
+                        b_is_lowest_high = (bar_b['high'] < bar_a_3h['high']) and (bar_b['high'] <= bar_c['high'])
+                        
+                        # 碰觸布林下軌 (至少一根)
+                        touch_lower_band = (bar_a_3h['low'] <= bar_a_3h['bb_lower']) or \
+                                           (bar_b['low'] <= bar_b['bb_lower']) or \
+                                           (bar_c['low'] <= bar_c['bb_lower'])
+                                           
+                        # 實體吞噬
+                        b_body_high = max(bar_b['open'], bar_b['close'])
+                        c_engulf_b = bar_c['close'] >= b_body_high
+                        
+                        if b_is_lowest_low and b_is_lowest_high and touch_lower_band and c_engulf_b:
+                            # 觸發進場 (僅在最新一根 3H 收盤時)
+                            if i == len(df_3h_after_a) - 1:
+                                is_3h_met = True
+                                entry_price = float(bar_c['close'])
+                                stop_loss = float(bar_c['low']) # SL 設在 C 棒最低點
+                                trigger_ts = int(bar_c['ts'])
 
         d1_date_str = pd.to_datetime(target_info['dt_str']).strftime('%Y-%m-%d')
 
