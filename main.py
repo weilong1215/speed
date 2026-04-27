@@ -494,8 +494,21 @@ async def monitor_positions(exchange):
                     # B. SL 價格不一致偵測：保護止損上移後，撤銷舊單讓補掛機制用新價格重新掛出
                     if len(my_sl_orders) == 1:
                         existing_trig = float(my_sl_orders[0].get('triggerPrice', 0) or my_sl_orders[0].get('info', {}).get('triggerPrice') or 0)
+                        # 取得 SL 掛單數量
+                        sl_order_qty = float(my_sl_orders[0].get('amount', 0) or my_sl_orders[0].get('info', {}).get('size', 0) or 0)
+                        need_cancel = False
+
+                        # 價格不一致
                         if abs(existing_trig - sl_price_target) > 1e-6:
                             logger.info(f"🔄 SL 價格不一致 ({symbol}): 掛單={existing_trig} vs 目標={sl_price_target}，撤銷舊單")
+                            need_cancel = True
+
+                        # 數量不一致 (TP 成交後倉位縮減，容許 2% 誤差)
+                        if not need_cancel and sl_order_qty > 0 and abs(sl_order_qty - size) / size > 0.02:
+                            logger.info(f"🔄 SL 數量不一致 ({symbol}): 掛單={sl_order_qty} vs 倉位={size}，撤銷舊單")
+                            need_cancel = True
+
+                        if need_cancel:
                             try:
                                 await exchange.cancel_order(my_sl_orders[0]['id'], symbol, params={'stop': True})
                             except Exception as e:
