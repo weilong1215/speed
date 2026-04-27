@@ -254,16 +254,37 @@ async def place_order(exchange, symbol, direction, entry, sl, precision, fixed_l
                 # 優先使用全倉可用保證金 (含未實現盈虧)，fallback 回錢包可用餘額
                 available = 0.0
                 try:
-                    info_data = balance.get('info', {}).get('data', [])
-                    if isinstance(info_data, list):
-                        for acct in info_data:
-                            if acct.get('marginCoin', '').upper() == 'USDT':
-                                available = float(acct.get('crossedMaxAvailable', 0))
-                                break
-                except Exception:
-                    pass
+                    raw_info = balance.get('info', {})
+                    # Debug: 輸出 info 結構供排查
+                    if isinstance(raw_info, dict):
+                        logger.debug(f"  balance info keys: {list(raw_info.keys())}")
+                        info_data = raw_info.get('data', [])
+                    elif isinstance(raw_info, list):
+                        info_data = raw_info
+                    else:
+                        info_data = []
+
+                    # data 可能是 list 或 dict
+                    search_list = info_data if isinstance(info_data, list) else [info_data] if isinstance(info_data, dict) else []
+                    for acct in search_list:
+                        if not isinstance(acct, dict):
+                            continue
+                        if acct.get('marginCoin', '').upper() == 'USDT':
+                            available = float(acct.get('crossedMaxAvailable', 0))
+                            logger.info(f"  全倉可用保證金 (crossedMaxAvailable): {available:.2f} USDT")
+                            break
+
+                    # 備選：從幣種層級的 info 取值
+                    if available <= 0:
+                        usdt_info = balance.get('USDT', {}).get('info', {})
+                        if isinstance(usdt_info, dict):
+                            available = float(usdt_info.get('crossedMaxAvailable', 0))
+
+                except Exception as e:
+                    logger.warning(f"  解析全倉可用保證金異常: {e}")
                 if available <= 0:
                     available = float(balance.get('USDT', {}).get('free', 0))
+                    logger.info(f"  Fallback 使用錢包可用餘額: {available:.2f} USDT")
                 max_q = (available * 0.9) * leverage / entry
                 qty = min(qty_risk_ideal, max_q)
                 qty = float(exchange.amount_to_precision(symbol, qty))
