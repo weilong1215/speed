@@ -752,14 +752,15 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
             if curr_1d >= now_ms: break
 
         if not ohlcv_1d: return None
-        df = pd.DataFrame(ohlcv_1d, columns=['ts', 'open', 'high', 'low', 'close', 'vol']).drop_duplicates(subset=['ts']).reset_index(drop=True)
+        df = pd.DataFrame(ohlcv_1d, columns=['ts', 'open', 'high', 'low', 'close', 'vol'])
+        df = df.sort_values('ts').drop_duplicates(subset=['ts']).reset_index(drop=True)
         df['dt'] = pd.to_datetime(df['ts'], unit='ms', utc=True)
 
         # 排除未收盤的當日 K 棒
         now_utc_1d_fl = int(pd.Timestamp.now(tz='UTC').floor('1d').timestamp() * 1000)
         df_1d = df[df['ts'] < now_utc_1d_fl].reset_index(drop=True)
 
-        if len(df_1d) < 10: return None
+        if len(df_1d) < 15: return None
 
         # 計算日線 10MA
         df_1d['sma_10'] = df_1d['close'].rolling(window=10).mean()
