@@ -762,49 +762,48 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
         df = pd.DataFrame(ohlcv_1d, columns=['ts', 'open', 'high', 'low', 'close', 'vol']).drop_duplicates(subset=['ts']).reset_index(drop=True)
         df['dt'] = pd.to_datetime(df['ts'], unit='ms', utc=True)
 
-        df['year'] = df['dt'].dt.year
-        df['doy'] = df['dt'].dt.dayofyear
-        df['group_id'] = (df['doy'] - 1) // 18
-        df['g_key'] = df['year'].astype(str) + "_" + df['group_id'].astype(str).str.zfill(3)
+        # 排除未收盤的當日 K 棒
+        now_utc_1d_fl = int(pd.Timestamp.now(tz='UTC').floor('1d').timestamp() * 1000)
+        df_1d = df[df['ts'] < now_utc_1d_fl].reset_index(drop=True)
 
-        df_18d = df.groupby('g_key').agg({
-            'ts': 'first',
-            'dt': 'first',
-            'open': 'first',
-            'high': 'max',
-            'low': 'min',
-            'close': 'last',
-            'vol': 'sum'
-        }).sort_values('ts').reset_index()
+        if len(df_1d) < 10: return None
 
-        now_utc = pd.Timestamp.now(tz='UTC')
-        current_g_key = f"{now_utc.year}_{((now_utc.dayofyear - 1) // 18):03d}"
-        df_18d = df_18d[df_18d['g_key'] < current_g_key].reset_index(drop=True)
-
-        if len(df_18d) < 2: return None
+        # 計算日線 10MA
+        df_1d['sma_10'] = df_1d['close'].rolling(window=10).mean()
 
         target_info = None
+        state = 0
+        c2_low = 0.0
         
-        # 1. 掃描過去 18D K 棒 (由新到舊，找到第一個吞噬型態)
-        for i in range(len(df_18d) - 1, 0, -1):
-            row_a = df_18d.iloc[i]     # 新 (吞噬棒)
-            row_b = df_18d.iloc[i - 1] # 舊 (被吞噬棒)
+        # 1. 由舊到新執行狀態機掃描 (條件1 -> 條件2)
+        for i in range(10, len(df_1d)):
+            bar = df_1d.iloc[i]
+            prev1 = df_1d.iloc[i-1]
+            prev2 = df_1d.iloc[i-2]
             
-            b_body_high = max(row_b['open'], row_b['close'])
-            b_body_low = min(row_b['open'], row_b['close'])
+            prev_2_body_high = max(prev1['open'], prev1['close'], prev2['open'], prev2['close'])
             
-            # 實體吞噬：陽包陰 或 陰包陽
-            is_engulfing = (row_a['close'] >= b_body_high) or (row_a['close'] <= b_body_low)
-            
-            if is_engulfing:
-                target_info = {
-                    'dt_str': row_a['dt'].isoformat(),
-                    'ts': int(row_a['ts']),
-                    'close': float(row_a['close']),
-                    'high': float(row_a['high']),
-                    'low': float(row_a['low'])
-                }
-                break
+            if state == 0:
+                if bar['close'] <= prev_2_body_high and bar['close'] > bar['sma_10']:
+                    state = 1
+            elif state == 1:
+                if bar['close'] > prev_2_body_high and bar['close'] > bar['sma_10']:
+                    state = 2
+                    target_info = {
+                        'dt_str': bar['dt'].isoformat(),
+                        'ts': int(bar['ts']),
+                        'close': float(bar['close']),
+                        'high': float(bar['high']),
+                        'low': float(bar['low'])
+                    }
+                    c2_low = float(bar['low'])
+            elif state == 2:
+                if bar['low'] < c2_low:
+                    # 跌破淘汰，重新尋找條件 1
+                    state = 0
+                    target_info = None
+                    if bar['close'] <= prev_2_body_high and bar['close'] > bar['sma_10']:
+                        state = 1
 
         if target_info is None:
             return {'symbol': symbol, 'action': 'remove'}
@@ -814,8 +813,8 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
             action = 'keep'
 
         # === 3H 條件進階判斷 ===
-        target_18d_high = target_info['high']
-        # 從 A 棒開始的時間之後抓取 1H 轉換 3H
+        target_1d_high = target_info['high']
+        # 從條件2日棒開始的時間之後抓取 1H 轉換 3H
         fetch_since_1h = int(target_info['ts'])
         ohlcv_1h = []
         curr_1h = fetch_since_1h
@@ -854,9 +853,9 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
             now_utc_3h_fl = local_now_utc.floor('3h')
             df_3h = df_3h[df_3h['3h_period'] < now_utc_3h_fl].reset_index(drop=True)
 
-            # 從當初成立的那根 18D 棒 (A 棒) 結束之後起算 (ts + 18天)
+            # 從當初成立的那根日K棒 (條件 2) 結束之後起算 (ts + 1天)
             target_dt = pd.to_datetime(target_info['dt_str'])
-            bar_a_end_time = target_dt + pd.Timedelta(days=18)
+            bar_a_end_time = target_dt + pd.Timedelta(days=1)
             df_3h_after_a = df_3h[df_3h['3h_period'] >= bar_a_end_time].reset_index(drop=True)
 
             if len(df_3h_after_a) >= 3:
@@ -875,7 +874,7 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
                     bar_a_3h = df_3h_after_a.iloc[i-2]
                     
                     if not has_touched_high:
-                        if bar_c['high'] >= target_18d_high:
+                        if bar_c['high'] >= target_1d_high:
                             has_touched_high = True
                             touch_ts = int(bar_c['ts'])
                         continue
