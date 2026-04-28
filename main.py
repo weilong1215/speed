@@ -780,7 +780,7 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
             prev2_body_high = max(prev2['open'], prev2['close'])
             
             if state == 0:
-                if bar['close'] < prev1_body_high and bar['close'] < prev2_body_high and bar['close'] > bar['sma_10']:
+                if bar['close'] < prev1_body_high and bar['close'] < prev2_body_high and bar['close'] > bar['sma_10'] and prev1['close'] > prev1['sma_10'] and prev2['close'] > prev2['sma_10']:
                     state = 1
                     target_info_c1 = {
                         'dt_str': bar['dt'].isoformat(),
@@ -812,7 +812,7 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
                     state = 0
                     target_info_c1 = None
                     target_info_c2 = None
-                    if bar['close'] < prev1_body_high and bar['close'] < prev2_body_high and bar['close'] > bar['sma_10']:
+                    if bar['close'] < prev1_body_high and bar['close'] < prev2_body_high and bar['close'] > bar['sma_10'] and prev1['close'] > prev1['sma_10'] and prev2['close'] > prev2['sma_10']:
                         state = 1
                         target_info_c1 = {
                             'dt_str': bar['dt'].isoformat(),
@@ -1181,15 +1181,15 @@ async def run_scan():
                                 break
                     if entry_price > 0 and matched_sig:
                         current_sl = float(matched_sig['sl_price'])
-                        batch = await ex.fetch_ohlcv(sym, '1d', limit=10)
+                        batch = await ex.fetch_ohlcv(sym, '3d', limit=10)
                         if batch:
-                            df_1d = pd.DataFrame(batch, columns=['ts', 'open', 'high', 'low', 'close', 'vol'])
-                            now_utc_1d_fl = int(pd.Timestamp.now(tz='UTC').floor('1d').timestamp() * 1000)
-                            closed_1d = df_1d[df_1d['ts'] < now_utc_1d_fl]
-                            if len(closed_1d) >= 2:
-                                last_closed = closed_1d.iloc[-1]
-                                prev_closed = closed_1d.iloc[-2]
-                                last_close_time = last_closed['ts'] + 24 * 3600 * 1000
+                            df_3d = pd.DataFrame(batch, columns=['ts', 'open', 'high', 'low', 'close', 'vol'])
+                            now_utc_3d = int(time.time() * 1000)
+                            closed_3d = df_3d[df_3d['ts'] + 3 * 24 * 3600 * 1000 <= now_utc_3d]
+                            if len(closed_3d) >= 2:
+                                last_closed = closed_3d.iloc[-1]
+                                prev_closed = closed_3d.iloc[-2]
+                                last_close_time = last_closed['ts'] + 3 * 24 * 3600 * 1000
                                 if last_close_time > entry_time:
                                     prev_body_high = max(prev_closed['open'], prev_closed['close'])
                                     if last_closed['close'] > prev_body_high and last_closed['low'] > entry_price:
