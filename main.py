@@ -586,50 +586,43 @@ async def monitor_positions(exchange):
                                 sig['status'] = 'closed'
                                 continue
 
-                        # 保護止損條件撤單：3D 線已形成保護結構，進場時機已過
+                        # 訊號淘汰條件撤單：若尚未進場，且日線收盤跌破 10MA 或最低點低於止損價，則作廢訊號撤單
                         if not is_runaway:
                             try:
                                 entry_ts = int(sig.get('timestamp', 0))
-                                ohlcv_1d = await exchange.fetch_ohlcv(symbol, '1d', limit=15)
-                                if ohlcv_1d and len(ohlcv_1d) >= 6:
+                                ohlcv_1d = await exchange.fetch_ohlcv(symbol, '1d', limit=20)
+                                if ohlcv_1d and len(ohlcv_1d) >= 15:
                                     df_1d = pd.DataFrame(ohlcv_1d, columns=['ts', 'open', 'high', 'low', 'close', 'vol'])
-                                    df_1d['dt'] = pd.to_datetime(df_1d['ts'], unit='ms', utc=True)
-                                    df_1d['year'] = df_1d['dt'].dt.year
-                                    df_1d['doy'] = df_1d['dt'].dt.dayofyear
-                                    df_1d['group_id'] = (df_1d['doy'] - 1) // 3
-                                    df_1d['g_key'] = df_1d['year'].astype(str) + "_" + df_1d['group_id'].astype(str).str.zfill(3)
+                                    df_1d['sma_10'] = df_1d['close'].rolling(window=10).mean()
                                     
-                                    df_3d = df_1d.groupby('g_key').agg({
-                                        'ts': 'first', 'open': 'first', 'high': 'max', 'low': 'min', 'close': 'last'
-                                    }).sort_values('ts').reset_index()
-
-                                    now_utc = pd.Timestamp.now(tz='UTC')
-                                    current_g_key = f"{now_utc.year}_{((now_utc.dayofyear - 1) // 3):03d}"
-                                    closed_3d = df_3d[df_3d['g_key'] < current_g_key]
+                                    now_utc_1d_fl = int(pd.Timestamp.now(tz='UTC').floor('1d').timestamp() * 1000)
+                                    closed_1d = df_1d[df_1d['ts'] < now_utc_1d_fl]
                                     
-                                    if len(closed_3d) >= 2:
-                                        last_3d = closed_3d.iloc[-1]
-                                        prev_3d = closed_3d.iloc[-2]
-                                        last_close_time = int(last_3d['ts']) + (3 * 86400000)
-                                        prev_body_high = max(prev_3d['open'], prev_3d['close'])
-                                        if last_close_time > entry_ts and last_3d['close'] > prev_body_high and last_3d['low'] > entry_price:
-                                            logger.info(f"🛡️ 保護止損條件已成立 ({symbol})，撤銷未成交進場單 {signal_id}")
-                                            entry_orders = [o for o in open_orders if str(o.get('clientOrderId') or o.get('info', {}).get('clientOid') or "") == str(signal_id)]
-                                            for eo in entry_orders:
-                                                try:
-                                                    await exchange.cancel_order(eo['id'], symbol)
-                                                    open_orders = [o for o in open_orders if o['id'] != eo['id']]
-                                                except Exception as e:
-                                                    logger.warning(f"撤銷未成交單失敗 {eo['id']}: {e}")
-                                            send_telegram_message(
-                                                f"<b>🛡️ 保護止損條件已成立 (撤銷進場)</b>\n\n"
-                                                f"💎 <b>交易對:</b> {get_base_coin(symbol)} [{direction}]\n"
-                                                f"📉 <b>狀態: 已自動撤銷未成交之進場單</b>"
-                                            )
-                                            sig['status'] = 'closed'
-                                            continue
+                                    if len(closed_1d) > 0:
+                                        last_closed = closed_1d.iloc[-1]
+                                        last_close_time = int(last_closed['ts']) + 86400000
+                                        
+                                        # 只檢查訊號產生之後的 K 棒
+                                        if last_close_time > entry_ts:
+                                            # 如果收盤低於 10MA，或最低價跌破原止損 (C2_low)
+                                            if last_closed['close'] < last_closed['sma_10'] or last_closed['low'] < float(sig['original_sl_price']):
+                                                logger.info(f"🚫 淘汰條件已成立 (跌破10MA或最低價) ({symbol})，撤銷未成交單 {signal_id}")
+                                                entry_orders = [o for o in open_orders if str(o.get('clientOrderId') or o.get('info', {}).get('clientOid') or "") == str(signal_id)]
+                                                for eo in entry_orders:
+                                                    try:
+                                                        await exchange.cancel_order(eo['id'], symbol)
+                                                        open_orders = [o for o in open_orders if o['id'] != eo['id']]
+                                                    except Exception as e:
+                                                        logger.warning(f"撤銷未成交單失敗 {eo['id']}: {e}")
+                                                send_telegram_message(
+                                                    f"<b>🚫 訊號已淘汰 (撤銷進場)</b>\n\n"
+                                                    f"💎 <b>交易對:</b> {get_base_coin(symbol)} [{direction}]\n"
+                                                    f"📉 <b>狀態: 日K跌破 10MA 或止損價，已自動撤銷進場單</b>"
+                                                )
+                                                sig['status'] = 'closed'
+                                                continue
                             except Exception as e:
-                                logger.warning(f"檢查保護止損撤單異常 ({symbol}): {e}")
+                                logger.warning(f"檢查訊號淘汰撤單異常 ({symbol}): {e}")
 
                     except Exception as e:
                         logger.warning(f"檢查未成交單價格異常 ({symbol}): {e}")
@@ -813,7 +806,7 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
                     target_info_c1 = None
                     target_info_c2 = None
             elif state == 2:
-                if bar['low'] < c2_low:
+                if bar['low'] < c2_low or bar['close'] < bar['sma_10']:
                     # 跌破淘汰，重新尋找條件 1
                     state = 0
                     target_info_c1 = None
