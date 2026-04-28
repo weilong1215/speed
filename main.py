@@ -53,11 +53,6 @@ BITGET_PASSWORD = os.getenv("BITGET_API_PASSWORD", "") or os.getenv("BITGET_PASS
 TP_STEP_R = 5
 TP_CLOSE_PCT = 0.20
 
-def is_crypto_symbol(symbol: str, blacklist: list) -> bool:
-    if not blacklist:
-        return True
-    base = symbol.split('/')[0]
-    return not any(base == p or base.startswith(p) for p in blacklist)
 
 logger.info(f"✅ 系統配置檢查: TG_TOKEN={'已設定' if TG_BOT_TOKEN else '未設定'}, TG_CHAT_ID={'已設定' if TG_CHAT_ID else '未設定'}")
 logger.info(f"✅ 交易所配置檢查: API_KEY={'已設定' if BITGET_API_KEY else '未設定'}")
@@ -124,12 +119,10 @@ def load_config():
         try:
             with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
                 config = json.load(f)
-            if "blacklist" not in config:
-                config["blacklist"] = []
             return config
         except Exception as e:
             logger.error(f"讀取設定檔失敗: {e}")
-    return {"default_loss_amount": 6, "blacklist": []}
+    return {"default_loss_amount": 6}
 
 def save_config(data):
     try:
@@ -786,10 +779,20 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
                     }
                     target_info_c2 = None
             elif state == 1:
-                # 間隔 K 棒：跌破 10MA 或提前突破前兩根實體高點則淘汰
-                if bar['close'] < bar['sma_10'] or bar['close'] > max(prev1_body_high, prev2_body_high):
+                # 間隔 K 棒：必須為陽棒，且不跌破 10MA，且不提前突破前兩根實體高點
+                if bar['close'] <= bar['open'] or bar['close'] < bar['sma_10'] or bar['close'] > max(prev1_body_high, prev2_body_high):
                     state = 0
                     target_info_c1 = None
+                    # 淘汰後檢查當前棒是否為新的條件一
+                    if bar['close'] < bar['open'] and bar['close'] < prev1_body_high and bar['close'] < prev2_body_high and bar['close'] > bar['sma_10'] and prev1['close'] > prev1['sma_10'] and prev2['close'] > prev2['sma_10']:
+                        state = 1
+                        target_info_c1 = {
+                            'dt_str': bar['dt'].isoformat(),
+                            'ts': int(bar['ts']),
+                            'close': float(bar['close']),
+                            'high': float(bar['high']),
+                            'low': float(bar['low'])
+                        }
                 else:
                     state = 2
             elif state == 2:
@@ -940,23 +943,18 @@ def send_triggered_message(item, default_loss):
 def send_system_settings_message(config):
     """獨立一則系統設定訊息"""
     loss = config.get("default_loss_amount", 6)
-    bl = config.get("blacklist", [])
-    bl_str = ", ".join(bl) if bl else "無"
 
     msg = (
         f"⚙️ <b>系統快速設定</b>\n\n"
-        f"💵 <b>預設虧損金額:</b> {loss} USDT\n"
-        f"🚫 <b>黑名單前綴:</b> {bl_str}"
+        f"💵 <b>預設虧損金額:</b> {loss} USDT"
     )
-    
+
     reply_markup = {
         "inline_keyboard": [
-            [{"text": "📝 修改預設虧損", "switch_inline_query_current_chat": "/set_loss "}],
-            [{"text": "➕ 新增黑名單", "switch_inline_query_current_chat": "/add_blacklist "},
-             {"text": "➖ 移除黑名單", "switch_inline_query_current_chat": "/remove_blacklist "}]
+            [{"text": "📝 修改預設虧損", "switch_inline_query_current_chat": "/set_loss "}]
         ]
     }
-    
+
     send_telegram_message(msg, reply_markup=reply_markup)
 
 # ============================================================================
@@ -1020,47 +1018,7 @@ def poll_telegram_commands():
                 payload = {"chat_id": chat_id, "text": reply, "parse_mode": "HTML"}
                 requests.post(send_url, json=payload, timeout=10)
 
-            elif text.startswith("/add_blacklist"):
-                parts = text.split()
-                if len(parts) >= 2:
-                    new_bl = parts[1].upper()
-                    config = load_config()
-                    bl = config.get("blacklist", [])
-                    if new_bl not in bl:
-                        bl.append(new_bl)
-                        config["blacklist"] = bl
-                        save_config(config)
-                        reply = f"✅ 已將 <b>{new_bl}</b> 加入黑名單"
-                        logger.info(f"⚙️ 加入黑名單: {new_bl}")
-                    else:
-                        reply = f"⚠️ <b>{new_bl}</b> 已經在黑名單中"
-                else:
-                    reply = "❌ 格式錯誤，未提供幣種名稱。"
 
-                send_url = f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendMessage"
-                payload = {"chat_id": chat_id, "text": reply, "parse_mode": "HTML"}
-                requests.post(send_url, json=payload, timeout=10)
-
-            elif text.startswith("/remove_blacklist"):
-                parts = text.split()
-                if len(parts) >= 2:
-                    rm_bl = parts[1].upper()
-                    config = load_config()
-                    bl = config.get("blacklist", [])
-                    if rm_bl in bl:
-                        bl.remove(rm_bl)
-                        config["blacklist"] = bl
-                        save_config(config)
-                        reply = f"✅ 已將 <b>{rm_bl}</b> 移出黑名單"
-                        logger.info(f"⚙️ 移除黑名單: {rm_bl}")
-                    else:
-                        reply = f"⚠️ <b>{rm_bl}</b> 不在黑名單中"
-                else:
-                    reply = "❌ 格式錯誤，未提供幣種名稱。"
-
-                send_url = f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendMessage"
-                payload = {"chat_id": chat_id, "text": reply, "parse_mode": "HTML"}
-                requests.post(send_url, json=payload, timeout=10)
 
     except Exception as e:
         logger.warning(f"Telegram 指令輪詢異常: {e}")
@@ -1079,7 +1037,7 @@ async def run_scan():
     try:
         try:
             markets = await ex.load_markets()
-            coins = [s for s, m in markets.items() if m.get('linear') and m.get('quote') == 'USDT' and is_crypto_symbol(s, config.get("blacklist", []))]
+            coins = [s for s, m in markets.items() if m.get('linear') and m.get('quote') == 'USDT']
             precisions = {s: max(0, int(round(-np.log10(markets[s].get('precision', {}).get('price', 1e-8))))) for s in coins}
         except:
             coins = ["BTC/USDT:USDT", "ETH/USDT:USDT", "SOL/USDT:USDT", "XRP/USDT:USDT", "DOGE/USDT:USDT", "ADA/USDT:USDT"]
