@@ -843,7 +843,8 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
             stop_loss = float(target_info_c2['low'])
             trigger_ts = int(target_info_c2['ts'])
 
-        d1_date_str = pd.to_datetime(target_info['dt_str']).strftime('%Y-%m-%d')
+        c1_date_str = pd.to_datetime(target_info_c1['dt_str']).strftime('%Y-%m-%d') if target_info_c1 else "未知"
+        c2_date_str = pd.to_datetime(target_info_c2['dt_str']).strftime('%Y-%m-%d') if target_info_c2 else "未知"
 
         return {
             'symbol': symbol,
@@ -855,7 +856,9 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
             'stop_loss': stop_loss,
             'trigger_ts': trigger_ts,
             'precision': precision,
-            'd1_date': d1_date_str
+            'd1_date': c1_date_str,  # 統一使用條件一成立日期作為排列依據
+            'c1_date': c1_date_str,
+            'c2_date': c2_date_str
         }
 
     except Exception as e:
@@ -897,11 +900,13 @@ def send_grouped_message(item_list, title):
     send_telegram_message("\n".join(lines))
 
 def send_triggered_message(item, default_loss):
-    """3H 已成立的幣種，獨立一則訊息，含倉位價值"""
+    """3H 已成立的幣種，獨立一則訊息，含倉位價值與成立日期"""
     display_symbol = get_base_coin(item['symbol'])
     precision = item['precision']
     entry = item['entry_price']
     sl = item['stop_loss']
+    c1_d = item.get('c1_date', '未知')
+    c2_d = item.get('c2_date', '未知')
 
     # 倉位價值 = 預設虧損金額 / |(進場價 - 止損價) / 進場價|
     loss_pct = abs((entry - sl) / entry) if entry != 0 else 0
@@ -909,6 +914,8 @@ def send_triggered_message(item, default_loss):
 
     msg = (
         f"💎 <b>交易對:</b> {display_symbol}\n\n"
+        f"📅 <b>條件一日期:</b> <code>{c1_d}</code>\n"
+        f"📅 <b>條件二日期:</b> <code>{c2_d}</code>\n"
         f"📍 <b>進場價格:</b> <code>{entry:.{precision}f}</code>\n"
         f"🛡️ <b>止損價格:</b> <code>{sl:.{precision}f}</code>\n"
         f"💰 <b>倉位價值:</b> <code>{position_value:.2f} USDT</code>"
