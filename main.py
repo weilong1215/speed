@@ -760,7 +760,11 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
         state = 0
         c2_low = 0.0
         
-        # 1. 由舊到新執行狀態機掃描 (條件1 -> 條件2)
+        # 1. 由舊到新執行狀態機掃描
+        # State 0: 尋找條件一
+        # State 1: 條件一成立，當前為間隔 K 棒
+        # State 2: 間隔棒已過，下一根必須滿足條件二否則淘汰
+        # State 3: 條件二成立，監控淘汰條件
         for i in range(10, len(df_1d)):
             bar = df_1d.iloc[i]
             prev1 = df_1d.iloc[i-1]
@@ -770,6 +774,7 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
             prev2_body_high = max(prev2['open'], prev2['close'])
             
             if state == 0:
+                # 尋找條件一：收盤低於前兩根實體高點，三根皆在 10MA 之上
                 if bar['close'] < prev1_body_high and bar['close'] < prev2_body_high and bar['close'] > bar['sma_10'] and prev1['close'] > prev1['sma_10'] and prev2['close'] > prev2['sma_10']:
                     state = 1
                     target_info_c1 = {
@@ -781,8 +786,16 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
                     }
                     target_info_c2 = None
             elif state == 1:
-                if bar['close'] > max(prev1_body_high, prev2_body_high) and bar['close'] > bar['sma_10']:
+                # 間隔 K 棒：跌破 10MA 則淘汰，否則推進至等待條件二
+                if bar['close'] < bar['sma_10']:
+                    state = 0
+                    target_info_c1 = None
+                else:
                     state = 2
+            elif state == 2:
+                # 必須滿足條件二，否則淘汰重找條件一
+                if bar['close'] > max(prev1_body_high, prev2_body_high) and bar['close'] > bar['sma_10']:
+                    state = 3
                     target_info_c2 = {
                         'dt_str': bar['dt'].isoformat(),
                         'ts': int(bar['ts']),
@@ -791,14 +804,23 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
                         'low': float(bar['low'])
                     }
                     c2_low = float(bar['low'])
-                elif bar['close'] < bar['sma_10']:
-                    # 收在 10MA 下方，淘汰並退回尋找條件 1
+                else:
+                    # 條件二不成立，淘汰並檢查當前棒是否為新的條件一
                     state = 0
                     target_info_c1 = None
                     target_info_c2 = None
-            elif state == 2:
+                    if bar['close'] < prev1_body_high and bar['close'] < prev2_body_high and bar['close'] > bar['sma_10'] and prev1['close'] > prev1['sma_10'] and prev2['close'] > prev2['sma_10']:
+                        state = 1
+                        target_info_c1 = {
+                            'dt_str': bar['dt'].isoformat(),
+                            'ts': int(bar['ts']),
+                            'close': float(bar['close']),
+                            'high': float(bar['high']),
+                            'low': float(bar['low'])
+                        }
+            elif state == 3:
+                # 條件二已成立，監控淘汰條件
                 if bar['low'] < c2_low or bar['close'] < bar['sma_10']:
-                    # 跌破淘汰，重新尋找條件 1
                     state = 0
                     target_info_c1 = None
                     target_info_c2 = None
@@ -812,11 +834,14 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
                             'low': float(bar['low'])
                         }
 
-        if state == 0:
+        # State 0/1: 無有效訊號或條件一剛成立但間隔棒未完成
+        if state <= 1:
             return {'symbol': symbol, 'action': 'remove'}
 
+        # State 2: 間隔棒已過，等待條件二 (關注中)
+        # State 3: 條件二已成立 (觸發進場)
         is_watchlist_eligible = True
-        target_info = target_info_c1 if state == 1 else target_info_c2
+        target_info = target_info_c1 if state == 2 else target_info_c2
         
         action = 'update'
         if cached_info and target_info['ts'] == cached_info.get('ts', 0):
@@ -827,7 +852,7 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
         stop_loss = 0.0
         trigger_ts = 0
 
-        if state == 2:
+        if state == 3:
             is_trigger_met = True
             entry_price = float(target_info_c2['close'])
             stop_loss = float(target_info_c2['low'])
@@ -846,7 +871,7 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
             'stop_loss': stop_loss,
             'trigger_ts': trigger_ts,
             'precision': precision,
-            'd1_date': c1_date_str,  # 統一使用條件一成立日期作為排列依據
+            'd1_date': c1_date_str,
             'c1_date': c1_date_str,
             'c2_date': c2_date_str
         }
@@ -1227,7 +1252,6 @@ async def run_scan():
         await ex.close()
 
 async def scheduler():
-    last_exec_hour = -1
     last_day = -1
     try:
         await run_scan()
@@ -1237,14 +1261,13 @@ async def scheduler():
     while True:
         try:
             now = datetime.utcnow()
-            # 每日 UTC 整點 (且須能被 3 整除的小時) 的前 10 分鐘內觸發，防止迴圈耗時導致跳過
-            if now.minute <= 10 and now.hour % 3 == 0 and (now.day != last_day or now.hour != last_exec_hour):
+            # 每日 UTC 00:00~00:10 觸發一次掃描
+            if now.hour == 0 and now.minute <= 10 and now.day != last_day:
                 try:
                     await run_scan()
                 except Exception as e:
                     logger.error(f"定時掃描異常: {e}")
                 last_day = now.day
-                last_exec_hour = now.hour
 
             # 倉位監控 (每個迴圈週期執行)
             if BITGET_API_KEY:
