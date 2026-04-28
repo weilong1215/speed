@@ -739,17 +739,7 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
         if current_idx > 0 and (current_idx % 50 == 0 or current_idx == total_coins):
             logger.info(f"📊 掃描進度: {current_idx}/{total_coins}...")
 
-        now_ms = int(time.time() * 1000)
-        fetch_since_1d = now_ms - (200 * 24 * 3600 * 1000)
-
-        ohlcv_1d = []
-        curr_1d = fetch_since_1d
-        for _ in range(3):
-            batch = await exchange.fetch_ohlcv(symbol, '1d', since=curr_1d, limit=100)
-            if not batch: break
-            ohlcv_1d.extend(batch)
-            curr_1d = batch[-1][0] + (24 * 3600 * 1000)
-            if curr_1d >= now_ms: break
+        ohlcv_1d = await exchange.fetch_ohlcv(symbol, '1d', limit=100)
 
         if not ohlcv_1d: return None
         df = pd.DataFrame(ohlcv_1d, columns=['ts', 'open', 'high', 'low', 'close', 'vol'])
