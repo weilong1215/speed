@@ -771,7 +771,8 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
         # 計算日線 10MA
         df_1d['sma_10'] = df_1d['close'].rolling(window=10).mean()
 
-        target_info = None
+        target_info_c1 = None
+        target_info_c2 = None
         state = 0
         c2_low = 0.0
         
@@ -786,10 +787,18 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
             if state == 0:
                 if bar['close'] <= prev_2_body_high and bar['close'] > bar['sma_10']:
                     state = 1
+                    target_info_c1 = {
+                        'dt_str': bar['dt'].isoformat(),
+                        'ts': int(bar['ts']),
+                        'close': float(bar['close']),
+                        'high': float(bar['high']),
+                        'low': float(bar['low'])
+                    }
+                    target_info_c2 = None
             elif state == 1:
                 if bar['close'] > prev_2_body_high and bar['close'] > bar['sma_10']:
                     state = 2
-                    target_info = {
+                    target_info_c2 = {
                         'dt_str': bar['dt'].isoformat(),
                         'ts': int(bar['ts']),
                         'close': float(bar['close']),
@@ -801,125 +810,47 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
                 if bar['low'] < c2_low:
                     # 跌破淘汰，重新尋找條件 1
                     state = 0
-                    target_info = None
+                    target_info_c1 = None
+                    target_info_c2 = None
                     if bar['close'] <= prev_2_body_high and bar['close'] > bar['sma_10']:
                         state = 1
+                        target_info_c1 = {
+                            'dt_str': bar['dt'].isoformat(),
+                            'ts': int(bar['ts']),
+                            'close': float(bar['close']),
+                            'high': float(bar['high']),
+                            'low': float(bar['low'])
+                        }
 
-        if target_info is None:
+        if state == 0:
             return {'symbol': symbol, 'action': 'remove'}
 
+        is_watchlist_eligible = True
+        target_info = target_info_c1 if state == 1 else target_info_c2
+        
         action = 'update'
         if cached_info and target_info['ts'] == cached_info.get('ts', 0):
             action = 'keep'
 
-        # === 3H 條件進階判斷 ===
-        target_1d_high = target_info['high']
-        # 從條件2日棒開始的時間之後抓取 1H 轉換 3H
-        fetch_since_1h = int(target_info['ts'])
-        ohlcv_1h = []
-        curr_1h = fetch_since_1h
-        for _ in range(6): # 最多抓 6 次，對應約 250 天的 1H 資料
-            try:
-                batch_1h = await exchange.fetch_ohlcv(symbol, '1h', since=curr_1h, limit=1000)
-                if not batch_1h: break
-                ohlcv_1h.extend(batch_1h)
-                curr_1h = batch_1h[-1][0] + (3600 * 1000)
-                if curr_1h >= now_ms: break
-            except Exception as e:
-                if "40017" in str(e): break # 上市時間不足
-                raise e
-
-        is_3h_met = False
+        is_trigger_met = False
         entry_price = 0.0
         stop_loss = 0.0
         trigger_ts = 0
 
-        if ohlcv_1h:
-            df_1h = pd.DataFrame(ohlcv_1h, columns=['ts', 'open', 'high', 'low', 'close', 'vol']).drop_duplicates(subset=['ts']).reset_index(drop=True)
-            df_1h['dt'] = pd.to_datetime(df_1h['ts'], unit='ms', utc=True)
+        if state == 2:
+            is_trigger_met = True
+            entry_price = float(target_info_c2['close'])
+            stop_loss = float(target_info_c2['low'])
+            trigger_ts = int(target_info_c2['ts'])
 
-            df_1h['3h_period'] = df_1h['dt'].dt.floor('3h')
-            df_3h = df_1h.groupby('3h_period').agg({
-                'ts': 'first',
-                'dt': 'first',
-                'open': 'first',
-                'high': 'max',
-                'low': 'min',
-                'close': 'last',
-                'vol': 'sum'
-            }).sort_values('ts').reset_index()
-
-            local_now_utc = pd.Timestamp.now(tz='UTC')
-            now_utc_3h_fl = local_now_utc.floor('3h')
-            df_3h = df_3h[df_3h['3h_period'] < now_utc_3h_fl].reset_index(drop=True)
-
-            # 從當初成立的那根日K棒 (條件 2) 結束之後起算 (ts + 1天)
-            target_dt = pd.to_datetime(target_info['dt_str'])
-            bar_a_end_time = target_dt + pd.Timedelta(days=1)
-            df_3h_after_a = df_3h[df_3h['3h_period'] >= bar_a_end_time].reset_index(drop=True)
-
-            if len(df_3h_after_a) >= 3:
-                # 計算 3H 布林帶 (20, 2)
-                sma = df_3h_after_a['close'].rolling(window=20).mean()
-                std = df_3h_after_a['close'].rolling(window=20).std()
-                df_3h_after_a['bb_middle'] = sma
-                df_3h_after_a['bb_lower'] = sma - (2 * std)
-
-                has_touched_high = False
-                touch_ts = 0
-                
-                for i in range(2, len(df_3h_after_a)):
-                    bar_c = df_3h_after_a.iloc[i]
-                    bar_b = df_3h_after_a.iloc[i-1]
-                    bar_a_3h = df_3h_after_a.iloc[i-2]
-                    
-                    if not has_touched_high:
-                        if bar_c['high'] >= target_1d_high:
-                            has_touched_high = True
-                            touch_ts = int(bar_c['ts'])
-                        continue
-                        
-                    if has_touched_high:
-                        if pd.isna(bar_c['bb_lower']):
-                            continue
-                            
-                        # B 棒低點局部最低
-                        b_is_lowest_low = (bar_b['low'] < bar_a_3h['low']) and (bar_b['low'] < bar_c['low'])
-                        # B 棒高點局部最低
-                        b_is_lowest_high = (bar_b['high'] < bar_a_3h['high']) and (bar_b['high'] <= bar_c['high'])
-                        
-                        # 碰觸布林下軌 (至少一根)
-                        touch_lower_band = (bar_a_3h['low'] <= bar_a_3h['bb_lower']) or \
-                                           (bar_b['low'] <= bar_b['bb_lower']) or \
-                                           (bar_c['low'] <= bar_c['bb_lower'])
-                                           
-                        # 實體吞噬
-                        b_body_high = max(bar_b['open'], bar_b['close'])
-                        c_engulf_b = bar_c['close'] >= b_body_high
-                        
-                        # C 棒收盤價在 3H 中軌之下
-                        c_below_middle_band = bar_c['close'] < bar_c['bb_middle']
-                        
-                        if b_is_lowest_low and b_is_lowest_high and touch_lower_band and c_engulf_b and c_below_middle_band:
-                            # 觸發進場 (僅在最新一根 3H 收盤時)
-                            if i == len(df_3h_after_a) - 1:
-                                is_3h_met = True
-                                entry_price = float(bar_c['close'])
-                                stop_loss = float(bar_c['low']) # SL 設在 C 棒最低點
-                                trigger_ts = int(bar_c['ts'])
-
-        if has_touched_high:
-            # 轉換為 UTC+8 時區供 Telegram 群組顯示使用
-            d1_date_str = pd.to_datetime(touch_ts, unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d')
-        else:
-            d1_date_str = pd.to_datetime(target_info['dt_str']).strftime('%Y-%m-%d')
+        d1_date_str = pd.to_datetime(target_info['dt_str']).strftime('%Y-%m-%d')
 
         return {
             'symbol': symbol,
             'action': action,
             'data': target_info,
-            'is_3h_met': is_3h_met,
-            'has_touched_high': has_touched_high,
+            'is_trigger_met': is_trigger_met,
+            'is_watchlist_eligible': is_watchlist_eligible,
             'entry_price': entry_price,
             'stop_loss': stop_loss,
             'trigger_ts': trigger_ts,
@@ -1152,7 +1083,7 @@ async def run_scan():
                 if res is None: continue
                 sym = res['symbol']
                 
-                if res.get('has_touched_high'):
+                if res.get('is_watchlist_eligible'):
                     if res['action'] == 'update' or res['action'] == 'keep':
                         watchlist[sym] = res['data']
                         all_results.append(res)
@@ -1200,7 +1131,7 @@ async def run_scan():
             if sym in holding_items_dict:
                 # 已經在持倉中，更新其 3D 日期標籤
                 holding_items_dict[sym]['d1_date'] = item.get('d1_date', holding_items_dict[sym]['d1_date'])
-            elif item.get('is_3h_met'):
+            elif item.get('is_trigger_met'):
                 cached = watchlist.get(sym, {})
                 trigger_ts = item.get('trigger_ts', 0)
                 # 若同一觸發已處理過，不再進場，視為錯失後持續關注
