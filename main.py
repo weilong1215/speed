@@ -782,10 +782,11 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
             prev1 = df_1d.iloc[i-1]
             prev2 = df_1d.iloc[i-2]
             
-            prev_2_body_high = max(prev1['open'], prev1['close'], prev2['open'], prev2['close'])
+            prev1_body_high = max(prev1['open'], prev1['close'])
+            prev2_body_high = max(prev2['open'], prev2['close'])
             
             if state == 0:
-                if bar['close'] <= prev_2_body_high and bar['close'] > bar['sma_10']:
+                if bar['close'] < prev1_body_high and bar['close'] < prev2_body_high and bar['close'] > bar['sma_10']:
                     state = 1
                     target_info_c1 = {
                         'dt_str': bar['dt'].isoformat(),
@@ -796,7 +797,7 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
                     }
                     target_info_c2 = None
             elif state == 1:
-                if bar['close'] > prev_2_body_high and bar['close'] > bar['sma_10']:
+                if bar['close'] > max(prev1_body_high, prev2_body_high) and bar['close'] > bar['sma_10']:
                     state = 2
                     target_info_c2 = {
                         'dt_str': bar['dt'].isoformat(),
@@ -817,7 +818,7 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
                     state = 0
                     target_info_c1 = None
                     target_info_c2 = None
-                    if bar['close'] <= prev_2_body_high and bar['close'] > bar['sma_10']:
+                    if bar['close'] < prev1_body_high and bar['close'] < prev2_body_high and bar['close'] > bar['sma_10']:
                         state = 1
                         target_info_c1 = {
                             'dt_str': bar['dt'].isoformat(),
