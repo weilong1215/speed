@@ -806,6 +806,11 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
                         'low': float(bar['low'])
                     }
                     c2_low = float(bar['low'])
+                elif bar['close'] < bar['sma_10']:
+                    # 收在 10MA 下方，淘汰並退回尋找條件 1
+                    state = 0
+                    target_info_c1 = None
+                    target_info_c2 = None
             elif state == 2:
                 if bar['low'] < c2_low:
                     # 跌破淘汰，重新尋找條件 1
