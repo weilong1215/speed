@@ -774,8 +774,8 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
             prev2_body_high = max(prev2['open'], prev2['close'])
             
             if state == 0:
-                # 尋找條件一：收盤低於前兩根實體高點，三根皆在 10MA 之上
-                if bar['close'] < prev1_body_high and bar['close'] < prev2_body_high and bar['close'] > bar['sma_10'] and prev1['close'] > prev1['sma_10'] and prev2['close'] > prev2['sma_10']:
+                # 尋找條件一：陰棒且收盤低於前兩根實體高點，三根皆在 10MA 之上
+                if bar['close'] < bar['open'] and bar['close'] < prev1_body_high and bar['close'] < prev2_body_high and bar['close'] > bar['sma_10'] and prev1['close'] > prev1['sma_10'] and prev2['close'] > prev2['sma_10']:
                     state = 1
                     target_info_c1 = {
                         'dt_str': bar['dt'].isoformat(),
@@ -809,7 +809,7 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
                     state = 0
                     target_info_c1 = None
                     target_info_c2 = None
-                    if bar['close'] < prev1_body_high and bar['close'] < prev2_body_high and bar['close'] > bar['sma_10'] and prev1['close'] > prev1['sma_10'] and prev2['close'] > prev2['sma_10']:
+                    if bar['close'] < bar['open'] and bar['close'] < prev1_body_high and bar['close'] < prev2_body_high and bar['close'] > bar['sma_10'] and prev1['close'] > prev1['sma_10'] and prev2['close'] > prev2['sma_10']:
                         state = 1
                         target_info_c1 = {
                             'dt_str': bar['dt'].isoformat(),
@@ -824,7 +824,7 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
                     state = 0
                     target_info_c1 = None
                     target_info_c2 = None
-                    if bar['close'] < prev1_body_high and bar['close'] < prev2_body_high and bar['close'] > bar['sma_10'] and prev1['close'] > prev1['sma_10'] and prev2['close'] > prev2['sma_10']:
+                    if bar['close'] < bar['open'] and bar['close'] < prev1_body_high and bar['close'] < prev2_body_high and bar['close'] > bar['sma_10'] and prev1['close'] > prev1['sma_10'] and prev2['close'] > prev2['sma_10']:
                         state = 1
                         target_info_c1 = {
                             'dt_str': bar['dt'].isoformat(),
