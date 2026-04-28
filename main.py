@@ -786,8 +786,8 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
                     }
                     target_info_c2 = None
             elif state == 1:
-                # 間隔 K 棒：跌破 10MA 則淘汰，否則推進至等待條件二
-                if bar['close'] < bar['sma_10']:
+                # 間隔 K 棒：跌破 10MA 或提前突破前兩根實體高點則淘汰
+                if bar['close'] < bar['sma_10'] or bar['close'] > max(prev1_body_high, prev2_body_high):
                     state = 0
                     target_info_c1 = None
                 else:
