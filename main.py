@@ -233,7 +233,7 @@ def compose_3d_bars(ohlcv_1d):
 # 交易執行
 # ============================================================================
 
-async def place_order(exchange, symbol, direction, entry, sl, precision, fixed_loss_usdt):
+async def place_order(exchange, symbol, direction, entry, sl, precision, fixed_loss_usdt, trigger_ts):
     """
     執行下單：Limit Order + 分層槓桿策略 (MAX → 20x → 10x)
 
@@ -367,7 +367,7 @@ async def place_order(exchange, symbol, direction, entry, sl, precision, fixed_l
                     'quantity': qty, 'entry_price': entry, 'sl_price': sl,
                     'original_sl_price': sl,
                     'tp_next_tier': 0, 'status': 'active', 'precision': precision,
-                    'timestamp': int(time.time() * 1000)
+                    'timestamp': trigger_ts if trigger_ts > 0 else int(time.time() * 1000)
                 })
                 save_active_signals(signals)
                 send_telegram_message(
@@ -978,7 +978,8 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
                 dynamic_sl = current_sl
 
                 # 2. 條件二已成立，使用最新保護止損監控淘汰條件
-                if bar['low'] < dynamic_sl or bar['close'] < bar['sma_10']:
+                # 如果歷史回推已經產生過保護止損 (dynamic_sl > c2_low)，代表進場時機已過，直接作廢
+                if bar['low'] < dynamic_sl or bar['close'] < bar['sma_10'] or dynamic_sl > c2_low:
                     state = 0
                     target_info_c1 = None
                     target_info_c2 = None
@@ -1321,7 +1322,7 @@ async def run_scan():
             if BITGET_API_KEY:
                 order = await place_order(
                     ex, sym, 'LONG', item['entry_price'], item['stop_loss'],
-                    item['precision'], default_loss
+                    item['precision'], default_loss, item.get('trigger_ts', 0)
                 )
                 # 若下單成功 (回傳 dict) 或遇到不可恢復之交易所限制 (回傳 FATAL_REJECTED)
                 # 則標記該訊號已處理。若是資金不足或網路異常 (回傳 None)，則保留明天重試機會
