@@ -1365,18 +1365,18 @@ async def run_scan():
                             
                             # 保護止損只能往上，新值必須高於現有 sl_price 才替換
                             if candidate_sl > current_sl:
-                                            precision = matched_sig.get('precision', 4)
-                                            old_sl = current_sl
-                                            matched_sig['sl_price'] = candidate_sl
-                                            save_active_signals(signals)
-                                            logger.info(f"🛡️ 保護止損上移: {sym} | {old_sl:.{precision}f} → {candidate_sl:.{precision}f}")
-                                            send_telegram_message(
-                                                f"🛡️ <b>保護止損已上移</b>\n\n"
-                                                f"💎 {get_base_coin(sym)}\n"
-                                                f"📍 <code>{old_sl:.{precision}f}</code> → <code>{candidate_sl:.{precision}f}</code>"
-                                            )
-                                        # 無論是否更新，顯示當前保護止損
-                                        item['protect_sl'] = float(matched_sig['sl_price'])
+                                precision = matched_sig.get('precision', 4)
+                                old_sl = current_sl
+                                matched_sig['sl_price'] = candidate_sl
+                                save_active_signals(signals)
+                                logger.info(f"🛡️ 保護止損上移: {sym} | {old_sl:.{precision}f} → {candidate_sl:.{precision}f}")
+                                send_telegram_message(
+                                    f"🛡️ <b>保護止損已上移</b>\n\n"
+                                    f"💎 {get_base_coin(sym)}\n"
+                                    f"📍 <code>{old_sl:.{precision}f}</code> → <code>{candidate_sl:.{precision}f}</code>"
+                                )
+                            # 無論是否更新，顯示當前保護止損
+                            item['protect_sl'] = float(matched_sig['sl_price'])
                 except Exception as e:
                     logger.warning(f"獲取保護止損失敗 ({sym}): {e}")
 
