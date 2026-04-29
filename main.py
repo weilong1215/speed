@@ -1353,7 +1353,9 @@ async def run_scan():
                             df_3d = pd.DataFrame(batch, columns=['ts', 'open', 'high', 'low', 'close', 'vol', 'close_ts'])
                             now_utc_3d = int(time.time() * 1000)
                             closed_3d = df_3d[df_3d['close_ts'] <= now_utc_3d]
-                            candidate_sl = current_sl
+                            original_sl = float(matched_sig.get('original_sl_price', 0))
+                            candidate_sl = original_sl
+                            
                             for idx in range(1, len(closed_3d)):
                                 curr_b = closed_3d.iloc[idx]
                                 prev_b = closed_3d.iloc[idx-1]
@@ -1363,20 +1365,26 @@ async def run_scan():
                                         if curr_b['low'] > candidate_sl:
                                             candidate_sl = curr_b['low']
                             
-                            # 保護止損只能往上，新值必須高於現有 sl_price 才替換
-                            if candidate_sl > current_sl:
+                            # 若重新推演出的正確止損不等於當前檔案記錄，強制更新/修復
+                            if candidate_sl != current_sl:
                                 precision = matched_sig.get('precision', 4)
                                 old_sl = current_sl
                                 matched_sig['sl_price'] = candidate_sl
                                 save_active_signals(signals)
-                                logger.info(f"🛡️ 保護止損上移: {sym} | {old_sl:.{precision}f} → {candidate_sl:.{precision}f}")
-                                send_telegram_message(
-                                    f"🛡️ <b>保護止損已上移</b>\n\n"
-                                    f"💎 {get_base_coin(sym)}\n"
-                                    f"📍 <code>{old_sl:.{precision}f}</code> → <code>{candidate_sl:.{precision}f}</code>"
-                                )
-                            # 無論是否更新，顯示當前保護止損
-                            item['protect_sl'] = float(matched_sig['sl_price'])
+                                
+                                if candidate_sl > old_sl:
+                                    logger.info(f"🛡️ 保護止損上移: {sym} | {old_sl:.{precision}f} → {candidate_sl:.{precision}f}")
+                                    send_telegram_message(
+                                        f"🛡️ <b>保護止損已上移</b>\n\n"
+                                        f"💎 {get_base_coin(sym)}\n"
+                                        f"📍 <code>{old_sl:.{precision}f}</code> → <code>{candidate_sl:.{precision}f}</code>"
+                                    )
+                                else:
+                                    logger.info(f"🔧 保護止損向下修復(修正舊算法殘留錯誤): {sym} | {old_sl:.{precision}f} → {candidate_sl:.{precision}f}")
+                                    
+                            # 只有當保護止損確實大於初始止損時，才在推播中顯示
+                            if candidate_sl > original_sl:
+                                item['protect_sl'] = float(candidate_sl)
                 except Exception as e:
                     logger.warning(f"獲取保護止損失敗 ({sym}): {e}")
 
