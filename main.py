@@ -906,8 +906,11 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
                 else:
                     state = 2
             elif state == 2:
-                # 必須滿足條件二，否則淘汰重找條件一
-                if bar['close'] > max(prev1_body_high, prev2_body_high) and bar['close'] > bar['sma_10']:
+                # 必須滿足條件二 (突破+站上10MA+止損距離<=30%)，否則淘汰重找條件一
+                is_breakout = bar['close'] > max(prev1_body_high, prev2_body_high) and bar['close'] > bar['sma_10']
+                sl_distance = (bar['close'] - bar['low']) / bar['close'] if bar['close'] > 0 else 1.0
+                
+                if is_breakout and sl_distance <= 0.30:
                     state = 3
                     target_info_c2 = {
                         'dt_str': bar['dt'].isoformat(),
