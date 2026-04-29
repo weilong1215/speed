@@ -922,8 +922,6 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
                     c2_low = float(bar['low'])
                     dynamic_sl = c2_low
                     entry_price_scan = float(bar['close'])
-                    scan_3d_groups = {}
-                    scan_3d_last = None
                 else:
                     # 條件二不成立，淘汰並檢查當前棒是否為新的條件一
                     state = 0
@@ -939,37 +937,37 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
                             'low': float(bar['low'])
                         }
             elif state == 3:
-                # 1. 優先檢查是否進入新的 3D 週期，若有則結算並上移保護止損
-                bar_ts = int(bar['ts'])
-                group_key = ((bar_ts - EPOCH_MS) // PERIOD_MS) * PERIOD_MS + EPOCH_MS
-                if group_key not in scan_3d_groups:
-                    # 新的 3D 週期開始，檢查前一個週期是否已完成
-                    completed_keys = [k for k in sorted(scan_3d_groups.keys()) if k < group_key and len(scan_3d_groups[k]) >= 3]
-                    if completed_keys:
-                        last_key = completed_keys[-1]
-                        chunk = sorted(scan_3d_groups[last_key], key=lambda x: x['ts'])
-                        bar_3d = {
-                            'open': chunk[0]['open'],
-                            'close': chunk[-1]['close'],
-                            'high': max(b['high'] for b in chunk),
-                            'low': min(b['low'] for b in chunk)
-                        }
-                        if scan_3d_last is not None:
-                            prev_3d_body_high = max(scan_3d_last['open'], scan_3d_last['close'])
-                            if bar_3d['close'] > prev_3d_body_high and bar_3d['low'] > entry_price_scan:
-                                if bar_3d['low'] > dynamic_sl:
-                                    dynamic_sl = bar_3d['low']
-                        scan_3d_last = bar_3d
-                    scan_3d_groups[group_key] = []
+                # 1. 計算目前的 3D K 棒 (使用全部歷史資料到今天為止，確保與實盤 100% 同步)
+                historical_1d = df_1d.iloc[:i+1]
+                ohlcv_1d_list = historical_1d[['ts', 'open', 'high', 'low', 'close', 'vol']].values.tolist()
+                composed_3d = compose_3d_bars(ohlcv_1d_list)
+                
+                # 從 C2 開始重新推演 dynamic_sl
+                current_sl = c2_low
+                entry_ts_scan = target_info_c2['ts']
+                
+                # 過濾出在 C2 之後才「收盤」的 3D K 棒
+                # 3D 棒的 ts 是開盤時間，收盤時間是 ts + 3天
+                for idx, b_3d in enumerate(composed_3d):
+                    b_ts = b_3d[0]
+                    b_close_time = b_ts + 3 * 24 * 3600 * 1000
+                    if b_close_time > entry_ts_scan and idx >= 1:
+                        prev_b = composed_3d[idx-1]
+                        prev_body_high = max(prev_b[1], prev_b[4]) # open, close
+                        b_close = b_3d[4]
+                        b_low = b_3d[3]
+                        if b_close > prev_body_high and b_low > entry_price_scan:
+                            if b_low > current_sl:
+                                current_sl = b_low
+                
+                dynamic_sl = current_sl
 
-                # 2. 條件二已成立，使用（可能剛上移的）最新保護止損監控淘汰條件
+                # 2. 條件二已成立，使用最新保護止損監控淘汰條件
                 if bar['low'] < dynamic_sl or bar['close'] < bar['sma_10']:
                     state = 0
                     target_info_c1 = None
                     target_info_c2 = None
                     dynamic_sl = 0.0
-                    scan_3d_groups = {}
-                    scan_3d_last = None
                     if bar['close'] < bar['open'] and prev1['close'] < prev1['open'] and bar['close'] < prev1_body_high and bar['close'] < prev2_body_high and bar['close'] > bar['sma_10'] and prev1['close'] > prev1['sma_10'] and prev2['close'] > prev2['sma_10']:
                         state = 1
                         target_info_c1 = {
@@ -979,9 +977,6 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
                             'high': float(bar['high']),
                             'low': float(bar['low'])
                         }
-                else:
-                    # 當前 bar 存活，納入當前的 3D group
-                    scan_3d_groups[group_key].append({'ts': bar_ts, 'open': float(bar['open']), 'close': float(bar['close']), 'high': float(bar['high']), 'low': float(bar['low'])})
 
         # State 0/1: 無有效訊號或條件一剛成立但間隔棒未完成
         if state <= 1:
