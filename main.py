@@ -708,14 +708,17 @@ async def monitor_positions(exchange):
                                     now_utc_3d = int(time.time() * 1000)
                                     closed_3d = df_3d[df_3d['close_ts'] <= now_utc_3d]
 
-                                    if len(closed_3d) >= 2:
-                                        last_3d = closed_3d.iloc[-1]
-                                        prev_3d = closed_3d.iloc[-2]
-                                        last_3d_close_time = last_3d['close_ts']
+                                    has_generated_sl = False
+                                    for idx in range(1, len(closed_3d)):
+                                        curr_b = closed_3d.iloc[idx]
+                                        prev_b = closed_3d.iloc[idx-1]
+                                        if curr_b['close_ts'] > entry_ts:
+                                            prev_body_high = max(prev_b['open'], prev_b['close'])
+                                            if curr_b['close'] > prev_body_high and curr_b['low'] > entry_price:
+                                                has_generated_sl = True
+                                                break
 
-                                        if last_3d_close_time > entry_ts:
-                                            prev_3d_body_high = max(prev_3d['open'], prev_3d['close'])
-                                            if last_3d['close'] > prev_3d_body_high and last_3d['low'] > entry_price:
+                                    if has_generated_sl:
                                                 logger.info(f"🛡️ 保護止損已產生 ({symbol})，撤銷未成交單 {signal_id}")
                                                 entry_orders = [o for o in open_orders if str(o.get('clientOrderId') or o.get('info', {}).get('clientOid') or "") == str(signal_id)]
                                                 for eo in entry_orders:
@@ -1350,16 +1353,18 @@ async def run_scan():
                             df_3d = pd.DataFrame(batch, columns=['ts', 'open', 'high', 'low', 'close', 'vol', 'close_ts'])
                             now_utc_3d = int(time.time() * 1000)
                             closed_3d = df_3d[df_3d['close_ts'] <= now_utc_3d]
-                            if len(closed_3d) >= 2:
-                                last_closed = closed_3d.iloc[-1]
-                                prev_closed = closed_3d.iloc[-2]
-                                last_close_time = last_closed['close_ts']
-                                if last_close_time > entry_time:
-                                    prev_body_high = max(prev_closed['open'], prev_closed['close'])
-                                    if last_closed['close'] > prev_body_high and last_closed['low'] > entry_price:
-                                        candidate_sl = last_closed['low']
-                                        # 保護止損只能往上，新值必須高於現有 sl_price 才替換
-                                        if candidate_sl > current_sl:
+                            candidate_sl = current_sl
+                            for idx in range(1, len(closed_3d)):
+                                curr_b = closed_3d.iloc[idx]
+                                prev_b = closed_3d.iloc[idx-1]
+                                if curr_b['close_ts'] > entry_time:
+                                    prev_body_high = max(prev_b['open'], prev_b['close'])
+                                    if curr_b['close'] > prev_body_high and curr_b['low'] > entry_price:
+                                        if curr_b['low'] > candidate_sl:
+                                            candidate_sl = curr_b['low']
+                            
+                            # 保護止損只能往上，新值必須高於現有 sl_price 才替換
+                            if candidate_sl > current_sl:
                                             precision = matched_sig.get('precision', 4)
                                             old_sl = current_sl
                                             matched_sig['sl_price'] = candidate_sl
