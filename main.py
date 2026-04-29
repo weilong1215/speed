@@ -375,11 +375,30 @@ async def place_order(exchange, symbol, direction, entry, sl, precision, fixed_l
                     break
 
         err_msg = last_error or "未知錯誤"
+        
+        # 將生硬的錯誤碼轉換為人類易讀的中文原因
+        friendly_reason = err_msg
+        if "22047" in err_msg:
+            friendly_reason = "掛單價格偏離當前市價過大，觸發交易所限價保護"
+        elif "45110" in err_msg or "200029" in err_msg or "insufficient" in err_msg.lower() or "balance" in err_msg.lower():
+            friendly_reason = "帳戶可用保證金不足以支付此單"
+        elif "40762" in err_msg:
+            friendly_reason = "下單數量或總倉位價值超過交易所上限"
+        elif "40797" in err_msg:
+            friendly_reason = "倉位模式 (單向/雙向) 或保證金模式衝突"
+        elif "leverage" in err_msg.lower():
+            friendly_reason = "該幣種不支援設定的槓桿倍數"
+        else:
+            import re
+            match = re.search(r'"msg"\s*:\s*"([^"]+)"', err_msg)
+            if match:
+                friendly_reason = f"交易所拒絕: {match.group(1)}"
+
         logger.error(f"❌ 所有槓桿策略均已失效 ({symbol}), 最後錯誤: {err_msg}")
         send_telegram_message(
             f"<b>❌ 自動下單失敗</b>\n\n"
             f"💎 <b>交易對:</b> {get_base_coin(symbol)} [{direction}]\n"
-            f"⚠️ <b>失敗原因:</b> <code>{err_msg}</code>"
+            f"⚠️ <b>原因:</b> {friendly_reason}"
         )
         return None
     except Exception as e:
