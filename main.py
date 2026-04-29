@@ -380,8 +380,10 @@ async def place_order(exchange, symbol, direction, entry, sl, precision, fixed_l
                     logger.error(f"  策略 {strategy_name} 觸發不可恢復下單錯誤: {last_error}")
                     break
 
-        if not any(code in (last_error or "") for code in PRICE_LIMIT_CODES):
-            logger.error(f"❌ 所有槓桿策略均已失效 ({symbol}), 最後錯誤: {last_error}")
+        if any(code in (last_error or "") for code in PRICE_LIMIT_CODES):
+            return "FATAL_REJECTED"
+            
+        logger.error(f"❌ 所有槓桿策略均已失效 ({symbol}), 最後錯誤: {last_error}")
         return None
     except Exception as e:
         logger.error(f"下單執行異常 ({symbol}): {e}")
@@ -1292,10 +1294,12 @@ async def run_scan():
                     ex, sym, 'LONG', item['entry_price'], item['stop_loss'],
                     item['precision'], default_loss
                 )
-                # 無論下單成功與否，都標記此訊號已處理，防止交易所拒絕(如22047)導致每天重複觸發
-                if sym in watchlist:
-                    watchlist[sym]['last_trigger_ts'] = item.get('trigger_ts', 0)
-                save_watchlist(watchlist)
+                # 若下單成功 (回傳 dict) 或遇到不可恢復之交易所限制 (回傳 FATAL_REJECTED)
+                # 則標記該訊號已處理。若是資金不足或網路異常 (回傳 None)，則保留明天重試機會
+                if order:
+                    if sym in watchlist:
+                        watchlist[sym]['last_trigger_ts'] = item.get('trigger_ts', 0)
+                    save_watchlist(watchlist)
 
         # === 處理持倉保護止損 (持久化 + 實際更新 SL 單) ===
         if holding_items and BITGET_API_KEY:
