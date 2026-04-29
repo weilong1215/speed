@@ -186,31 +186,45 @@ def compose_3d_bars(ohlcv_1d):
     if not ohlcv_1d or len(ohlcv_1d) < 3:
         return []
 
-    EPOCH_MS = 1483228800000  # 2017-01-01 00:00 UTC
+    from datetime import datetime, timezone
+    
     PERIOD_MS = 3 * 24 * 3600 * 1000
-
-    # 按 3D 週期分組
     groups = {}
     for bar in ohlcv_1d:
         ts = bar[0]
-        group_key = ((ts - EPOCH_MS) // PERIOD_MS) * PERIOD_MS + EPOCH_MS
+        dt = datetime.fromtimestamp(ts / 1000, tz=timezone.utc)
+        year_start_dt = datetime(dt.year, 1, 1, tzinfo=timezone.utc)
+        year_epoch_ms = int(year_start_dt.timestamp() * 1000)
+        
+        group_idx = (ts - year_epoch_ms) // PERIOD_MS
+        group_key = year_epoch_ms + group_idx * PERIOD_MS
+        
         if group_key not in groups:
             groups[group_key] = []
         groups[group_key].append(bar)
 
-    # 合成 3D 棒 (僅保留完整的 3 天週期)
+    # 合成 3D 棒
     result = []
-    for gts in sorted(groups.keys()):
+    sorted_gts = sorted(groups.keys())
+    for i, gts in enumerate(sorted_gts):
         bars = sorted(groups[gts], key=lambda x: x[0])
-        if len(bars) < 3:
+        
+        # 判斷是否為已完成的 3D 週期：
+        # 1. 滿 3 天
+        # 2. 或是跨年時的殘餘天數 (即它不是整個陣列的最後一組)
+        is_completed = (len(bars) >= 3) or (i < len(sorted_gts) - 1)
+        
+        if not is_completed:
             continue
+            
         result.append([
             gts,
             bars[0][1],
             max(b[2] for b in bars),
             min(b[3] for b in bars),
             bars[-1][4],
-            sum(b[5] for b in bars)
+            sum(b[5] for b in bars),
+            bars[-1][0] + 24 * 3600 * 1000  # 第 7 個元素：實際收盤時間 (最後一根 1D 棒結束時)
         ])
 
     return result
@@ -947,10 +961,8 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
                 entry_ts_scan = target_info_c2['ts']
                 
                 # 過濾出在 C2 之後才「收盤」的 3D K 棒
-                # 3D 棒的 ts 是開盤時間，收盤時間是 ts + 3天
                 for idx, b_3d in enumerate(composed_3d):
-                    b_ts = b_3d[0]
-                    b_close_time = b_ts + 3 * 24 * 3600 * 1000
+                    b_close_time = b_3d[6]
                     if b_close_time > entry_ts_scan and idx >= 1:
                         prev_b = composed_3d[idx-1]
                         prev_body_high = max(prev_b[1], prev_b[4]) # open, close
@@ -1335,13 +1347,13 @@ async def run_scan():
                         batch_1d = await ex.fetch_ohlcv(sym, '1d', limit=30)
                         batch = compose_3d_bars(batch_1d)
                         if batch:
-                            df_3d = pd.DataFrame(batch, columns=['ts', 'open', 'high', 'low', 'close', 'vol'])
+                            df_3d = pd.DataFrame(batch, columns=['ts', 'open', 'high', 'low', 'close', 'vol', 'close_ts'])
                             now_utc_3d = int(time.time() * 1000)
-                            closed_3d = df_3d[df_3d['ts'] + 3 * 24 * 3600 * 1000 <= now_utc_3d]
+                            closed_3d = df_3d[df_3d['close_ts'] <= now_utc_3d]
                             if len(closed_3d) >= 2:
                                 last_closed = closed_3d.iloc[-1]
                                 prev_closed = closed_3d.iloc[-2]
-                                last_close_time = last_closed['ts'] + 3 * 24 * 3600 * 1000
+                                last_close_time = last_closed['close_ts']
                                 if last_close_time > entry_time:
                                     prev_body_high = max(prev_closed['open'], prev_closed['close'])
                                     if last_closed['close'] > prev_body_high and last_closed['low'] > entry_price:
