@@ -256,6 +256,8 @@ async def place_order(exchange, symbol, direction, entry, sl, precision, fixed_l
 
         # 倉位超限/槓桿超限相關的 Bitget 錯誤碼，觸發這類錯誤時降層重試
         ORDER_RETRYABLE_CODES = ("40762", "40797", "45110", "200029")
+        # 價格偏離市價過大 (Bitget 限制限價單不可偏離市價太遠)
+        PRICE_LIMIT_CODES = ("22047",)
 
         # 2. 執行分層下單嘗試
         # 核心保證：槓桿設定成功後才下單，任何一層策略失敗都不跳過降層機制
@@ -370,11 +372,16 @@ async def place_order(exchange, symbol, direction, entry, sl, precision, fixed_l
                 if any(code in last_error for code in ORDER_RETRYABLE_CODES) or "leverage" in last_error.lower():
                     logger.warning(f"  策略 {strategy_name} ({leverage}x) 下單失敗 (倉位/槓桿超限)，降層至下一策略...")
                     continue
+                elif any(code in last_error for code in PRICE_LIMIT_CODES):
+                    logger.warning(f"  ⚠️ 掛單價格偏離市價過大，遭交易所拒絕 ({symbol}): {last_error}")
+                    # 此為交易所規則，降層也沒用，直接終止
+                    break
                 else:
                     logger.error(f"  策略 {strategy_name} 觸發不可恢復下單錯誤: {last_error}")
                     break
 
-        logger.error(f"❌ 所有槓桿策略均已失效 ({symbol}), 最後錯誤: {last_error}")
+        if not any(code in (last_error or "") for code in PRICE_LIMIT_CODES):
+            logger.error(f"❌ 所有槓桿策略均已失效 ({symbol}), 最後錯誤: {last_error}")
         return None
     except Exception as e:
         logger.error(f"下單執行異常 ({symbol}): {e}")
@@ -1206,7 +1213,10 @@ async def run_scan():
                 
                 if res.get('is_watchlist_eligible'):
                     if res['action'] == 'update' or res['action'] == 'keep':
+                        old_last_trigger_ts = watchlist.get(sym, {}).get('last_trigger_ts', 0)
                         watchlist[sym] = res['data']
+                        if old_last_trigger_ts > 0:
+                            watchlist[sym]['last_trigger_ts'] = old_last_trigger_ts
                         all_results.append(res)
                 else:
                     if sym in watchlist:
@@ -1282,10 +1292,10 @@ async def run_scan():
                     ex, sym, 'LONG', item['entry_price'], item['stop_loss'],
                     item['precision'], default_loss
                 )
-                if order:
-                    if sym in watchlist:
-                        watchlist[sym]['last_trigger_ts'] = item.get('trigger_ts', 0)
-                    save_watchlist(watchlist)
+                # 無論下單成功與否，都標記此訊號已處理，防止交易所拒絕(如22047)導致每天重複觸發
+                if sym in watchlist:
+                    watchlist[sym]['last_trigger_ts'] = item.get('trigger_ts', 0)
+                save_watchlist(watchlist)
 
         # === 處理持倉保護止損 (持久化 + 實際更新 SL 單) ===
         if holding_items and BITGET_API_KEY:
