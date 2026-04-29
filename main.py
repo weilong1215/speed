@@ -704,14 +704,14 @@ async def monitor_positions(exchange):
                                 ohlcv_1d_3d = await exchange.fetch_ohlcv(symbol, '1d', limit=30)
                                 composed_3d = compose_3d_bars(ohlcv_1d_3d)
                                 if composed_3d and len(composed_3d) >= 2:
-                                    df_3d = pd.DataFrame(composed_3d, columns=['ts', 'open', 'high', 'low', 'close', 'vol'])
+                                    df_3d = pd.DataFrame(composed_3d, columns=['ts', 'open', 'high', 'low', 'close', 'vol', 'close_ts'])
                                     now_utc_3d = int(time.time() * 1000)
-                                    closed_3d = df_3d[df_3d['ts'] + 3 * 24 * 3600 * 1000 <= now_utc_3d]
+                                    closed_3d = df_3d[df_3d['close_ts'] <= now_utc_3d]
 
                                     if len(closed_3d) >= 2:
                                         last_3d = closed_3d.iloc[-1]
                                         prev_3d = closed_3d.iloc[-2]
-                                        last_3d_close_time = last_3d['ts'] + 3 * 24 * 3600 * 1000
+                                        last_3d_close_time = last_3d['close_ts']
 
                                         if last_3d_close_time > entry_ts:
                                             prev_3d_body_high = max(prev_3d['open'], prev_3d['close'])
