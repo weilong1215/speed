@@ -175,6 +175,47 @@ def get_exchange():
     return ccxt.bitget(exchange_config)
 
 # ============================================================================
+# 3D K 棒合成工具
+# ============================================================================
+
+def compose_3d_bars(ohlcv_1d):
+    """將 1D OHLCV 合成 3D K 棒 (按固定週期對齊)
+    輸入: [[ts, open, high, low, close, vol], ...]
+    輸出: 同格式的 3D K 棒列表，僅包含完整的 3 天週期
+    """
+    if not ohlcv_1d or len(ohlcv_1d) < 3:
+        return []
+
+    EPOCH_MS = 1483228800000  # 2017-01-01 00:00 UTC
+    PERIOD_MS = 3 * 24 * 3600 * 1000
+
+    # 按 3D 週期分組
+    groups = {}
+    for bar in ohlcv_1d:
+        ts = bar[0]
+        group_key = ((ts - EPOCH_MS) // PERIOD_MS) * PERIOD_MS + EPOCH_MS
+        if group_key not in groups:
+            groups[group_key] = []
+        groups[group_key].append(bar)
+
+    # 合成 3D 棒 (僅保留完整的 3 天週期)
+    result = []
+    for gts in sorted(groups.keys()):
+        bars = sorted(groups[gts], key=lambda x: x[0])
+        if len(bars) < 3:
+            continue
+        result.append([
+            gts,
+            bars[0][1],
+            max(b[2] for b in bars),
+            min(b[3] for b in bars),
+            bars[-1][4],
+            sum(b[5] for b in bars)
+        ])
+
+    return result
+
+# ============================================================================
 # 交易執行
 # ============================================================================
 
@@ -617,6 +658,43 @@ async def monitor_positions(exchange):
                             except Exception as e:
                                 logger.warning(f"檢查訊號淘汰撤單異常 ({symbol}): {e}")
 
+                        # 保護止損產生檢查：若尚未進場但 3D K 棒已滿足保護止損上移條件，撤銷掛單
+                        if not is_runaway and sig.get('status') == 'active':
+                            try:
+                                entry_ts = int(sig.get('timestamp', 0))
+                                ohlcv_1d_3d = await exchange.fetch_ohlcv(symbol, '1d', limit=30)
+                                composed_3d = compose_3d_bars(ohlcv_1d_3d)
+                                if composed_3d and len(composed_3d) >= 2:
+                                    df_3d = pd.DataFrame(composed_3d, columns=['ts', 'open', 'high', 'low', 'close', 'vol'])
+                                    now_utc_3d = int(time.time() * 1000)
+                                    closed_3d = df_3d[df_3d['ts'] + 3 * 24 * 3600 * 1000 <= now_utc_3d]
+
+                                    if len(closed_3d) >= 2:
+                                        last_3d = closed_3d.iloc[-1]
+                                        prev_3d = closed_3d.iloc[-2]
+                                        last_3d_close_time = last_3d['ts'] + 3 * 24 * 3600 * 1000
+
+                                        if last_3d_close_time > entry_ts:
+                                            prev_3d_body_high = max(prev_3d['open'], prev_3d['close'])
+                                            if last_3d['close'] > prev_3d_body_high and last_3d['low'] > entry_price:
+                                                logger.info(f"🛡️ 保護止損已產生 ({symbol})，撤銷未成交單 {signal_id}")
+                                                entry_orders = [o for o in open_orders if str(o.get('clientOrderId') or o.get('info', {}).get('clientOid') or "") == str(signal_id)]
+                                                for eo in entry_orders:
+                                                    try:
+                                                        await exchange.cancel_order(eo['id'], symbol)
+                                                        open_orders = [o for o in open_orders if o['id'] != eo['id']]
+                                                    except Exception as e:
+                                                        logger.warning(f"撤銷未成交單失敗 {eo['id']}: {e}")
+                                                send_telegram_message(
+                                                    f"<b>🛡️ 保護止損已產生 (撤銷進場)</b>\n\n"
+                                                    f"💎 <b>交易對:</b> {get_base_coin(symbol)} [{direction}]\n"
+                                                    f"📉 <b>狀態: 掛單未成交前已產生保護止損，已自動撤銷進場單</b>"
+                                                )
+                                                sig['status'] = 'closed'
+                                                continue
+                            except Exception as e:
+                                logger.warning(f"檢查保護止損產生撤單異常 ({symbol}): {e}")
+
                     except Exception as e:
                         logger.warning(f"檢查未成交單價格異常 ({symbol}): {e}")
                 # ==============================================================
@@ -752,6 +830,13 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
         target_info_c2 = None
         state = 0
         c2_low = 0.0
+        # 動態保護止損追蹤（掃描器內部模擬 3D K 棒，使用固定 epoch 對齊）
+        dynamic_sl = 0.0
+        entry_price_scan = 0.0
+        scan_3d_groups = {}   # {group_key: [bar_dict, ...]}
+        scan_3d_last = None   # 上一根已完成的 3D 棒
+        EPOCH_MS = 1483228800000  # 2017-01-01 00:00 UTC
+        PERIOD_MS = 3 * 24 * 3600 * 1000
         
         # 1. 由舊到新執行狀態機掃描
         # State 0: 尋找條件一
@@ -807,6 +892,10 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
                         'low': float(bar['low'])
                     }
                     c2_low = float(bar['low'])
+                    dynamic_sl = c2_low
+                    entry_price_scan = float(bar['close'])
+                    scan_3d_groups = {}
+                    scan_3d_last = None
                 else:
                     # 條件二不成立，淘汰並檢查當前棒是否為新的條件一
                     state = 0
@@ -822,11 +911,37 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
                             'low': float(bar['low'])
                         }
             elif state == 3:
-                # 條件二已成立，監控淘汰條件
-                if bar['low'] < c2_low or bar['close'] < bar['sma_10']:
+                # 1. 優先檢查是否進入新的 3D 週期，若有則結算並上移保護止損
+                bar_ts = int(bar['ts'])
+                group_key = ((bar_ts - EPOCH_MS) // PERIOD_MS) * PERIOD_MS + EPOCH_MS
+                if group_key not in scan_3d_groups:
+                    # 新的 3D 週期開始，檢查前一個週期是否已完成
+                    completed_keys = [k for k in sorted(scan_3d_groups.keys()) if k < group_key and len(scan_3d_groups[k]) >= 3]
+                    if completed_keys:
+                        last_key = completed_keys[-1]
+                        chunk = sorted(scan_3d_groups[last_key], key=lambda x: x['ts'])
+                        bar_3d = {
+                            'open': chunk[0]['open'],
+                            'close': chunk[-1]['close'],
+                            'high': max(b['high'] for b in chunk),
+                            'low': min(b['low'] for b in chunk)
+                        }
+                        if scan_3d_last is not None:
+                            prev_3d_body_high = max(scan_3d_last['open'], scan_3d_last['close'])
+                            if bar_3d['close'] > prev_3d_body_high and bar_3d['low'] > entry_price_scan:
+                                if bar_3d['low'] > dynamic_sl:
+                                    dynamic_sl = bar_3d['low']
+                        scan_3d_last = bar_3d
+                    scan_3d_groups[group_key] = []
+
+                # 2. 條件二已成立，使用（可能剛上移的）最新保護止損監控淘汰條件
+                if bar['low'] < dynamic_sl or bar['close'] < bar['sma_10']:
                     state = 0
                     target_info_c1 = None
                     target_info_c2 = None
+                    dynamic_sl = 0.0
+                    scan_3d_groups = {}
+                    scan_3d_last = None
                     if bar['close'] < bar['open'] and prev1['close'] < prev1['open'] and bar['close'] < prev1_body_high and bar['close'] < prev2_body_high and bar['close'] > bar['sma_10'] and prev1['close'] > prev1['sma_10'] and prev2['close'] > prev2['sma_10']:
                         state = 1
                         target_info_c1 = {
@@ -836,6 +951,9 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
                             'high': float(bar['high']),
                             'low': float(bar['low'])
                         }
+                else:
+                    # 當前 bar 存活，納入當前的 3D group
+                    scan_3d_groups[group_key].append({'ts': bar_ts, 'open': float(bar['open']), 'close': float(bar['close']), 'high': float(bar['high']), 'low': float(bar['low'])})
 
         # State 0/1: 無有效訊號或條件一剛成立但間隔棒未完成
         if state <= 1:
@@ -931,6 +1049,29 @@ def send_triggered_message(item, default_loss):
     position_value = default_loss / loss_pct if loss_pct > 0 else 0
 
     msg = (
+        f"💎 <b>交易對:</b> {display_symbol}\n\n"
+        f"📅 <b>條件一日期:</b> <code>{c1_d}</code>\n"
+        f"📅 <b>條件二日期:</b> <code>{c2_d}</code>\n"
+        f"📍 <b>進場價格:</b> <code>{entry:.{precision}f}</code>\n"
+        f"🛡️ <b>止損價格:</b> <code>{sl:.{precision}f}</code>\n"
+        f"💰 <b>倉位價值:</b> <code>{position_value:.2f} USDT</code>"
+    )
+    send_telegram_message(msg)
+
+def send_holding_trigger_message(item, default_loss):
+    """持倉中偵測到新訊號，僅通知不下單"""
+    display_symbol = get_base_coin(item['symbol'])
+    precision = item['precision']
+    entry = item['entry_price']
+    sl = item['stop_loss']
+    c1_d = item.get('c1_date', '未知')
+    c2_d = item.get('c2_date', '未知')
+
+    loss_pct = abs((entry - sl) / entry) if entry != 0 else 0
+    position_value = default_loss / loss_pct if loss_pct > 0 else 0
+
+    msg = (
+        f"<b>⚠️ [持倉中] 發現新進場訊號 (僅通知)</b>\n\n"
         f"💎 <b>交易對:</b> {display_symbol}\n\n"
         f"📅 <b>條件一日期:</b> <code>{c1_d}</code>\n"
         f"📅 <b>條件二日期:</b> <code>{c2_d}</code>\n"
@@ -1105,12 +1246,21 @@ async def run_scan():
         
         holding_items_dict = {item['symbol']: item for item in holding_items}
 
+        real_holding_new_triggers = []
+
         for item in all_results:
             sym = item['symbol']
             
             if sym in holding_items_dict:
-                # 已經在持倉中，更新其 3D 日期標籤
-                holding_items_dict[sym]['d1_date'] = item.get('d1_date', holding_items_dict[sym]['d1_date'])
+                # 持倉中不修改原始日期
+                # 檢查是否有新訊號觸發（僅通知不下單）
+                if item.get('is_trigger_met'):
+                    cached = watchlist.get(sym, {})
+                    trigger_ts = item.get('trigger_ts', 0)
+                    if cached.get('last_trigger_ts') != trigger_ts or trigger_ts == 0:
+                        real_holding_new_triggers.append(item)
+                        if sym in watchlist:
+                            watchlist[sym]['last_trigger_ts'] = trigger_ts
             elif item.get('is_trigger_met'):
                 cached = watchlist.get(sym, {})
                 trigger_ts = item.get('trigger_ts', 0)
@@ -1154,7 +1304,8 @@ async def run_scan():
                                 break
                     if entry_price > 0 and matched_sig:
                         current_sl = float(matched_sig['sl_price'])
-                        batch = await ex.fetch_ohlcv(sym, '3d', limit=10)
+                        batch_1d = await ex.fetch_ohlcv(sym, '1d', limit=30)
+                        batch = compose_3d_bars(batch_1d)
                         if batch:
                             df_3d = pd.DataFrame(batch, columns=['ts', 'open', 'high', 'low', 'close', 'vol'])
                             now_utc_3d = int(time.time() * 1000)
@@ -1188,6 +1339,10 @@ async def run_scan():
         # 1. 新進場訊號 (Triggered)
         for item in real_new_triggers:
             send_triggered_message(item, default_loss)
+
+        # 1.5 持倉中新訊號通知 (僅通知不下單)
+        for item in real_holding_new_triggers:
+            send_holding_trigger_message(item, default_loss)
             
         # 2. 持倉中 (Holding)
         if holding_items:
@@ -1198,11 +1353,11 @@ async def run_scan():
             send_grouped_message(real_watching, "👀 <b>[關注中]</b>")
 
         # 4. 系統設定 (System Settings)
-        if real_new_triggers or holding_items or real_watching:
+        if real_new_triggers or holding_items or real_watching or real_holding_new_triggers:
             send_system_settings_message(config)
 
         active_count = len(watchlist)
-        logger.info(f"✅ 掃描完成。新觸發: {len(real_new_triggers)} / 持倉: {len(holding_items)} / 關注: {len(real_watching)} / 追蹤總數: {active_count}")
+        logger.info(f"✅ 掃描完成。新觸發: {len(real_new_triggers)} / 持倉: {len(holding_items)} / 持倉新訊號: {len(real_holding_new_triggers)} / 關注: {len(real_watching)} / 追蹤總數: {active_count}")
 
         if not real_new_triggers and not holding_items and not real_watching:
             send_telegram_message(f"✅ <b>條件掃描完成</b>\n本次共掃描 {total_coins} 個幣種，無滿足條件標的。\n(當前清單追蹤中: {active_count} 個)")
