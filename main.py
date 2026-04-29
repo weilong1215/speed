@@ -256,8 +256,6 @@ async def place_order(exchange, symbol, direction, entry, sl, precision, fixed_l
 
         # 倉位超限/槓桿超限相關的 Bitget 錯誤碼，觸發這類錯誤時降層重試
         ORDER_RETRYABLE_CODES = ("40762", "40797", "45110", "200029")
-        # 價格偏離市價過大 (Bitget 限制限價單不可偏離市價太遠)
-        PRICE_LIMIT_CODES = ("22047",)
 
         # 2. 執行分層下單嘗試
         # 核心保證：槓桿設定成功後才下單，任何一層策略失敗都不跳過降層機制
@@ -372,18 +370,17 @@ async def place_order(exchange, symbol, direction, entry, sl, precision, fixed_l
                 if any(code in last_error for code in ORDER_RETRYABLE_CODES) or "leverage" in last_error.lower():
                     logger.warning(f"  策略 {strategy_name} ({leverage}x) 下單失敗 (倉位/槓桿超限)，降層至下一策略...")
                     continue
-                elif any(code in last_error for code in PRICE_LIMIT_CODES):
-                    logger.warning(f"  ⚠️ 掛單價格偏離市價過大，遭交易所拒絕 ({symbol}): {last_error}")
-                    # 此為交易所規則，降層也沒用，直接終止
-                    break
                 else:
                     logger.error(f"  策略 {strategy_name} 觸發不可恢復下單錯誤: {last_error}")
                     break
 
-        if any(code in (last_error or "") for code in PRICE_LIMIT_CODES):
-            return "FATAL_REJECTED"
-            
-        logger.error(f"❌ 所有槓桿策略均已失效 ({symbol}), 最後錯誤: {last_error}")
+        err_msg = last_error or "未知錯誤"
+        logger.error(f"❌ 所有槓桿策略均已失效 ({symbol}), 最後錯誤: {err_msg}")
+        send_telegram_message(
+            f"<b>❌ 自動下單失敗</b>\n\n"
+            f"💎 <b>交易對:</b> {get_base_coin(symbol)} [{direction}]\n"
+            f"⚠️ <b>失敗原因:</b> <code>{err_msg}</code>"
+        )
         return None
     except Exception as e:
         logger.error(f"下單執行異常 ({symbol}): {e}")
