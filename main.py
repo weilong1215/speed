@@ -978,8 +978,7 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
                 dynamic_sl = current_sl
 
                 # 2. 條件二已成立，使用最新保護止損監控淘汰條件
-                # 如果歷史回推已經產生過保護止損 (dynamic_sl > c2_low)，代表進場時機已過，直接作廢
-                if bar['low'] < dynamic_sl or bar['close'] < bar['sma_10'] or dynamic_sl > c2_low:
+                if bar['low'] < dynamic_sl or bar['close'] < bar['sma_10']:
                     state = 0
                     target_info_c1 = None
                     target_info_c2 = None
