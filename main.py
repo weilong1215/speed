@@ -544,6 +544,60 @@ async def monitor_positions(exchange):
                     found_signal = True
                     signal_id = sig.get('signal_id', str(sig.get('timestamp')))
 
+                    # === 跌破10MA 無保護止損 → 市價平倉 ===
+                    # 止損未上移 (sl_price == original_sl_price) 且日線收盤跌破 10MA → 不值得繼續持有
+                    if float(sig['sl_price']) == float(sig.get('original_sl_price', sig['sl_price'])):
+                        try:
+                            ohlcv_1d_chk = await exchange.fetch_ohlcv(symbol, '1d', limit=20)
+                            if ohlcv_1d_chk and len(ohlcv_1d_chk) >= 15:
+                                df_1d_chk = pd.DataFrame(ohlcv_1d_chk, columns=['ts', 'open', 'high', 'low', 'close', 'vol'])
+                                df_1d_chk['sma_10'] = df_1d_chk['close'].rolling(window=10).mean()
+                                now_utc_fl = int(pd.Timestamp.now(tz='UTC').floor('1d').timestamp() * 1000)
+                                closed_1d_chk = df_1d_chk[df_1d_chk['ts'] < now_utc_fl]
+
+                                if len(closed_1d_chk) > 0:
+                                    last_bar = closed_1d_chk.iloc[-1]
+                                    if pd.notna(last_bar['sma_10']) and last_bar['close'] < last_bar['sma_10']:
+                                        precision = sig.get('precision', 4)
+                                        logger.info(
+                                            f"🚨 跌破10MA且無保護止損 ({symbol})，執行市價平倉 | "
+                                            f"收盤={last_bar['close']:.{precision}f} < 10MA={last_bar['sma_10']:.{precision}f}"
+                                        )
+
+                                        # 撤銷所有相關掛單 (SL + TP)
+                                        related_orders = [o for o in open_orders
+                                                          if signal_id in str(o.get('clientOrderId') or o.get('info', {}).get('clientOid') or "")]
+                                        for ro in related_orders:
+                                            try:
+                                                cid_str = get_coid(ro)
+                                                is_plan = cid_str.startswith("sl_") or cid_str.startswith("tp")
+                                                await exchange.cancel_order(ro['id'], symbol, params={'stop': True} if is_plan else {})
+                                            except Exception as e:
+                                                if "43001" not in str(e) and "does not exist" not in str(e).lower():
+                                                    logger.warning(f"撤銷掛單失敗 {ro['id']}: {e}")
+
+                                        # 市價平倉 (reduce-only 確保不開反向單)
+                                        order_side = 'sell' if side.lower() == 'long' else 'buy'
+                                        close_params = {
+                                            'reduceOnly': True, 'hedged': True,
+                                            'holdSide': side.lower()
+                                        }
+                                        await exchange.create_order(symbol, 'market', order_side, size, None, params=close_params)
+
+                                        sig['status'] = 'closed'
+                                        save_active_signals(saved_signals)
+
+                                        send_telegram_message(
+                                            f"<b>🚨 跌破10MA 市價出場</b>\n\n"
+                                            f"💎 {get_base_coin(symbol)} [{sig['direction']}]\n"
+                                            f"📉 <b>原因:</b> 日線收盤跌破 10MA 且無保護止損\n"
+                                            f"📊 <b>平倉數量:</b> {size}"
+                                        )
+                                        logger.info(f"✅ 跌破10MA市價平倉完成: {symbol}")
+                                        continue
+                        except Exception as e:
+                            logger.warning(f"檢查10MA平倉異常 ({symbol}): {e}")
+
                     # A. 整理本訊號所屬的止損單
                     my_sl_orders = []
                     sl_price_target = float(sig['sl_price'])
