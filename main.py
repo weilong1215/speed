@@ -674,8 +674,9 @@ async def monitor_positions(exchange):
                 direction = sig['direction']
                 has_pos = any(p['symbol'] == symbol and p['side'].upper() == direction for p in active_pos)
 
-                has_entry = any(str(o.get('clientOid') or o.get('clientOrderId')) == str(signal_id)
-                                for o in open_orders)
+                has_entry = any(
+                    str(o.get('clientOrderId') or o.get('info', {}).get('clientOid') or "") == str(signal_id)
+                    for o in open_orders)
 
                 # ==============================================================
                 # 新增追高防護：尚未進場，但價格已達 5R 目標 -> 撤銷掛單
