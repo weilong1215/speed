@@ -925,6 +925,7 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
 
         target_info_c1 = None
         target_info_c2 = None
+        target_info_gap = None
         state = 0
         c2_low = 0.0
         # 動態保護止損追蹤（掃描器內部模擬 3D K 棒，使用固定 epoch 對齊）
@@ -965,6 +966,7 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
                 if bar['close'] <= bar['open'] or bar['close'] < bar['sma_10'] or bar['close'] > max(prev1_body_high, prev2_body_high):
                     state = 0
                     target_info_c1 = None
+                    target_info_gap = None
                     # 淘汰後檢查當前棒是否為新的條件一
                     if bar['close'] < bar['open'] and prev1['close'] < prev1['open'] and bar['close'] < prev1_body_high and bar['close'] < prev2_body_high and bar['close'] > bar['sma_10'] and prev1['close'] > prev1['sma_10'] and prev2['close'] > prev2['sma_10']:
                         state = 1
@@ -977,6 +979,13 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
                         }
                 else:
                     state = 2
+                    target_info_gap = {
+                        'dt_str': bar['dt'].isoformat(),
+                        'ts': int(bar['ts']),
+                        'close': float(bar['close']),
+                        'high': float(bar['high']),
+                        'low': float(bar['low'])
+                    }
             elif state == 2:
                 # 必須滿足條件二 (突破+站上10MA+止損距離<=30%)，否則淘汰重找條件一
                 is_breakout = bar['close'] > max(prev1_body_high, prev2_body_high) and bar['close'] > bar['sma_10']
@@ -999,6 +1008,7 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
                     state = 0
                     target_info_c1 = None
                     target_info_c2 = None
+                    target_info_gap = None
                     if bar['close'] < bar['open'] and prev1['close'] < prev1['open'] and bar['close'] < prev1_body_high and bar['close'] < prev2_body_high and bar['close'] > bar['sma_10'] and prev1['close'] > prev1['sma_10'] and prev2['close'] > prev2['sma_10']:
                         state = 1
                         target_info_c1 = {
@@ -1037,6 +1047,7 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
                     state = 0
                     target_info_c1 = None
                     target_info_c2 = None
+                    target_info_gap = None
                     dynamic_sl = 0.0
                     if bar['close'] < bar['open'] and prev1['close'] < prev1['open'] and bar['close'] < prev1_body_high and bar['close'] < prev2_body_high and bar['close'] > bar['sma_10'] and prev1['close'] > prev1['sma_10'] and prev2['close'] > prev2['sma_10']:
                         state = 1
@@ -1055,7 +1066,7 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
         # State 2: 間隔棒已過，等待條件二 (關注中)
         # State 3: 條件二已成立 (觸發進場)
         is_watchlist_eligible = True
-        target_info = target_info_c1 if state == 2 else target_info_c2
+        target_info = target_info_gap if state == 2 else target_info_c2
         
         action = 'update'
         if cached_info and target_info['ts'] == cached_info.get('ts', 0):
@@ -1074,6 +1085,7 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
 
         c1_date_str = pd.to_datetime(target_info_c1['dt_str']).strftime('%Y-%m-%d') if target_info_c1 else "未知"
         c2_date_str = pd.to_datetime(target_info_c2['dt_str']).strftime('%Y-%m-%d') if target_info_c2 else "未知"
+        gap_date_str = pd.to_datetime(target_info_gap['dt_str']).strftime('%Y-%m-%d') if target_info_gap else "未知"
 
         return {
             'symbol': symbol,
@@ -1085,7 +1097,7 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
             'stop_loss': stop_loss,
             'trigger_ts': trigger_ts,
             'precision': precision,
-            'd1_date': c1_date_str,
+            'd1_date': gap_date_str,
             'c1_date': c1_date_str,
             'c2_date': c2_date_str
         }
@@ -1116,7 +1128,9 @@ def send_grouped_message(item_list, title):
         coin_strs = []
         for item in date_groups[date_key]:
             base = get_base_coin(item['symbol'])
-            if 'protect_sl' in item:
+            if item.get('missed'):
+                coin_strs.append(f"{base} (未上車)")
+            elif 'protect_sl' in item:
                 psl = item['protect_sl']
                 psl_str = f"{int(psl)}" if isinstance(psl, float) and psl.is_integer() else f"{psl}"
                 coin_strs.append(f"{base} (保護止損：{psl_str})")
@@ -1362,6 +1376,7 @@ async def run_scan():
                 trigger_ts = item.get('trigger_ts', 0)
                 # 若同一觸發已處理過，不再進場，視為錯失後持續關注
                 if cached.get('last_trigger_ts') == trigger_ts and trigger_ts > 0:
+                    item['missed'] = True
                     real_watching.append(item)
                 else:
                     real_new_triggers.append(item)
