@@ -492,6 +492,17 @@ async def ensure_next_tp(exchange, symbol, side, sig, size, saved_signals, open_
                     ideal_qty = float(exchange.amount_to_precision(symbol, size * TP_CLOSE_PCT))
                     # 倉位變化超過 2% 時撤舊掛新 (例如進場單後續又成交了更多數量)
                     if existing_qty > 0 and ideal_qty > 0 and abs(existing_qty - ideal_qty) / ideal_qty > 0.02:
+                        
+                        # 防無限迴圈: 如果目前理想 20% 份額不足 5U，代表當初是觸發「微小倉位全平防護」。
+                        # 此時應比對「當前全倉數量」而非「理想 20% 數量」。
+                        chk_tp_price = entry + (next_tier + 1) * TP_STEP_R * risk if direction == 'LONG' else entry - (next_tier + 1) * TP_STEP_R * risk
+                        chk_tp_price = round(chk_tp_price, precision)
+                        full_qty = float(exchange.amount_to_precision(symbol, size))
+                        
+                        # 若理想 20% 價值不足 5U，且當前掛單數量約等於全倉數量，則視為合法，不撤單
+                        if ideal_qty * chk_tp_price < 5 and full_qty > 0 and abs(existing_qty - full_qty) / full_qty <= 0.02:
+                            return
+
                         logger.info(f"🔄 TP{next_tier + 1} 數量不一致 ({symbol}): 掛單={existing_qty} vs 理想={ideal_qty}，撤舊掛新")
                         try:
                             await exchange.cancel_order(tp_order_obj['id'], symbol, params={'stop': True})
