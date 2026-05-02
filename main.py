@@ -545,10 +545,16 @@ async def ensure_next_tp(exchange, symbol, side, sig, size, saved_signals, open_
         tp_price = round(tp_price, precision)
         tp_qty = float(exchange.amount_to_precision(symbol, size * TP_CLOSE_PCT))
 
-        # 最小名義價值檢查
-        if tp_qty <= 0 or tp_qty * entry < 5:
-            logger.debug(f"  TP{next_tier + 1} 數量低於最小門檻，停止掛單 (粉塵由 SL 保護)")
-            return
+        # 最小名義價值檢查 (使用 tp_price 而非 entry，因為交易所驗證的是觸發時的價值)
+        if tp_qty <= 0 or tp_qty * tp_price < 5:
+            # 20% 份額不足 5U → 嘗試 100% 全平 (微小倉位權宜策略)
+            full_qty = float(exchange.amount_to_precision(symbol, size))
+            if full_qty > 0 and full_qty * tp_price >= 5:
+                tp_qty = full_qty
+                logger.info(f"  TP{next_tier + 1} 20% 份額不足 5U，改為全倉平倉: {tp_qty}")
+            else:
+                logger.debug(f"  TP{next_tier + 1} 全倉價值仍不足 5U，停止掛單 (粉塵由 SL 保護)")
+                return
 
         order_side = 'sell' if direction == 'LONG' else 'buy'
         tp_params = {
