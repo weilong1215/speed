@@ -423,11 +423,47 @@ async def place_order(exchange, symbol, direction, entry, sl, precision, fixed_l
 # 無限階梯止盈管理
 # ============================================================================
 
+async def _query_plan_order_status(exchange, symbol, client_oid):
+    """查詢 Bitget 歷史計畫委託單狀態 (executed / canceled / not_found)。
+    使用 V2 API: GET /api/v2/mix/order/orders-plan-history
+    回傳 (planStatus, baseVolume)：planStatus 為 'executed'|'canceled'|'not_found'，
+    baseVolume 為實際成交的幣量 (僅 executed 時有效)。
+    """
+    try:
+        product_type = 'USDT-FUTURES'
+        response = await exchange.privateMixGetV2MixOrderOrdersPlanHistory({
+            'symbol': symbol.replace('/', '').replace(':USDT', 'USDT'),
+            'productType': product_type,
+            'clientOid': client_oid,
+        })
+        data = response.get('data', {})
+        entries = data.get('entrustedList', [])
+        if not entries:
+            return 'not_found', 0.0
+        # 取第一筆 (clientOid 應唯一)
+        entry = entries[0]
+        status = str(entry.get('planStatus', '')).lower()
+        base_vol = float(entry.get('baseVolume', 0) or 0)
+        if status in ('executed', 'live_executed'):
+            return 'executed', base_vol
+        elif 'cancel' in status:
+            return 'canceled', 0.0
+        else:
+            return status, base_vol
+    except Exception as e:
+        logger.warning(f"查詢計畫委託歷史失敗 ({client_oid}): {e}")
+        return 'not_found', 0.0
+
+
 async def ensure_next_tp(exchange, symbol, side, sig, size, saved_signals, open_orders):
     """
     無限階梯 TP：每 5R 平掉剩餘倉位的 20%。
-    同一時間只存在一張 TP 觸發單，成交後自動推進至下一階。
-    當 TP 數量低於最小名義價值時停止，剩餘粉塵由 SL 保護。
+    嚴格依賴交易所訂單狀態判定推進 (方案 A)：
+    - tp_order_id 有值且仍在掛單 → 檢查數量是否需要修正，否則等待成交。
+    - tp_order_id 有值但已從掛單消失 → 查詢歷史狀態：
+        executed → 推進至下一階。
+        canceled → 清空 tp_order_id，下一輪自動補掛同一階。
+    - tp_order_id 無值 → 首次掛出或補掛。
     """
     try:
         signal_id = sig.get('signal_id', str(sig.get('timestamp')))
@@ -442,34 +478,68 @@ async def ensure_next_tp(exchange, symbol, side, sig, size, saved_signals, open_
 
         next_tier = sig.get('tp_next_tier', 0)
         tp_coid = f"tp{next_tier + 1}_{signal_id}"
+        stored_tp_order_id = sig.get('tp_order_id', '')
 
-        # 檢查當前階 TP 單是否仍在掛單中
-        has_order = any(tp_coid in get_coid(o) for o in open_orders)
+        # === 情況 1: tp_order_id 有值 → 檢查該筆訂單是否還在掛單簿 ===
+        if stored_tp_order_id:
+            has_order = any(tp_coid in get_coid(o) for o in open_orders)
 
-        if has_order:
-            return  # 等待成交
+            if has_order:
+                # TP 單仍在掛單中 → 檢查數量是否因進場單追加成交而需修正
+                tp_order_obj = next((o for o in open_orders if tp_coid in get_coid(o)), None)
+                if tp_order_obj:
+                    existing_qty = float(tp_order_obj.get('amount', 0) or tp_order_obj.get('info', {}).get('size', 0) or 0)
+                    ideal_qty = float(exchange.amount_to_precision(symbol, size * TP_CLOSE_PCT))
+                    # 倉位變化超過 2% 時撤舊掛新 (例如進場單後續又成交了更多數量)
+                    if existing_qty > 0 and ideal_qty > 0 and abs(existing_qty - ideal_qty) / ideal_qty > 0.02:
+                        logger.info(f"🔄 TP{next_tier + 1} 數量不一致 ({symbol}): 掛單={existing_qty} vs 理想={ideal_qty}，撤舊掛新")
+                        try:
+                            await exchange.cancel_order(tp_order_obj['id'], symbol, params={'stop': True})
+                        except Exception as e:
+                            if "43001" not in str(e) and "does not exist" not in str(e).lower():
+                                logger.error(f"撤銷舊 TP 失敗: {e}")
+                                return
+                        sig['tp_order_id'] = ''
+                        save_active_signals(saved_signals)
+                        # 不 return，繼續往下走掛出新的 TP 單
+                    else:
+                        return  # 數量一致，等待成交
 
-        # TP 單不存在：判斷是已成交還是從未掛出
-        # 依原始數量推算該階成交後的預期剩餘
-        original_qty = sig['quantity']
-        expected_remaining = original_qty * (0.80 ** (next_tier + 1))
+            else:
+                # TP 單已從掛單簿消失 → 查詢交易所歷史狀態確認真實結果
+                plan_status, base_vol = await _query_plan_order_status(exchange, symbol, tp_coid)
 
-        if size <= expected_remaining * 1.05:
-            # 倉位已縮減至預期水準 → 上一階已成交，推進至下一階
-            sig['tp_next_tier'] = next_tier + 1
-            next_tier = sig['tp_next_tier']
-            tp_coid = f"tp{next_tier + 1}_{signal_id}"
-            save_active_signals(saved_signals)
-            logger.info(f"🎯 TP Tier {next_tier} 偵測已成交，推進至 Tier {next_tier + 1}")
+                if plan_status == 'executed':
+                    # 真實成交 → 推進至下一階
+                    sig['tp_next_tier'] = next_tier + 1
+                    sig['tp_order_id'] = ''
+                    next_tier = sig['tp_next_tier']
+                    tp_coid = f"tp{next_tier + 1}_{signal_id}"
+                    save_active_signals(saved_signals)
+                    logger.info(f"🎯 TP{next_tier} 確認成交 (成交量: {base_vol})，推進至 Tier {next_tier + 1}")
 
-            # 通知
-            send_telegram_message(
-                f"<b>🎯 TP{next_tier} 成交</b>\n\n"
-                f"💎 {get_base_coin(symbol)} [{direction}]\n"
-                f"📊 剩餘倉位: {size:.{precision}f}"
-            )
+                    send_telegram_message(
+                        f"<b>🎯 TP{next_tier} 成交</b>\n\n"
+                        f"💎 {get_base_coin(symbol)} [{direction}]\n"
+                        f"📊 剩餘倉位: {size:.{precision}f}"
+                    )
+                    # 繼續往下掛出下一階 TP
 
-        # 計算當階 TP 價格與數量
+                elif plan_status == 'canceled':
+                    # 手動撤銷或過期 → 不推進，清空 order_id 讓下方邏輯補掛同一階
+                    logger.info(f"⚠️ TP{next_tier + 1} 被撤銷 ({symbol})，將自動補掛同一階")
+                    sig['tp_order_id'] = ''
+                    save_active_signals(saved_signals)
+                    # 繼續往下掛出同一階 TP
+
+                else:
+                    # not_found 或其他狀態 → 可能延遲，清空讓下輪重試
+                    logger.debug(f"  TP{next_tier + 1} 歷史查詢結果: {plan_status}，清空追蹤等下輪處理")
+                    sig['tp_order_id'] = ''
+                    save_active_signals(saved_signals)
+                    return
+
+        # === 情況 2: tp_order_id 無值 → 掛出當階 TP 單 ===
         tp_price = entry + (next_tier + 1) * TP_STEP_R * risk if direction == 'LONG' \
             else entry - (next_tier + 1) * TP_STEP_R * risk
         tp_price = round(tp_price, precision)
@@ -489,10 +559,14 @@ async def ensure_next_tp(exchange, symbol, side, sig, size, saved_signals, open_
 
         logger.info(f"🚀 掛出 TP{next_tier + 1}: {symbol} @ {tp_price:.{precision}f} | qty: {tp_qty} | ID: {tp_coid}")
         try:
-            await exchange.create_order(symbol, 'market', order_side, tp_qty, None, params=tp_params)
+            result = await exchange.create_order(symbol, 'market', order_side, tp_qty, None, params=tp_params)
+            # 記錄交易所回傳的 order_id 供後續狀態追蹤
+            sig['tp_order_id'] = str(result.get('id', ''))
         except Exception as e:
             if '40786' in str(e):
                 logger.warning(f"⚠️ TP ID 已存在 ({tp_coid})，視為已掛單。")
+                # clientOid 重複代表已存在，標記 tp_order_id 為 coid 本身作為追蹤依據
+                sig['tp_order_id'] = tp_coid
             else:
                 raise e
         save_active_signals(saved_signals)
@@ -679,9 +753,10 @@ async def monitor_positions(exchange):
                     for o in open_orders)
 
                 # ==============================================================
-                # 新增追高防護：尚未進場，但價格已達 5R 目標 -> 撤銷掛單
+                # 追高防護：價格已達 5R 目標 -> 撤銷殘餘未成交進場單
+                # 不論是否已有部分倉位，只要仍有進場掛單就檢查
                 # ==============================================================
-                if not has_pos and has_entry:
+                if has_entry:
                     try:
                         ticker = await exchange.fetch_ticker(symbol)
                         current_price = float(ticker['last'])
@@ -706,12 +781,21 @@ async def monitor_positions(exchange):
                                     except Exception as e:
                                         logger.warning(f"撤銷未成交單失敗 {eo['id']}: {e}")
 
-                                send_telegram_message(
-                                    f"<b>🏃 價格已達 5R (錯失進場)</b>\n\n"
-                                    f"💎 <b>交易對:</b> {get_base_coin(symbol)} [{direction}]\n"
-                                    f"📉 <b>狀態: 已自動撤銷未成交之進場單</b>"
-                                )
-                                sig['status'] = 'closed'
+                                # 有部分倉位時僅撤進場單，訊號保持 active 讓 TP/SL 繼續管理
+                                if has_pos:
+                                    send_telegram_message(
+                                        f"<b>🏃 價格已達 5R (撤銷殘餘進場單)</b>\n\n"
+                                        f"💎 <b>交易對:</b> {get_base_coin(symbol)} [{direction}]\n"
+                                        f"📉 <b>狀態: 部分成交，殘餘進場單已撤銷，倉位繼續由 TP/SL 管理</b>"
+                                    )
+                                else:
+                                    # 完全未成交 → 關閉訊號
+                                    send_telegram_message(
+                                        f"<b>🏃 價格已達 5R (錯失進場)</b>\n\n"
+                                        f"💎 <b>交易對:</b> {get_base_coin(symbol)} [{direction}]\n"
+                                        f"📉 <b>狀態: 已自動撤銷未成交之進場單</b>"
+                                    )
+                                    sig['status'] = 'closed'
                                 continue
 
                         # 訊號淘汰條件撤單：若尚未進場，且日線收盤跌破 10MA 或最低點低於止損價，則作廢訊號撤單
