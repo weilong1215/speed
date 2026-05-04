@@ -419,6 +419,130 @@ async def place_order(exchange, symbol, direction, entry, sl, precision, fixed_l
         logger.error(f"下單執行異常 ({symbol}): {e}")
         return None
 
+
+async def place_add_order(exchange, symbol, direction, entry, sl, precision, fixed_loss_usdt, trigger_ts, parent_signal_id):
+    """
+    加倉下單：純 Limit Order，不附帶任何止盈止損。
+    風險控管完全交由主單的保護止損機制。
+    """
+    if not BITGET_API_KEY: return None
+    try:
+        risk_per_unit = abs(entry - sl)
+        if risk_per_unit == 0: return None
+        qty_risk_ideal = fixed_loss_usdt / risk_per_unit
+
+        leverage_strategies = []
+        try:
+            markets = await exchange.load_markets()
+            market = markets.get(symbol, {})
+            info = market.get('info', {})
+            max_lev = int(info.get('maxLever', info.get('maxLeverage', 0)))
+            if max_lev == 0:
+                max_lev = int(market.get('limits', {}).get('leverage', {}).get('max', 0) or 0)
+            leverage_strategies.append(('MAX', max_lev if max_lev > 0 else 20))
+        except Exception as e:
+            logger.warning(f"  加倉 MAX 獲取最大槓桿失敗: {e}，降級使用 20x")
+            leverage_strategies.append(('MAX', 20))
+
+        leverage_strategies.append(('STABLE', 20))
+        leverage_strategies.append(('FINAL', 10))
+
+        ORDER_RETRYABLE_CODES = ("40762", "40797", "45110", "200029")
+        last_error = None
+
+        for strategy_name, leverage in leverage_strategies:
+            try:
+                try:
+                    await exchange.set_position_mode(True, symbol)
+                    await exchange.set_margin_mode('cross', symbol)
+                except Exception as e:
+                    logger.debug(f"  加倉策略 {strategy_name} 倉位/保證金模式設定略過: {e}")
+
+                try:
+                    await exchange.set_leverage(leverage, symbol)
+                except Exception as e:
+                    err_str = str(e)
+                    logger.warning(f"  加倉策略 {strategy_name} ({leverage}x) set_leverage 失敗: {err_str}")
+                    last_error = err_str
+                    if any(code in err_str for code in ORDER_RETRYABLE_CODES) or "leverage" in err_str.lower():
+                        continue
+                    else:
+                        break
+
+                balance = await exchange.fetch_balance()
+                available = 0.0
+                try:
+                    raw_info = balance.get('info', {})
+                    if isinstance(raw_info, dict):
+                        info_data = raw_info.get('data', [])
+                    elif isinstance(raw_info, list):
+                        info_data = raw_info
+                    else:
+                        info_data = []
+                    search_list = info_data if isinstance(info_data, list) else [info_data] if isinstance(info_data, dict) else []
+                    for acct in search_list:
+                        if not isinstance(acct, dict):
+                            continue
+                        if acct.get('marginCoin', '').upper() == 'USDT':
+                            available = float(acct.get('crossedMaxAvailable', 0))
+                            break
+                    if available <= 0:
+                        usdt_info = balance.get('USDT', {}).get('info', {})
+                        if isinstance(usdt_info, dict):
+                            available = float(usdt_info.get('crossedMaxAvailable', 0))
+                except Exception as e:
+                    logger.warning(f"  加倉解析可用保證金異常: {e}")
+                if available <= 0:
+                    available = float(balance.get('USDT', {}).get('free', 0))
+
+                max_q = (available * 0.9) * leverage / entry
+                qty = min(qty_risk_ideal, max_q)
+                qty = float(exchange.amount_to_precision(symbol, qty))
+
+                # 加倉單價值不足 6 USDT → 放棄加倉
+                if qty * entry < 6:
+                    logger.warning(f"  加倉策略 {strategy_name} 價值不足 6 USDT，放棄加倉")
+                    return None
+
+                side = 'buy' if direction == 'LONG' else 'sell'
+                add_oid = f"add_{trigger_ts}_{parent_signal_id}"
+                params = {
+                    'hedged': True, 'holdSide': 'long' if direction == 'LONG' else 'short',
+                    'clientOid': add_oid
+                }
+
+                order = await exchange.create_order(symbol, 'limit', side, qty, entry, params=params)
+                logger.info(f"✅ 加倉下單成功: {symbol} @ {entry} (ID: {add_oid}, Strat: {strategy_name}, Lev: {leverage}x)")
+
+                send_telegram_message(
+                    f"<b>📈 加倉下單 ({leverage}x)</b>\n\n"
+                    f"💎 {get_base_coin(symbol)} [{direction}]\n"
+                    f"🎯 進場: <code>{entry:.{precision}f}</code>\n"
+                    f"🛡️ 保護止損: <code>{sl:.{precision}f}</code>\n"
+                    f"📊 數量: <code>{qty}</code>"
+                )
+                return order
+
+            except Exception as e:
+                last_error = str(e)
+                if any(code in last_error for code in ORDER_RETRYABLE_CODES) or "leverage" in last_error.lower():
+                    logger.warning(f"  加倉策略 {strategy_name} ({leverage}x) 下單失敗，降層...")
+                    continue
+                else:
+                    logger.error(f"  加倉策略 {strategy_name} 不可恢復錯誤: {last_error}")
+                    break
+
+        logger.error(f"❌ 加倉所有策略失效 ({symbol}), 錯誤: {last_error or '未知錯誤'}")
+        send_telegram_message(
+            f"<b>❌ 加倉下單失敗</b>\n\n"
+            f"💎 <b>交易對:</b> {get_base_coin(symbol)} [{direction}]\n"
+            f"⚠️ <b>原因:</b> {last_error or '未知錯誤'}"
+        )
+        return None
+    except Exception as e:
+        logger.error(f"加倉執行異常 ({symbol}): {e}")
+        return None
+
 # ============================================================================
 # 無限階梯止盈管理
 # ============================================================================
@@ -493,14 +617,14 @@ async def ensure_next_tp(exchange, symbol, side, sig, size, saved_signals, open_
                     # 倉位變化超過 2% 時撤舊掛新 (例如進場單後續又成交了更多數量)
                     if existing_qty > 0 and ideal_qty > 0 and abs(existing_qty - ideal_qty) / ideal_qty > 0.02:
                         
-                        # 防無限迴圈: 如果目前理想 20% 份額不足 5U，代表當初是觸發「微小倉位全平防護」。
+                        # 防無限迴圈: 如果目前理想 20% 份額不足 6U，代表當初是觸發「微小倉位全平防護」。
                         # 此時應比對「當前全倉數量」而非「理想 20% 數量」。
                         chk_tp_price = entry + (next_tier + 1) * TP_STEP_R * risk if direction == 'LONG' else entry - (next_tier + 1) * TP_STEP_R * risk
                         chk_tp_price = round(chk_tp_price, precision)
                         full_qty = float(exchange.amount_to_precision(symbol, size))
                         
-                        # 若理想 20% 價值不足 5U，且當前掛單數量約等於全倉數量，則視為合法，不撤單
-                        if ideal_qty * chk_tp_price < 5 and full_qty > 0 and abs(existing_qty - full_qty) / full_qty <= 0.02:
+                        # 若理想 20% 價值不足 6U，且當前掛單數量約等於全倉數量，則視為合法，不撤單
+                        if ideal_qty * chk_tp_price < 6 and full_qty > 0 and abs(existing_qty - full_qty) / full_qty <= 0.02:
                             return
 
                         logger.info(f"🔄 TP{next_tier + 1} 數量不一致 ({symbol}): 掛單={existing_qty} vs 理想={ideal_qty}，撤舊掛新")
@@ -557,14 +681,14 @@ async def ensure_next_tp(exchange, symbol, side, sig, size, saved_signals, open_
         tp_qty = float(exchange.amount_to_precision(symbol, size * TP_CLOSE_PCT))
 
         # 最小名義價值檢查 (使用 tp_price 而非 entry，因為交易所驗證的是觸發時的價值)
-        if tp_qty <= 0 or tp_qty * tp_price < 5:
-            # 20% 份額不足 5U → 嘗試 100% 全平 (微小倉位權宜策略)
+        if tp_qty <= 0 or tp_qty * tp_price < 6:
+            # 20% 份額不足 6U → 嘗試 100% 全平 (微小倉位權宜策略)
             full_qty = float(exchange.amount_to_precision(symbol, size))
-            if full_qty > 0 and full_qty * tp_price >= 5:
+            if full_qty > 0 and full_qty * tp_price >= 6:
                 tp_qty = full_qty
-                logger.info(f"  TP{next_tier + 1} 20% 份額不足 5U，改為全倉平倉: {tp_qty}")
+                logger.info(f"  TP{next_tier + 1} 20% 份額不足 6U，改為全倉平倉: {tp_qty}")
             else:
-                logger.debug(f"  TP{next_tier + 1} 全倉價值仍不足 5U，停止掛單 (粉塵由 SL 保護)")
+                logger.debug(f"  TP{next_tier + 1} 全倉價值仍不足 6U，停止掛單 (粉塵由 SL 保護)")
                 return
 
         order_side = 'sell' if direction == 'LONG' else 'buy'
@@ -927,19 +1051,25 @@ async def monitor_positions(exchange):
                 del saved_signals[sig_key]
 
         # 3. 盲目孤兒單清理 (訂單找名單)
-        # Entry 格式: 3d_{signal_id}, TP 格式: tp{n}_{signal_id}, SL 格式: sl_{signal_id}
+        # Entry 格式: 3d_{signal_id}, TP 格式: tp{n}_{signal_id}, SL 格式: sl_{signal_id}, Add 格式: add_{ts}_{signal_id}
         tp_prefix_pattern = re.compile(r'^tp\d+_')
+        add_prefix_pattern = re.compile(r'^add_\d+_')
         all_active_ids = [str(s['signal_id']) for slist in saved_signals.values() for s in slist]
         for oo in open_orders:
             co_id = str(oo.get('clientOrderId') or oo.get('info', {}).get('clientOid') or "")
             is_sl = co_id.startswith("sl_")
             is_tp = bool(tp_prefix_pattern.match(co_id))
             is_entry = co_id.startswith("3d_")
-            if is_sl or is_tp or is_entry:
+            is_add = bool(add_prefix_pattern.match(co_id))
+            if is_sl or is_tp or is_entry or is_add:
                 if is_sl:
                     raw_sig_id = co_id[3:]
                 elif is_tp:
                     raw_sig_id = tp_prefix_pattern.sub('', co_id)
+                elif is_add:
+                    # add_{trigger_ts}_{parent_signal_id} → 取 parent_signal_id
+                    parts = co_id.split('_')
+                    raw_sig_id = '_'.join(parts[2:]) if len(parts) >= 4 else co_id[4:]
                 else:
                     raw_sig_id = co_id
                 if raw_sig_id not in all_active_ids:
@@ -950,7 +1080,7 @@ async def monitor_positions(exchange):
                     if not has_related_pos:
                         logger.warning(f"🕵️ 發現無主孤兒單: {co_id} ({symbol})，執行盲目清理...")
                         try:
-                            is_plan = not is_entry
+                            is_plan = not is_entry and not is_add
                             await exchange.cancel_order(oo['id'], symbol, params={'stop': True} if is_plan else {})
                             open_orders = [o for o in open_orders if o['id'] != oo['id']]
                         except IndexError:
@@ -958,6 +1088,46 @@ async def monitor_positions(exchange):
                         except Exception as e:
                             if "43001" not in str(e) and "does not exist" not in str(e).lower():
                                 logger.error(f"盲目清理失敗 {co_id}: {e}")
+
+        # 4. 未成交加倉單監測 (日K跌破 10MA → 撤銷)
+        add_orders_by_symbol = {}
+        for oo in open_orders:
+            co_id = str(oo.get('clientOrderId') or oo.get('info', {}).get('clientOid') or "")
+            if co_id.startswith("add_"):
+                sym = oo['symbol']
+                if sym not in add_orders_by_symbol:
+                    add_orders_by_symbol[sym] = []
+                add_orders_by_symbol[sym].append(oo)
+
+        for sym, add_orders in add_orders_by_symbol.items():
+            try:
+                ohlcv_1d_add = await exchange.fetch_ohlcv(sym, '1d', limit=20)
+                if not ohlcv_1d_add or len(ohlcv_1d_add) < 15:
+                    continue
+                df_1d_add = pd.DataFrame(ohlcv_1d_add, columns=['ts', 'open', 'high', 'low', 'close', 'vol'])
+                df_1d_add['sma_10'] = df_1d_add['close'].rolling(window=10).mean()
+                now_utc_add = int(pd.Timestamp.now(tz='UTC').floor('1d').timestamp() * 1000)
+                closed_1d_add = df_1d_add[df_1d_add['ts'] < now_utc_add]
+
+                if len(closed_1d_add) > 0:
+                    last_bar_add = closed_1d_add.iloc[-1]
+                    if pd.notna(last_bar_add['sma_10']) and last_bar_add['close'] < last_bar_add['sma_10']:
+                        for ao in add_orders:
+                            ao_coid = str(ao.get('clientOrderId') or ao.get('info', {}).get('clientOid') or "")
+                            try:
+                                await exchange.cancel_order(ao['id'], sym)
+                                open_orders = [o for o in open_orders if o['id'] != ao['id']]
+                                logger.info(f"🚫 加倉單已作廢 (跌破10MA): {ao_coid} ({sym})")
+                            except Exception as e:
+                                if "43001" not in str(e) and "does not exist" not in str(e).lower():
+                                    logger.warning(f"撤銷加倉單失敗 {ao_coid}: {e}")
+                        send_telegram_message(
+                            f"<b>🚫 加倉單已作廢 (跌破10MA)</b>\n\n"
+                            f"💎 <b>交易對:</b> {get_base_coin(sym)}\n"
+                            f"📉 <b>狀態:</b> 日K收盤跌破 10MA，已自動撤銷未成交加倉單"
+                        )
+            except Exception as e:
+                logger.warning(f"監測加倉單異常 ({sym}): {e}")
 
         save_active_signals(saved_signals)
     except Exception as e:
@@ -1230,26 +1400,27 @@ def send_triggered_message(item, default_loss):
     )
     send_telegram_message(msg)
 
-def send_holding_trigger_message(item, default_loss):
-    """持倉中偵測到新訊號，僅通知不下單"""
+def send_holding_trigger_message(item, default_loss, protect_sl):
+    """持倉中偵測到加倉訊號，顯示加倉計算資訊"""
     display_symbol = get_base_coin(item['symbol'])
     precision = item['precision']
     entry = item['entry_price']
-    sl = item['stop_loss']
     c1_d = item.get('c1_date', '未知')
     c2_d = item.get('c2_date', '未知')
 
-    loss_pct = abs((entry - sl) / entry) if entry != 0 else 0
-    position_value = default_loss / loss_pct if loss_pct > 0 else 0
+    half_loss = default_loss / 2
+    risk = abs(entry - protect_sl)
+    position_value = (half_loss / risk) * entry if risk > 0 else 0
 
     msg = (
-        f"<b>⚠️ [持倉中] 發現新進場訊號 (僅通知)</b>\n\n"
+        f"<b>📈 [持倉中] 加倉訊號</b>\n\n"
         f"💎 <b>交易對:</b> {display_symbol}\n\n"
         f"📅 <b>條件一日期:</b> <code>{c1_d}</code>\n"
         f"📅 <b>條件二日期:</b> <code>{c2_d}</code>\n"
         f"📍 <b>進場價格:</b> <code>{entry:.{precision}f}</code>\n"
-        f"🛡️ <b>止損價格:</b> <code>{sl:.{precision}f}</code>\n"
-        f"💰 <b>倉位價值:</b> <code>{position_value:.2f} USDT</code>"
+        f"🛡️ <b>保護止損:</b> <code>{protect_sl:.{precision}f}</code>\n"
+        f"💰 <b>加倉價值:</b> <code>{position_value:.2f} USDT</code>\n"
+        f"💵 <b>風險金額:</b> <code>{half_loss:.1f} USDT</code>"
     )
     send_telegram_message(msg)
 
@@ -1528,9 +1699,50 @@ async def run_scan():
         for item in real_new_triggers:
             send_triggered_message(item, default_loss)
 
-        # 1.5 持倉中新訊號通知 (僅通知不下單)
+        # 1.5 持倉中加倉訊號
         for item in real_holding_new_triggers:
-            send_holding_trigger_message(item, default_loss)
+            sym = item['symbol']
+            matched_sig = None
+            for slist in signals.values():
+                for s in slist:
+                    if s['symbol'] == sym and s['status'] == 'active':
+                        matched_sig = s
+                        break
+                if matched_sig:
+                    break
+
+            if not matched_sig:
+                continue
+
+            protect_sl = float(matched_sig['sl_price'])
+            original_sl = float(matched_sig.get('original_sl_price', matched_sig['sl_price']))
+
+            # 只有保護止損已上移時才執行加倉 (止損未上移代表風險期，不適合加倉)
+            if protect_sl <= original_sl:
+                logger.info(f"⏭️ 跳過加倉 ({sym}): 保護止損尚未上移")
+                continue
+
+            trigger_ts = item.get('trigger_ts', 0)
+            added_list = matched_sig.get('added_signals', [])
+            if trigger_ts in added_list:
+                logger.info(f"⏭️ 跳過加倉 ({sym}): trigger_ts={trigger_ts} 已處理過")
+                continue
+
+            # 推播加倉訊號資訊
+            send_holding_trigger_message(item, default_loss, protect_sl)
+
+            if BITGET_API_KEY:
+                half_loss = default_loss / 2
+                parent_signal_id = matched_sig['signal_id']
+                order = await place_add_order(
+                    ex, sym, 'LONG', item['entry_price'], protect_sl,
+                    item['precision'], half_loss, trigger_ts, parent_signal_id
+                )
+                if order:
+                    if 'added_signals' not in matched_sig:
+                        matched_sig['added_signals'] = []
+                    matched_sig['added_signals'].append(trigger_ts)
+                    save_active_signals(signals)
             
         # 2. 持倉中 (Holding)
         if holding_items:
