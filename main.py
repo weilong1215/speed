@@ -898,42 +898,7 @@ async def monitor_positions(exchange):
                 # ==============================================================
 
                 if not has_pos and not has_entry:
-                    logger.info(f"🧹 偵測到歸零/孤兒訊號 {sig_key}，開始溯源清理...")
-
-                    close_reason = None
-                    try:
-                        ticker = await exchange.fetch_ticker(symbol)
-                        current_price = float(ticker['last'])
-                        sl_price = float(sig['sl_price'])
-                        entry_price = float(sig['entry_price'])
-                        tp_next = sig.get('tp_next_tier', 0)
-                        risk = abs(entry_price - sl_price)
-
-                        # 最近一階 TP 價格
-                        if tp_next > 0 and risk > 0:
-                            last_tp_price = entry_price + tp_next * TP_STEP_R * risk if direction == 'LONG' \
-                                else entry_price - tp_next * TP_STEP_R * risk
-                        else:
-                            last_tp_price = None
-
-                        eps = 0.003
-                        is_sl_hit = (direction == 'LONG' and current_price <= sl_price * (1 + eps)) or \
-                                    (direction == 'SHORT' and current_price >= sl_price * (1 - eps))
-
-                        is_tp_region = False
-                        if last_tp_price:
-                            is_tp_region = (direction == 'LONG' and current_price >= last_tp_price * (1 - eps)) or \
-                                           (direction == 'SHORT' and current_price <= last_tp_price * (1 + eps))
-
-                        if is_tp_region:
-                            close_reason = "🎉 TP 止盈達成"
-                        elif is_sl_hit:
-                            close_reason = "🛑 止損出場"
-                        else:
-                            close_reason = "⚠️ 外部干預 (異常平倉)"
-                    except Exception as e:
-                        logger.warning(f"溯源價格查詢失敗 ({symbol}): {e}")
-                        close_reason = "⚠️ 倉位已消失 (無法判定原因)"
+                    logger.info(f"🧹 偵測到歸零/孤兒訊號 {sig_key}，開始清理...")
 
                     # 清理殘留掛單
                     orphan_orders = [o for o in open_orders
@@ -950,11 +915,10 @@ async def monitor_positions(exchange):
                             if "43001" not in str(e) and "does not exist" not in str(e).lower():
                                 logger.warning(f"撤銷殘留單失敗 {oo['id']}: {e}")
 
-                    if close_reason:
-                        msg = (f"<b>{close_reason}</b>\n\n"
-                               f"💎 <b>交易對:</b> {get_base_coin(symbol)}\n"
-                               f"📉 <b>當前狀態: 倉位已清結</b>")
-                        send_telegram_message(msg)
+                    msg = (f"<b>🏁 倉位已下車</b>\n\n"
+                           f"💎 <b>交易對:</b> {get_base_coin(symbol)}\n"
+                           f"📉 <b>當前狀態: 倉位已清結</b>")
+                    send_telegram_message(msg)
 
                     sig['status'] = 'closed'
 
