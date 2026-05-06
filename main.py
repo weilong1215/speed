@@ -548,9 +548,9 @@ async def place_add_order(exchange, symbol, direction, entry, sl, precision, fix
 # ============================================================================
 
 async def _query_plan_order_status(exchange, symbol, client_oid):
-    """查詢 Bitget 歷史計畫委託單狀態 (executed / canceled / not_found)。
+    """查詢 Bitget 歷史計畫委託單狀態 (executed / canceled / not_found / error)。
     使用 V2 API: GET /api/v2/mix/order/orders-plan-history
-    回傳 (planStatus, baseVolume)：planStatus 為 'executed'|'canceled'|'not_found'，
+    回傳 (planStatus, baseVolume)：planStatus 為 'executed'|'canceled'|'not_found'|'error'，
     baseVolume 為實際成交的幣量 (僅 executed 時有效)。
     """
     try:
@@ -558,6 +558,7 @@ async def _query_plan_order_status(exchange, symbol, client_oid):
         response = await exchange.privateMixGetV2MixOrderOrdersPlanHistory({
             'symbol': symbol.replace('/', '').replace(':USDT', 'USDT'),
             'productType': product_type,
+            'planType': 'normal_plan',
             'clientOid': client_oid,
         })
         data = response.get('data', {})
@@ -575,8 +576,9 @@ async def _query_plan_order_status(exchange, symbol, client_oid):
         else:
             return status, base_vol
     except Exception as e:
+        # 區分 API 錯誤與真正查無此單，避免上層誤判導致重複掛單
         logger.warning(f"查詢計畫委託歷史失敗 ({client_oid}): {e}")
-        return 'not_found', 0.0
+        return 'error', 0.0
 
 
 async def ensure_next_tp(exchange, symbol, side, sig, size, saved_signals, open_orders):
@@ -667,14 +669,29 @@ async def ensure_next_tp(exchange, symbol, side, sig, size, saved_signals, open_
                     save_active_signals(saved_signals)
                     # 繼續往下掛出同一階 TP
 
-                else:
-                    # not_found 或其他狀態 → 可能延遲，清空讓下輪重試
-                    logger.debug(f"  TP{next_tier + 1} 歷史查詢結果: {plan_status}，清空追蹤等下輪處理")
-                    sig['tp_order_id'] = ''
-                    save_active_signals(saved_signals)
+                elif plan_status == 'error':
+                    # API 查詢本身失敗 → 保留 tp_order_id 不動，下輪重試查詢
+                    logger.warning(f"  TP{next_tier + 1} 歷史查詢 API 錯誤，保留追蹤等下輪重試")
                     return
 
+                else:
+                    # not_found：訂單確實不存在 → 清空讓下方補掛，但會經過防重複檢查
+                    logger.info(f"  TP{next_tier + 1} 歷史查無此單 ({symbol})，清空追蹤準備補掛")
+                    sig['tp_order_id'] = ''
+                    save_active_signals(saved_signals)
+                    # 繼續往下走掛單，但會經過防重複檢查
+
         # === 情況 2: tp_order_id 無值 → 掛出當階 TP 單 ===
+        # 防重複：掛單前掃描 open_orders，若同 clientOid 已存在則跳過
+        existing_tp_in_orders = any(tp_coid in get_coid(o) for o in open_orders)
+        if existing_tp_in_orders:
+            logger.info(f"  TP{next_tier + 1} 已在掛單簿中 ({tp_coid})，跳過重複掛單")
+            # 補回 tp_order_id 追蹤 (可能是之前被誤清空的)
+            tp_obj = next((o for o in open_orders if tp_coid in get_coid(o)), None)
+            if tp_obj:
+                sig['tp_order_id'] = str(tp_obj.get('id', tp_coid))
+                save_active_signals(saved_signals)
+            return
         tp_price = entry + (next_tier + 1) * TP_STEP_R * risk if direction == 'LONG' \
             else entry - (next_tier + 1) * TP_STEP_R * risk
         tp_price = round(tp_price, precision)
