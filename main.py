@@ -556,7 +556,7 @@ async def _query_plan_order_status(exchange, symbol, client_oid):
     try:
         product_type = 'USDT-FUTURES'
         response = await exchange.privateMixGetV2MixOrderOrdersPlanHistory({
-            'symbol': symbol.replace('/', '').replace(':USDT', 'USDT'),
+            'symbol': symbol.replace('/', '').replace(':USDT', ''),
             'productType': product_type,
             'planType': 'normal_plan',
             'clientOid': client_oid,
