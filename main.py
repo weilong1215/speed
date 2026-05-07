@@ -1653,6 +1653,9 @@ async def run_scan():
                         watchlist[sym]['last_trigger_ts'] = item.get('trigger_ts', 0)
                     save_watchlist(watchlist)
 
+        # 下單後重新載入 active_signals，避免用掃描開始時的舊快照覆蓋 place_order 新寫入的訊號
+        signals = load_active_signals()
+
         # === 處理持倉保護止損 (持久化 + 實際更新 SL 單) ===
         if holding_items and BITGET_API_KEY:
             for item in holding_items:
