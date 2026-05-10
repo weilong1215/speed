@@ -833,29 +833,18 @@ async def monitor_positions(exchange):
                     # A. 整理本訊號所屬的止損單
                     my_sl_orders = []
                     sl_price_target = float(sig['sl_price'])
-                    original_sl_target = float(sig.get('original_sl_price', sig['sl_price']))
 
                     for o in open_orders:
                         cid = get_coid(o)
                         trig_p = float(o.get('triggerPrice', 0) or o.get('info', {}).get('triggerPrice') or 0)
-                        
-                        is_sl_side = (side.lower() == 'long' and o['side'].lower() == 'sell') or \
-                                     (side.lower() == 'short' and o['side'].lower() == 'buy')
-                        
-                        if not is_sl_side:
-                            continue
-                            
-                        is_our_sl = False
-                        
-                        # 1. 特徵比對: clientOid 完全對應主單 ID (交易所附帶止損) 或 sl_ + 主單 ID (補掛止損)
-                        if cid == signal_id or cid == f"sl_{signal_id}":
-                            is_our_sl = True
-                        # 2. 盲比對: 觸發價精準等於「當前保護止損」或「原始止損」
-                        elif trig_p > 0 and (abs(trig_p - sl_price_target) < 1e-6 or abs(trig_p - original_sl_target) < 1e-6):
-                            is_our_sl = True
-                            
-                        if is_our_sl:
-                            my_sl_orders.append(o)
+                        if signal_id in cid:
+                            if "sl_" in cid:
+                                my_sl_orders.append(o)
+                        else:
+                            is_sl_side = (side.lower() == 'long' and o['side'].lower() == 'sell') or \
+                                         (side.lower() == 'short' and o['side'].lower() == 'buy')
+                            if is_sl_side and abs(trig_p - sl_price_target) < 1e-8:
+                                my_sl_orders.append(o)
 
                     if len(my_sl_orders) > 1:
                         for dup in my_sl_orders[1:]:
@@ -869,7 +858,7 @@ async def monitor_positions(exchange):
                         need_cancel = False
 
                         # 價格不一致
-                        if abs(existing_trig - sl_price_target) > 1e-6:
+                        if abs(existing_trig - sl_price_target) > 1e-8:
                             logger.info(f"🔄 SL 價格不一致 ({symbol}): 掛單={existing_trig} vs 目標={sl_price_target}，撤銷舊單")
                             need_cancel = True
 
