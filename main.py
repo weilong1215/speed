@@ -1214,8 +1214,8 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
                     }
                     target_info_c2 = None
             elif state == 1:
-                # 間隔 K 棒：必須為陽棒，且不跌破 10MA，且不提前突破前兩根實體高點
-                if bar['close'] <= bar['open'] or bar['close'] < bar['sma_10'] or bar['close'] > max(prev1_body_high, prev2_body_high):
+                # 間隔 K 棒：必須為陽棒，且不跌破 10MA，且不提前突破前兩根實體高點，且低點不破前一根低點
+                if bar['close'] <= bar['open'] or bar['close'] < bar['sma_10'] or bar['close'] > max(prev1_body_high, prev2_body_high) or bar['low'] < prev1['low']:
                     state = 0
                     target_info_c1 = None
                     target_info_gap = None
@@ -1239,8 +1239,8 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
                         'low': float(bar['low'])
                     }
             elif state == 2:
-                # 必須滿足條件二 (突破+站上10MA+止損距離<=30%)，否則淘汰重找條件一
-                is_breakout = bar['close'] > max(prev1_body_high, prev2_body_high) and bar['close'] > bar['sma_10']
+                # 必須滿足條件二 (突破+站上10MA+低點不破前根+止損距離<=30%)，否則淘汰重找條件一
+                is_breakout = bar['close'] > max(prev1_body_high, prev2_body_high) and bar['close'] > bar['sma_10'] and bar['low'] >= prev1['low']
                 sl_distance = (bar['close'] - bar['low']) / bar['close'] if bar['close'] > 0 else 1.0
                 
                 if is_breakout and sl_distance <= 0.30:
