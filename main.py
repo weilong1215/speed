@@ -830,6 +830,116 @@ async def monitor_positions(exchange):
                         except Exception as e:
                             logger.warning(f"檢查10MA平倉異常 ({symbol}): {e}")
 
+                    else:
+                        # === 已保護止損：日線跌破10MA / 3D看跌吞噬 → 部分平倉 20% ===
+                        try:
+                            partial_log = sig.get('partial_close_log', {})
+                            precision = sig.get('precision', 4)
+                            current_price_pc = 0
+
+                            ohlcv_1d_pc = await exchange.fetch_ohlcv(symbol, '1d', limit=20)
+                            if ohlcv_1d_pc and len(ohlcv_1d_pc) >= 15:
+                                df_1d_pc = pd.DataFrame(ohlcv_1d_pc, columns=['ts', 'open', 'high', 'low', 'close', 'vol'])
+                                df_1d_pc['sma_10'] = df_1d_pc['close'].rolling(window=10).mean()
+                                now_utc_pc = int(pd.Timestamp.now(tz='UTC').floor('1d').timestamp() * 1000)
+                                closed_1d_pc = df_1d_pc[df_1d_pc['ts'] < now_utc_pc]
+
+                                # --- 條件 1: 日線收盤跌破 10MA ---
+                                if len(closed_1d_pc) > 0:
+                                    last_bar_pc = closed_1d_pc.iloc[-1]
+                                    bar_ts_1d = int(last_bar_pc['ts'])
+                                    log_1d = partial_log.get('1d_10ma', [])
+
+                                    if (pd.notna(last_bar_pc['sma_10'])
+                                            and last_bar_pc['close'] < last_bar_pc['sma_10']
+                                            and bar_ts_1d not in log_1d):
+                                        if current_price_pc == 0:
+                                            ticker_pc = await exchange.fetch_ticker(symbol)
+                                            current_price_pc = float(ticker_pc['last'])
+                                        close_qty = float(exchange.amount_to_precision(symbol, size * TP_CLOSE_PCT))
+
+                                        # 20% 不足 6U → 全倉平倉
+                                        if close_qty <= 0 or close_qty * current_price_pc < 6:
+                                            close_qty = float(exchange.amount_to_precision(symbol, size))
+                                            close_label = "全倉"
+                                        else:
+                                            close_label = "20%"
+
+                                        if close_qty > 0 and close_qty * current_price_pc >= 6:
+                                            order_side_pc = 'sell' if side.lower() == 'long' else 'buy'
+                                            await exchange.create_order(symbol, 'market', order_side_pc, close_qty, None, params={
+                                                'reduceOnly': True, 'hedged': True, 'holdSide': side.lower()
+                                            })
+                                            if '1d_10ma' not in partial_log:
+                                                partial_log['1d_10ma'] = []
+                                            partial_log['1d_10ma'].append(bar_ts_1d)
+                                            sig['partial_close_log'] = partial_log
+                                            save_active_signals(saved_signals)
+                                            size = size - close_qty
+
+                                            logger.info(
+                                                f"📉 日線跌破10MA減倉 ({symbol}): {close_label} = {close_qty} | "
+                                                f"收盤={last_bar_pc['close']:.{precision}f} < 10MA={last_bar_pc['sma_10']:.{precision}f}"
+                                            )
+                                            send_telegram_message(
+                                                f"<b>📉 日線跌破10MA 減倉 ({close_label})</b>\n\n"
+                                                f"💎 {get_base_coin(symbol)} [{sig['direction']}]\n"
+                                                f"📊 <b>平倉數量:</b> {close_qty}\n"
+                                                f"📊 <b>剩餘倉位:</b> {size:.{precision}f}"
+                                            )
+
+                                # --- 條件 2: 3D 看跌吞噬 (收盤 < 前一根實體低點) ---
+                                if size > 0:
+                                    composed_3d_pc = compose_3d_bars(ohlcv_1d_pc)
+                                    if composed_3d_pc and len(composed_3d_pc) >= 2:
+                                        df_3d_pc = pd.DataFrame(composed_3d_pc, columns=['ts', 'open', 'high', 'low', 'close', 'vol', 'close_ts'])
+                                        now_utc_3d_pc = int(time.time() * 1000)
+                                        closed_3d_pc = df_3d_pc[df_3d_pc['close_ts'] <= now_utc_3d_pc]
+
+                                        if len(closed_3d_pc) >= 2:
+                                            last_3d = closed_3d_pc.iloc[-1]
+                                            prev_3d = closed_3d_pc.iloc[-2]
+                                            bar_ts_3d = int(last_3d['close_ts'])
+                                            log_3d = partial_log.get('3d_engulf', [])
+                                            prev_body_low = min(prev_3d['open'], prev_3d['close'])
+
+                                            if last_3d['close'] < prev_body_low and bar_ts_3d not in log_3d:
+                                                if current_price_pc == 0:
+                                                    ticker_pc = await exchange.fetch_ticker(symbol)
+                                                    current_price_pc = float(ticker_pc['last'])
+                                                close_qty = float(exchange.amount_to_precision(symbol, size * TP_CLOSE_PCT))
+
+                                                if close_qty <= 0 or close_qty * current_price_pc < 6:
+                                                    close_qty = float(exchange.amount_to_precision(symbol, size))
+                                                    close_label = "全倉"
+                                                else:
+                                                    close_label = "20%"
+
+                                                if close_qty > 0 and close_qty * current_price_pc >= 6:
+                                                    order_side_pc = 'sell' if side.lower() == 'long' else 'buy'
+                                                    await exchange.create_order(symbol, 'market', order_side_pc, close_qty, None, params={
+                                                        'reduceOnly': True, 'hedged': True, 'holdSide': side.lower()
+                                                    })
+                                                    if '3d_engulf' not in partial_log:
+                                                        partial_log['3d_engulf'] = []
+                                                    partial_log['3d_engulf'].append(bar_ts_3d)
+                                                    sig['partial_close_log'] = partial_log
+                                                    save_active_signals(saved_signals)
+                                                    size = size - close_qty
+
+                                                    logger.info(
+                                                        f"📉 3D看跌吞噬減倉 ({symbol}): {close_label} = {close_qty} | "
+                                                        f"收盤={last_3d['close']} < 前根實體低={prev_body_low}"
+                                                    )
+                                                    send_telegram_message(
+                                                        f"<b>📉 3D看跌吞噬 減倉 ({close_label})</b>\n\n"
+                                                        f"💎 {get_base_coin(symbol)} [{sig['direction']}]\n"
+                                                        f"📊 <b>平倉數量:</b> {close_qty}\n"
+                                                        f"📊 <b>剩餘倉位:</b> {size:.{precision}f}"
+                                                    )
+                        except Exception as e:
+                            logger.warning(f"檢查部分平倉條件異常 ({symbol}): {e}")
+
                     # A. 整理本訊號所屬的止損單
                     my_sl_orders = []
                     sl_price_target = float(sig['sl_price'])
