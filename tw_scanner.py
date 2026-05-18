@@ -26,7 +26,18 @@ load_dotenv()
 TG_BOT_TOKEN = os.getenv("TG_BOT_TOKEN", "")
 TG_CHAT_ID = os.getenv("TG_CHAT_ID", "")
 FUGLE_API_KEY = os.getenv("FUGLE_API_KEY", "")
-DEFAULT_LOSS_TWD = float(os.getenv("DEFAULT_LOSS_TWD", "10000"))
+
+def load_tw_loss_amount() -> float:
+    config_file = "/app/data/system_config.json"
+    if os.path.exists(config_file):
+        try:
+            import json
+            with open(config_file, 'r', encoding='utf-8') as f:
+                config = json.load(f)
+            return float(config.get("default_tw_loss_amount", 10000))
+        except Exception:
+            pass
+    return float(os.getenv("DEFAULT_LOSS_TWD", "10000"))
 
 if not FUGLE_API_KEY:
     logger.error("❌ 缺少 FUGLE_API_KEY，請在 .env 中設定。")
@@ -73,14 +84,10 @@ def send_triggered_message(item):
     stop_loss = item['stop_loss']
     protect_sl = item.get('protect_sl', 0.0)
     
+    tw_loss = load_tw_loss_amount()
     risk_per_share = entry_price - stop_loss
-    shares = int(DEFAULT_LOSS_TWD / risk_per_share) if risk_per_share > 0 else 0
+    shares = int(tw_loss / risk_per_share) if risk_per_share > 0 else 0
     
-    shares_str = f"{shares:,} 股"
-    if shares >= 1000:
-        sheets = shares / 1000.0
-        shares_str += f" (約 {sheets:.2f} 張)"
-        
     msg = (
         f"<b>🚀 台股(持倉中)</b>\n\n"
         f"💎 <b>標的:</b> {item['symbol']} {item['name']}\n"
@@ -93,7 +100,7 @@ def send_triggered_message(item):
     if protect_sl > stop_loss:
         msg += f"🛡️ <b>保護止損價格:</b> <code>{protect_sl:.2f}</code>\n"
         
-    msg += f"📊 <b>預估股數:</b> <code>{shares_str}</code> (單筆預設虧損 {int(DEFAULT_LOSS_TWD):,} TWD)"
+    msg += f"📊 <b>股數:</b> <code>{shares:,}股</code>"
     send_telegram_message(msg)
 
 # ============================================================================

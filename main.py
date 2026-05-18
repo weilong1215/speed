@@ -123,7 +123,7 @@ def load_config():
             return config
         except Exception as e:
             logger.error(f"讀取設定檔失敗: {e}")
-    return {"default_loss_amount": 6}
+    return {"default_loss_amount": 6, "default_tw_loss_amount": 10000}
 
 def save_config(data):
     try:
@@ -1564,15 +1564,20 @@ def send_holding_trigger_message(item, default_loss, protect_sl):
 def send_system_settings_message(config):
     """獨立一則系統設定訊息"""
     loss = config.get("default_loss_amount", 6)
+    tw_loss = config.get("default_tw_loss_amount", 10000)
 
     msg = (
         f"⚙️ <b>系統快速設定</b>\n\n"
-        f"💵 <b>預設虧損金額:</b> {loss} USDT"
+        f"💵 <b>加密貨幣預設虧損:</b> {loss} USDT\n"
+        f"💵 <b>台股預設虧損:</b> {int(tw_loss):,} TWD"
     )
 
     reply_markup = {
         "inline_keyboard": [
-            [{"text": "📝 修改預設虧損", "switch_inline_query_current_chat": "/set_loss "}]
+            [
+                {"text": "📝 修改加密貨幣虧損", "switch_inline_query_current_chat": "/set_loss "},
+                {"text": "📝 修改台股虧損", "switch_inline_query_current_chat": "/set_tw_loss "}
+            ]
         ]
     }
 
@@ -1628,8 +1633,29 @@ def poll_telegram_commands():
                         config = load_config()
                         config["default_loss_amount"] = new_val
                         save_config(config)
-                        reply = f"✅ 預設虧損金額已更新為 <b>{new_val} USDT</b>"
+                        reply = f"✅ 加密貨幣預設虧損已更新為 <b>{new_val} USDT</b>"
                         logger.info(f"⚙️ /set_loss 指令: 虧損金額更新為 {new_val}")
+                    except ValueError:
+                        reply = "❌ 格式錯誤，請輸入大於零的數字。"
+                else:
+                    reply = "❌ 格式錯誤，未提供數字。"
+
+                send_url = f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendMessage"
+                payload = {"chat_id": chat_id, "text": reply, "parse_mode": "HTML"}
+                requests.post(send_url, json=payload, timeout=10)
+
+            elif text.startswith("/set_tw_loss"):
+                parts = text.split()
+                if len(parts) >= 2:
+                    try:
+                        new_val = float(parts[1])
+                        if new_val <= 0:
+                            raise ValueError("金額必須大於 0")
+                        config = load_config()
+                        config["default_tw_loss_amount"] = new_val
+                        save_config(config)
+                        reply = f"✅ 台股預設虧損已更新為 <b>{int(new_val):,} TWD</b>"
+                        logger.info(f"⚙️ /set_tw_loss 指令: 台股虧損更新為 {new_val}")
                     except ValueError:
                         reply = "❌ 格式錯誤，請輸入大於零的數字。"
                 else:
