@@ -1886,11 +1886,11 @@ async def run_scan():
             
         # 2. 持倉中 (Holding)
         if holding_items:
-            send_grouped_message(holding_items, "💼 <b>[持倉中]</b>")
+            send_grouped_message(holding_items, "💼 <b>加密貨幣[持倉中]</b>")
             
         # 3. 關注中 (Watching)
         if real_watching:
-            send_grouped_message(real_watching, "👀 <b>[關注中]</b>")
+            send_grouped_message(real_watching, "👀 <b>加密貨幣[關注中]</b>")
 
         # 4. 系統設定 (System Settings)
         if real_new_triggers or holding_items or real_watching or real_holding_new_triggers:

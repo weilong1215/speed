@@ -69,7 +69,7 @@ def send_grouped_message(item_list, title):
 
 def send_triggered_message(item):
     msg = (
-        f"<b>🚀 台股掃描觸發進場</b>\n\n"
+        f"<b>🚀 台股(持倉中)</b>\n\n"
         f"💎 <b>標的:</b> {item['symbol']} {item['name']}\n"
         f"📅 <b>條件一日期:</b> <code>{item.get('c1_date', '未知')}</code>\n"
         f"📅 <b>條件二日期:</b> <code>{item.get('c2_date', '未知')}</code>\n"
@@ -341,7 +341,7 @@ async def main_loop():
             watchlist_items.append(r)
 
     if watchlist_items:
-        send_grouped_message(watchlist_items, "🔍 台股掃描：等待突破 (關注中)")
+        send_grouped_message(watchlist_items, "🔍 台股(關注中)")
         
     if triggered_items:
         for item in triggered_items:
