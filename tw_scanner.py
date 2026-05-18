@@ -85,37 +85,28 @@ def compose_3d_bars(ohlcv_1d):
     if not ohlcv_1d or len(ohlcv_1d) < 3:
         return []
     
-    PERIOD_MS = 3 * 24 * 3600 * 1000
-    groups = {}
-    for bar in ohlcv_1d:
-        ts = bar[0]
-        dt = datetime.fromtimestamp(ts / 1000, tz=timezone.utc)
-        year_start_dt = datetime(dt.year, 1, 1, tzinfo=timezone.utc)
-        year_epoch_ms = int(year_start_dt.timestamp() * 1000)
-        
-        group_idx = (ts - year_epoch_ms) // PERIOD_MS
-        group_key = year_epoch_ms + group_idx * PERIOD_MS
-        
-        if group_key not in groups:
-            groups[group_key] = []
-        groups[group_key].append(bar)
-
+    # 台股特製版：捨棄加密貨幣的固定 UTC 日曆分組
+    # 改為直接依賴「實際交易日」，每 3 根 K 線合成一根 3D K 棒
+    # 完美避開週末或國定假日導致的「單日殘缺 3D 棒」問題
     result = []
-    sorted_gts = sorted(groups.keys())
-    for i, gts in enumerate(sorted_gts):
-        bars = sorted(groups[gts], key=lambda x: x[0])
-        is_completed = (len(bars) >= 3) or (i < len(sorted_gts) - 1)
+    
+    for i in range(0, len(ohlcv_1d), 3):
+        bars = ohlcv_1d[i:i+3]
+        
+        # 必須滿 3 根才合成，除非是最新的一組 (允許進行中)
+        is_completed = (len(bars) == 3) or (i + 3 >= len(ohlcv_1d))
         if not is_completed:
             continue
             
+        gts = bars[0][0]
         result.append([
             gts,
-            bars[0][1],
-            max(b[2] for b in bars),
-            min(b[3] for b in bars),
-            bars[-1][4],
-            sum(b[5] for b in bars),
-            bars[-1][0] + 24 * 3600 * 1000
+            bars[0][1], # open
+            max(b[2] for b in bars), # high
+            min(b[3] for b in bars), # low
+            bars[-1][4], # close
+            sum(b[5] for b in bars), # vol
+            bars[-1][0] + 24 * 3600 * 1000 # close_ts (最後一根 K 的結束時間)
         ])
     return result
 
