@@ -255,11 +255,16 @@ async def scan_stock(session, stock_info, semaphore, current_idx, total):
             except Exception as e:
                 continue
                 
-        df_1d = pd.DataFrame(ohlcv_1d, columns=['ts', 'open', 'high', 'low', 'close', 'vol'])
-        df_1d = df_1d.sort_values('ts').drop_duplicates(subset=['ts']).reset_index(drop=True)
-        df_1d['dt'] = pd.to_datetime(df_1d['ts'], unit='ms', utc=True)
+        ohlcv_3d = compose_3d_bars(ohlcv_1d)
+        if not ohlcv_3d or len(ohlcv_3d) < 15:
+            return None
+            
+        df_3d = pd.DataFrame(ohlcv_3d, columns=['ts', 'open', 'high', 'low', 'close', 'vol', 'close_ts'])
+        df_3d = df_3d.sort_values('ts').drop_duplicates(subset=['ts']).reset_index(drop=True)
+        df_3d['dt'] = pd.to_datetime(df_3d['ts'], unit='ms', utc=True)
         
-        df_1d['sma_10'] = df_1d['close'].rolling(window=10).mean()
+        # 使用 3D K 棒計算 10MA
+        df_3d['sma_10'] = df_3d['close'].rolling(window=10).mean()
         
         target_info_c1 = None
         target_info_c2 = None
@@ -268,10 +273,10 @@ async def scan_stock(session, stock_info, semaphore, current_idx, total):
         dynamic_sl = 0.0
         entry_price_scan = 0.0
         
-        for i in range(10, len(df_1d)):
-            bar = df_1d.iloc[i]
-            prev1 = df_1d.iloc[i-1]
-            prev2 = df_1d.iloc[i-2]
+        for i in range(10, len(df_3d)):
+            bar = df_3d.iloc[i]
+            prev1 = df_3d.iloc[i-1]
+            prev2 = df_3d.iloc[i-2]
             
             prev1_body_high = max(prev1['open'], prev1['close'])
             prev2_body_high = max(prev2['open'], prev2['close'])
@@ -307,8 +312,8 @@ async def scan_stock(session, stock_info, semaphore, current_idx, total):
                             'dt_str': bar['dt'].isoformat(), 'ts': int(bar['ts']),
                             'close': float(bar['close']), 'high': float(bar['high']), 'low': float(bar['low'])
                         }
-                elif bar['close'] > max(prev1_body_high, prev2_body_high):
-                    # 條件二成立：收盤大於「前面兩根」的實體高點，且止損距離 <= 10%
+                elif bar['close'] > max(prev1_body_high, prev2_body_high) and bar['close'] > bar['sma_10']:
+                    # 條件二成立：收盤大於「前面兩根」的實體高點且大於10MA，止損距離 <= 10%
                     sl_distance = (bar['close'] - bar['low']) / bar['close'] if bar['close'] > 0 else 1.0
                     if sl_distance <= 0.10:
                         state = 3
@@ -326,26 +331,12 @@ async def scan_stock(session, stock_info, semaphore, current_idx, total):
                         state = 0
                         target_info_c1 = None
             elif state == 3:
-                historical_1d = df_1d.iloc[:i+1]
-                ohlcv_1d_list = historical_1d[['ts', 'open', 'high', 'low', 'close', 'vol']].values.tolist()
-                composed_3d = compose_3d_bars(ohlcv_1d_list)
-                
-                current_sl = c2_low
-                entry_ts_scan = target_info_c2['ts']
-                
-                for idx, b_3d in enumerate(composed_3d):
-                    b_close_time = b_3d[6]
-                    if b_close_time > entry_ts_scan and idx >= 1:
-                        prev_b = composed_3d[idx-1]
-                        prev_body_high = max(prev_b[1], prev_b[4])
-                        b_close = b_3d[4]
-                        b_low = b_3d[3]
-                        if b_close > prev_body_high and b_low > entry_price_scan:
-                            if b_low > current_sl:
-                                current_sl = b_low
-                
-                dynamic_sl = current_sl
+                # 在主迴圈內更新保護止損：若當前 3D K 棒收盤高於前一根 3D 實體高點且低點大於進場價
+                if bar['close'] > prev1_body_high and bar['low'] > entry_price_scan:
+                    if bar['low'] > dynamic_sl:
+                        dynamic_sl = float(bar['low'])
 
+                # 淘汰條件：最低價跌破動態止損，或收盤跌破 10MA
                 if bar['low'] < dynamic_sl or bar['close'] < bar['sma_10']:
                     state = 0
                     dynamic_sl = 0.0
