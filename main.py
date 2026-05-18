@@ -1564,7 +1564,7 @@ def send_holding_trigger_message(item, default_loss, protect_sl):
 def send_system_settings_message(config):
     """獨立一則系統設定訊息"""
     loss = config.get("default_loss_amount", 6)
-    tw_loss = config.get("default_tw_loss_amount", 10000)
+    tw_loss = config.get("default_tw_loss_amount", 300)
 
     msg = (
         f"⚙️ <b>系統快速設定</b>\n\n"
