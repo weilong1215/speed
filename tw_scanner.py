@@ -34,10 +34,10 @@ def load_tw_loss_amount() -> float:
             import json
             with open(config_file, 'r', encoding='utf-8') as f:
                 config = json.load(f)
-            return float(config.get("default_tw_loss_amount", 10000))
+            return float(config.get("default_tw_loss_amount", 300))
         except Exception:
             pass
-    return float(os.getenv("DEFAULT_LOSS_TWD", "10000"))
+    return float(os.getenv("DEFAULT_LOSS_TWD", "300"))
 
 if not FUGLE_API_KEY:
     logger.error("❌ 缺少 FUGLE_API_KEY，請在 .env 中設定。")

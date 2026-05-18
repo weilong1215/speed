@@ -123,7 +123,7 @@ def load_config():
             return config
         except Exception as e:
             logger.error(f"讀取設定檔失敗: {e}")
-    return {"default_loss_amount": 6, "default_tw_loss_amount": 10000}
+    return {"default_loss_amount": 6, "default_tw_loss_amount": 300}
 
 def save_config(data):
     try:
@@ -1918,15 +1918,15 @@ async def run_scan():
         if real_watching:
             send_grouped_message(real_watching, "👀 <b>加密貨幣[關注中]</b>")
 
-        # 4. 系統設定 (System Settings)
-        if real_new_triggers or holding_items or real_watching or real_holding_new_triggers:
-            send_system_settings_message(config)
-
         active_count = len(watchlist)
         logger.info(f"✅ 掃描完成。新觸發: {len(real_new_triggers)} / 持倉: {len(holding_items)} / 持倉新訊號: {len(real_holding_new_triggers)} / 關注: {len(real_watching)} / 追蹤總數: {active_count}")
 
         if not real_new_triggers and not holding_items and not real_watching:
             send_telegram_message(f"✅ <b>條件掃描完成</b>\n本次共掃描 {total_coins} 個幣種，無滿足條件標的。\n(當前清單追蹤中: {active_count} 個)")
+
+        # 4. 系統設定 (System Settings)
+        if real_new_triggers or holding_items or real_watching or real_holding_new_triggers:
+            send_system_settings_message(config)
     finally:
         await ex.close()
 
