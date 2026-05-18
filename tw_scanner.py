@@ -10,6 +10,7 @@ import logging
 import os
 from datetime import datetime, timezone
 from dotenv import load_dotenv
+import time
 
 # ============================================================================
 # 系統初始化
@@ -141,28 +142,63 @@ def compose_3d_bars(ohlcv_1d):
 def get_tw_stock_list():
     stocks = []
     logger.info("正在獲取台股上市櫃清單...")
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    }
     
-    # 獲取上市 (TWSE)
-    try:
-        res = requests.get("https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL", timeout=10)
-        for item in res.json():
-            code = item.get("Code", "")
-            # 排除 ETF (0 開頭) 與權證等非普通股，保留 4 碼純數字普通股
-            if len(code) == 4 and not code.startswith("0") and code.isdigit():
-                stocks.append({"symbol": code, "name": item.get("Name", "")})
-    except Exception as e:
-        logger.error(f"獲取上市清單失敗: {e}")
+    # 獲取上市 (TWSE) - 最多重試 5 次
+    twse_stocks = []
+    for attempt in range(1, 6):
+        try:
+            res = requests.get("https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL", headers=headers, timeout=15)
+            if res.status_code == 200:
+                data = res.json()
+                if isinstance(data, list) and len(data) > 0:
+                    for item in data:
+                        code = item.get("Code", "")
+                        if len(code) == 4 and not code.startswith("0") and code.isdigit():
+                            twse_stocks.append({"symbol": code, "name": item.get("Name", "")})
+                    if twse_stocks:
+                        logger.info(f"成功獲取上市 (TWSE) 清單，共 {len(twse_stocks)} 檔標的")
+                        break
+            logger.warning(f"獲取上市清單第 {attempt} 次失敗 (狀態碼: {res.status_code})，準備重試...")
+        except Exception as e:
+            logger.warning(f"獲取上市清單第 {attempt} 次異常: {e}，準備重試...")
+        time.sleep(2)
 
-    # 獲取上櫃 (TPEx)
-    try:
-        res = requests.get("https://www.tpex.org.tw/openapi/v1/tpex_mainboard_quotes", timeout=10)
-        for item in res.json():
-            code = item.get("SecuritiesCompanyCode", "")
-            if len(code) == 4 and not code.startswith("0") and code.isdigit():
-                stocks.append({"symbol": code, "name": item.get("CompanyName", "")})
-    except Exception as e:
-        logger.error(f"獲取上櫃清單失敗: {e}")
-        
+    # 獲取上櫃 (TPEx) - 最多重試 5 次
+    tpex_stocks = []
+    for attempt in range(1, 6):
+        try:
+            res = requests.get("https://www.tpex.org.tw/openapi/v1/tpex_mainboard_quotes", headers=headers, timeout=15)
+            if res.status_code == 200:
+                data = res.json()
+                if isinstance(data, list) and len(data) > 0:
+                    for item in data:
+                        code = item.get("SecuritiesCompanyCode", "")
+                        if len(code) == 4 and not code.startswith("0") and code.isdigit():
+                            tpex_stocks.append({"symbol": code, "name": item.get("CompanyName", "")})
+                    if tpex_stocks:
+                        logger.info(f"成功獲取上櫃 (TPEx) 清單，共 {len(tpex_stocks)} 檔標的")
+                        break
+            logger.warning(f"獲取上櫃清單第 {attempt} 次失敗 (狀態碼: {res.status_code})，準備重試...")
+        except Exception as e:
+            logger.warning(f"獲取上櫃清單第 {attempt} 次異常: {e}，準備重試...")
+        time.sleep(2)
+
+    # 組合上市櫃
+    stocks.extend(twse_stocks)
+    stocks.extend(tpex_stocks)
+
+    # 防禦性檢查：如果其中一個主要清單為空，說明資料抓取嚴重不完整，應發送警報
+    if not twse_stocks or not tpex_stocks:
+        err_msg = f"⚠️ 台股清單獲取不完整！上市(TWSE): {len(twse_stocks)} 檔, 上櫃(TPEx): {len(tpex_stocks)} 檔。請檢查網路或政府 API 狀態。"
+        logger.error(err_msg)
+        send_telegram_message(f"🚨 <b>系統異常告警</b>\n\n{err_msg}")
+        # 若完全沒有抓到上市股票，為了防止產出破碎的結果，在此直接拋出異常讓排程重試
+        if not twse_stocks:
+            raise RuntimeError("無法獲取上市 (TWSE) 股票清單，拒絕執行破碎掃描")
+
     logger.info(f"成功獲取 {len(stocks)} 檔普通股標的。")
     return stocks
 
