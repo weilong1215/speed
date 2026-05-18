@@ -1022,7 +1022,7 @@ async def monitor_positions(exchange):
                     for o in open_orders)
 
                 # ==============================================================
-                # 追高防護：價格已達 5R 目標 -> 撤銷殘餘未成交進場單
+                # 追高防護：價格已達 TP1 目標 -> 撤銷殘餘未成交進場單
                 # 不論是否已有部分倉位，只要仍有進場掛單就檢查
                 # ==============================================================
                 if has_entry:
@@ -1035,13 +1035,13 @@ async def monitor_positions(exchange):
 
                         if risk > 0:
                             is_runaway = False
-                            if direction == 'LONG' and current_price >= entry_price + 5 * risk:
+                            if direction == 'LONG' and current_price >= entry_price + TP_STEP_R * risk:
                                 is_runaway = True
-                            elif direction == 'SHORT' and current_price <= entry_price - 5 * risk:
+                            elif direction == 'SHORT' and current_price <= entry_price - TP_STEP_R * risk:
                                 is_runaway = True
 
                             if is_runaway:
-                                logger.info(f"🏃 價格已達 5R ({symbol})，撤銷未成交進場單 {signal_id}")
+                                logger.info(f"🏃 價格已達 TP1 ({symbol})，撤銷未成交進場單 {signal_id}")
                                 entry_orders = [o for o in open_orders if str(o.get('clientOrderId') or o.get('info', {}).get('clientOid') or "") == str(signal_id)]
                                 for eo in entry_orders:
                                     try:
@@ -1053,14 +1053,14 @@ async def monitor_positions(exchange):
                                 # 有部分倉位時僅撤進場單，訊號保持 active 讓 TP/SL 繼續管理
                                 if has_pos:
                                     send_telegram_message(
-                                        f"<b>🏃 價格已達 5R (撤銷殘餘進場單)</b>\n\n"
+                                        f"<b>🏃 價格已達 TP1 (撤銷殘餘進場單)</b>\n\n"
                                         f"💎 <b>交易對:</b> {get_base_coin(symbol)} [{direction}]\n"
                                         f"📉 <b>狀態: 部分成交，殘餘進場單已撤銷，倉位繼續由 TP/SL 管理</b>"
                                     )
                                 else:
                                     # 完全未成交 → 關閉訊號
                                     send_telegram_message(
-                                        f"<b>🏃 價格已達 5R (錯失進場)</b>\n\n"
+                                        f"<b>🏃 價格已達 TP1 (錯失進場)</b>\n\n"
                                         f"💎 <b>交易對:</b> {get_base_coin(symbol)} [{direction}]\n"
                                         f"📉 <b>狀態: 已自動撤銷未成交之進場單</b>"
                                     )
