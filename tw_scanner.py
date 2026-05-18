@@ -219,8 +219,6 @@ async def scan_stock(session, stock_info, semaphore, current_idx, total):
                     c2_low = float(bar['low'])
                     dynamic_sl = c2_low
                     entry_price_scan = float(bar['close'])
-                            'close': float(bar['close']), 'high': float(bar['high']), 'low': float(bar['low'])
-                        }
             elif state == 3:
                 historical_1d = df_1d.iloc[:i+1]
                 ohlcv_1d_list = historical_1d[['ts', 'open', 'high', 'low', 'close', 'vol']].values.tolist()
