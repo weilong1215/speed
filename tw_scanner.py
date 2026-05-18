@@ -208,9 +208,8 @@ async def scan_stock(session, stock_info, semaphore, current_idx, total):
             prev2_body_high = max(prev2['open'], prev2['close'])
             
             if state == 0:
-                # 條件一：雙黑K回檔，且收盤價均大於 10MA
+                # 條件一：收盤價小於前兩天實體高點 (回檔)，且這三天收盤價均大於 10MA
                 c1_met = (
-                    bar['close'] < bar['open'] and prev1['close'] < prev1['open'] and 
                     bar['close'] < prev1_body_high and bar['close'] < prev2_body_high and 
                     bar['close'] > bar['sma_10'] and prev1['close'] > prev1['sma_10'] and prev2['close'] > prev2['sma_10']
                 )
@@ -278,7 +277,6 @@ async def scan_stock(session, stock_info, semaphore, current_idx, total):
                     
                     # 重新判斷是否立即觸發新的條件一
                     c1_met = (
-                        bar['close'] < bar['open'] and prev1['close'] < prev1['open'] and 
                         bar['close'] < prev1_body_high and bar['close'] < prev2_body_high and 
                         bar['close'] > bar['sma_10'] and prev1['close'] > prev1['sma_10'] and prev2['close'] > prev2['sma_10']
                     )
