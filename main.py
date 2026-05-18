@@ -1027,6 +1027,8 @@ async def monitor_positions(exchange):
                 # ==============================================================
                 if has_entry:
                     try:
+                        entry_ts = int(sig.get('timestamp', 0))
+                        ohlcv_1d = await exchange.fetch_ohlcv(symbol, '1d', limit=30)
                         ticker = await exchange.fetch_ticker(symbol)
                         current_price = float(ticker['last'])
                         original_sl = float(sig.get('original_sl_price', sig['sl_price']))
@@ -1035,10 +1037,25 @@ async def monitor_positions(exchange):
 
                         if risk > 0:
                             is_runaway = False
+                            # 1. 檢查當前即時市價是否已達 TP1
                             if direction == 'LONG' and current_price >= entry_price + TP_STEP_R * risk:
                                 is_runaway = True
                             elif direction == 'SHORT' and current_price <= entry_price - TP_STEP_R * risk:
                                 is_runaway = True
+
+                            # 2. 檢查條件二成立之後的所有歷史 K 棒 high/low 是否曾達到 TP1
+                            if not is_runaway and len(ohlcv_1d) > 0:
+                                for candle in ohlcv_1d:
+                                    candle_ts = int(candle[0])
+                                    if candle_ts > entry_ts:
+                                        c_high = float(candle[2])
+                                        c_low = float(candle[3])
+                                        if direction == 'LONG' and c_high >= entry_price + TP_STEP_R * risk:
+                                            is_runaway = True
+                                            break
+                                        elif direction == 'SHORT' and c_low <= entry_price - TP_STEP_R * risk:
+                                            is_runaway = True
+                                            break
 
                             if is_runaway:
                                 logger.info(f"🏃 價格已達 TP1 ({symbol})，撤銷未成交進場單 {signal_id}")
@@ -1070,8 +1087,6 @@ async def monitor_positions(exchange):
                         # 訊號淘汰條件撤單：若尚未進場，且日線收盤跌破 10MA 或最低點低於止損價，則作廢訊號撤單
                         if not is_runaway:
                             try:
-                                entry_ts = int(sig.get('timestamp', 0))
-                                ohlcv_1d = await exchange.fetch_ohlcv(symbol, '1d', limit=20)
                                 if ohlcv_1d and len(ohlcv_1d) >= 15:
                                     df_1d = pd.DataFrame(ohlcv_1d, columns=['ts', 'open', 'high', 'low', 'close', 'vol'])
                                     df_1d['sma_10'] = df_1d['close'].rolling(window=10).mean()
@@ -1108,8 +1123,7 @@ async def monitor_positions(exchange):
                         # 保護止損產生檢查：若尚未進場但 3D K 棒已滿足保護止損上移條件，撤銷掛單
                         if not is_runaway and sig.get('status') == 'active':
                             try:
-                                entry_ts = int(sig.get('timestamp', 0))
-                                ohlcv_1d_3d = await exchange.fetch_ohlcv(symbol, '1d', limit=30)
+                                ohlcv_1d_3d = ohlcv_1d
                                 composed_3d = compose_3d_bars(ohlcv_1d_3d)
                                 if composed_3d and len(composed_3d) >= 2:
                                     df_3d = pd.DataFrame(composed_3d, columns=['ts', 'open', 'high', 'low', 'close', 'vol', 'close_ts'])
