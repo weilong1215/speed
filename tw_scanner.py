@@ -207,14 +207,23 @@ async def scan_stock(session, stock_info, semaphore, current_idx, total):
             prev2_body_high = max(prev2['open'], prev2['close'])
             
             if state == 0:
-                # 台股特化版：無黑紅K限制、無間隔棒，只要收盤大於10MA且突破前兩天實體高點即觸發
-                is_breakout = bar['close'] > max(prev1_body_high, prev2_body_high) and bar['close'] > bar['sma_10']
+                # 台股特化版：無黑紅K限制、無破底限制、無間隔棒
+                # 但必須確保「今天、昨天、前天」這三天的收盤價都在 10MA 之上 (符合原先的回檔多頭趨勢)
+                # 且今天收盤價必須突破昨天與前天的實體高點
+                is_breakout = (
+                    bar['close'] > max(prev1_body_high, prev2_body_high) and 
+                    bar['close'] > bar['sma_10'] and
+                    prev1['close'] > prev1['sma_10'] and
+                    prev2['close'] > prev2['sma_10']
+                )
                 
                 if is_breakout:
                     state = 3
                     target_info_c2 = {
                         'dt_str': bar['dt'].isoformat(), 'ts': int(bar['ts']),
-                        'close': float(bar['close']), 'high': float(bar['high']), 'low': float(bar['low'])
+                        'close': float(bar['close']), 'high': float(bar['high']), 'low': float(bar['low']),
+                        'c1_dt_str': prev2['dt'].isoformat(),
+                        'gap_dt_str': prev1['dt'].isoformat()
                     }
                     c2_low = float(bar['low'])
                     dynamic_sl = c2_low
@@ -244,12 +253,19 @@ async def scan_stock(session, stock_info, semaphore, current_idx, total):
                     state = 0
                     dynamic_sl = 0.0
                     # 重新判斷是否立即觸發新的突破
-                    is_breakout = bar['close'] > max(prev1_body_high, prev2_body_high) and bar['close'] > bar['sma_10']
+                    is_breakout = (
+                        bar['close'] > max(prev1_body_high, prev2_body_high) and 
+                        bar['close'] > bar['sma_10'] and
+                        prev1['close'] > prev1['sma_10'] and
+                        prev2['close'] > prev2['sma_10']
+                    )
                     if is_breakout:
                         state = 3
                         target_info_c2 = {
                             'dt_str': bar['dt'].isoformat(), 'ts': int(bar['ts']),
-                            'close': float(bar['close']), 'high': float(bar['high']), 'low': float(bar['low'])
+                            'close': float(bar['close']), 'high': float(bar['high']), 'low': float(bar['low']),
+                            'c1_dt_str': prev2['dt'].isoformat(),
+                            'gap_dt_str': prev1['dt'].isoformat()
                         }
                         c2_low = float(bar['low'])
                         dynamic_sl = c2_low
@@ -264,8 +280,8 @@ async def scan_stock(session, stock_info, semaphore, current_idx, total):
             'is_trigger_met': True,
             'entry_price': float(target_info_c2['close']),
             'stop_loss': float(target_info_c2['low']),
-            'd1_date': "無",
-            'c1_date': "無",
+            'd1_date': pd.to_datetime(target_info_c2['gap_dt_str']).strftime('%Y-%m-%d'),
+            'c1_date': pd.to_datetime(target_info_c2['c1_dt_str']).strftime('%Y-%m-%d'),
             'c2_date': pd.to_datetime(target_info_c2['dt_str']).strftime('%Y-%m-%d')
         }
 
