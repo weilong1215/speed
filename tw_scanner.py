@@ -192,9 +192,7 @@ async def scan_stock(session, stock_info, semaphore, current_idx, total):
         
         df_1d['sma_10'] = df_1d['close'].rolling(window=10).mean()
         
-        target_info_c1 = None
         target_info_c2 = None
-        target_info_gap = None
         state = 0
         c2_low = 0.0
         dynamic_sl = 0.0
@@ -209,30 +207,8 @@ async def scan_stock(session, stock_info, semaphore, current_idx, total):
             prev2_body_high = max(prev2['open'], prev2['close'])
             
             if state == 0:
-                if bar['close'] < bar['open'] and prev1['close'] < prev1['open'] and bar['close'] < prev1_body_high and bar['close'] < prev2_body_high and bar['close'] > bar['sma_10'] and prev1['close'] > prev1['sma_10'] and prev2['close'] > prev2['sma_10']:
-                    state = 1
-                    target_info_c1 = {
-                        'dt_str': bar['dt'].isoformat(), 'ts': int(bar['ts']),
-                        'close': float(bar['close']), 'high': float(bar['high']), 'low': float(bar['low'])
-                    }
-            elif state == 1:
-                if bar['close'] <= bar['open'] or bar['close'] < bar['sma_10'] or bar['close'] > max(prev1_body_high, prev2_body_high) or bar['low'] < prev1['low']:
-                    state = 0
-                    if bar['close'] < bar['open'] and prev1['close'] < prev1['open'] and bar['close'] < prev1_body_high and bar['close'] < prev2_body_high and bar['close'] > bar['sma_10'] and prev1['close'] > prev1['sma_10'] and prev2['close'] > prev2['sma_10']:
-                        state = 1
-                        target_info_c1 = {
-                            'dt_str': bar['dt'].isoformat(), 'ts': int(bar['ts']),
-                            'close': float(bar['close']), 'high': float(bar['high']), 'low': float(bar['low'])
-                        }
-                else:
-                    state = 2
-                    target_info_gap = {
-                        'dt_str': bar['dt'].isoformat(), 'ts': int(bar['ts']),
-                        'close': float(bar['close']), 'high': float(bar['high']), 'low': float(bar['low'])
-                    }
-            elif state == 2:
-                # 拔除加密貨幣專用的 sl_distance <= 0.30 限制，適應台股漲跌幅特性
-                is_breakout = bar['close'] > max(prev1_body_high, prev2_body_high) and bar['close'] > bar['sma_10'] and bar['low'] >= prev1['low']
+                # 台股特化版：無黑紅K限制、無間隔棒，只要收盤大於10MA且突破前兩天實體高點即觸發
+                is_breakout = bar['close'] > max(prev1_body_high, prev2_body_high) and bar['close'] > bar['sma_10']
                 
                 if is_breakout:
                     state = 3
@@ -243,12 +219,6 @@ async def scan_stock(session, stock_info, semaphore, current_idx, total):
                     c2_low = float(bar['low'])
                     dynamic_sl = c2_low
                     entry_price_scan = float(bar['close'])
-                else:
-                    state = 0
-                    if bar['close'] < bar['open'] and prev1['close'] < prev1['open'] and bar['close'] < prev1_body_high and bar['close'] < prev2_body_high and bar['close'] > bar['sma_10'] and prev1['close'] > prev1['sma_10'] and prev2['close'] > prev2['sma_10']:
-                        state = 1
-                        target_info_c1 = {
-                            'dt_str': bar['dt'].isoformat(), 'ts': int(bar['ts']),
                             'close': float(bar['close']), 'high': float(bar['high']), 'low': float(bar['low'])
                         }
             elif state == 3:
@@ -275,41 +245,30 @@ async def scan_stock(session, stock_info, semaphore, current_idx, total):
                 if bar['low'] < dynamic_sl or bar['close'] < bar['sma_10']:
                     state = 0
                     dynamic_sl = 0.0
-                    if bar['close'] < bar['open'] and prev1['close'] < prev1['open'] and bar['close'] < prev1_body_high and bar['close'] < prev2_body_high and bar['close'] > bar['sma_10'] and prev1['close'] > prev1['sma_10'] and prev2['close'] > prev2['sma_10']:
-                        state = 1
-                        target_info_c1 = {
+                    # 重新判斷是否立即觸發新的突破
+                    is_breakout = bar['close'] > max(prev1_body_high, prev2_body_high) and bar['close'] > bar['sma_10']
+                    if is_breakout:
+                        state = 3
+                        target_info_c2 = {
                             'dt_str': bar['dt'].isoformat(), 'ts': int(bar['ts']),
                             'close': float(bar['close']), 'high': float(bar['high']), 'low': float(bar['low'])
                         }
+                        c2_low = float(bar['low'])
+                        dynamic_sl = c2_low
+                        entry_price_scan = float(bar['close'])
 
-        if state <= 1:
+        if state != 3:
             return None
-
-        action = 'update'
-        is_trigger_met = False
-        entry_price = 0.0
-        stop_loss = 0.0
-        
-        target_info = target_info_gap if state == 2 else target_info_c2
-
-        if state == 3:
-            is_trigger_met = True
-            entry_price = float(target_info_c2['close'])
-            stop_loss = float(target_info_c2['low'])
-
-        c1_date_str = pd.to_datetime(target_info_c1['dt_str']).strftime('%Y-%m-%d') if target_info_c1 else "未知"
-        c2_date_str = pd.to_datetime(target_info_c2['dt_str']).strftime('%Y-%m-%d') if target_info_c2 else "未知"
-        gap_date_str = pd.to_datetime(target_info_gap['dt_str']).strftime('%Y-%m-%d') if target_info_gap else "未知"
 
         return {
             'symbol': symbol,
             'name': name,
-            'is_trigger_met': is_trigger_met,
-            'entry_price': entry_price,
-            'stop_loss': stop_loss,
-            'd1_date': gap_date_str,
-            'c1_date': c1_date_str,
-            'c2_date': c2_date_str
+            'is_trigger_met': True,
+            'entry_price': float(target_info_c2['close']),
+            'stop_loss': float(target_info_c2['low']),
+            'd1_date': "無",
+            'c1_date': "無",
+            'c2_date': pd.to_datetime(target_info_c2['dt_str']).strftime('%Y-%m-%d')
         }
 
 async def main_loop():
