@@ -1055,10 +1055,10 @@ async def monitor_positions(exchange):
                                     if candle_ts > entry_ts:
                                         c_high = float(candle[2])
                                         c_low = float(candle[3])
-                                        if direction == 'LONG' and c_high >= entry_price + TP_STEP_R * risk:
+                                        if direction == 'LONG' and c_high >= entry_price + 1 * risk:
                                             is_runaway = True
                                             break
-                                        elif direction == 'SHORT' and c_low <= entry_price - TP_STEP_R * risk:
+                                        elif direction == 'SHORT' and c_low <= entry_price - 1 * risk:
                                             is_runaway = True
                                             break
 
