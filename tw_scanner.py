@@ -208,14 +208,26 @@ async def fetch_historical_candles(session, symbol):
     url = f"https://api.fugle.tw/marketdata/v1.0/stock/historical/candles/{symbol}?from={from_date_str}&to={today_str}&timeframe=D"
     headers = {"X-API-KEY": FUGLE_API_KEY}
     
-    try:
-        async with session.get(url, headers=headers, timeout=10) as response:
-            if response.status != 200:
-                return None
-            data = await response.json()
-            return data.get("data", [])
-    except Exception:
-        return None
+    for attempt in range(1, 4):
+        try:
+            async with session.get(url, headers=headers, timeout=10) as response:
+                if response.status == 200:
+                    data = await response.json()
+                    return data.get("data", [])
+                elif response.status == 429:
+                    sleep_time = attempt * 2
+                    logger.warning(f"⚠️ Fugle API 頻率限制 (429) {symbol}，等待 {sleep_time} 秒後進行第 {attempt} 次重試...")
+                    await asyncio.sleep(sleep_time)
+                elif response.status == 403:
+                    logger.error(f"❌ Fugle API 權限錯誤 (403)，請檢查 API Key 是否有效！")
+                    return None
+                else:
+                    logger.warning(f"⚠️ Fugle API 回應異常 (狀態碼: {response.status}) {symbol}，準備重試...")
+                    await asyncio.sleep(1)
+        except Exception as e:
+            logger.warning(f"⚠️ Fugle API 請求異常 {symbol} ({e})，進行第 {attempt} 次重試...")
+            await asyncio.sleep(1)
+    return None
 
 async def scan_stock(session, stock_info, semaphore, current_idx, total):
     async with semaphore:
