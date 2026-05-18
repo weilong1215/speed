@@ -1943,6 +1943,8 @@ async def scheduler():
     # 初始執行：台股 (無條件強制掃描)
     try:
         await tw_scanner.main_loop()
+        config = load_config()
+        send_system_settings_message(config)
     except Exception as e:
         logger.error(f"台股初始掃描異常: {e}")
 
@@ -1961,6 +1963,8 @@ async def scheduler():
             if now.hour == 6 and now.minute >= 30 and now.minute <= 40 and now.day != last_tw_day:
                 try:
                     await tw_scanner.main_loop()
+                    config = load_config()
+                    send_system_settings_message(config)
                 except Exception as e:
                     logger.error(f"台股定時掃描異常: {e}")
                 last_tw_day = now.day
