@@ -52,7 +52,7 @@ def send_grouped_message(item_list, title):
         return
     date_groups = {}
     for item in item_list:
-        d = item.get('d1_date', '未知日期')
+        d = item.get('c1_date', '未知日期')
         if d not in date_groups:
             date_groups[d] = []
         date_groups[d].append(item)
@@ -287,18 +287,20 @@ async def scan_stock(session, stock_info, semaphore, current_idx, total):
                             'close': float(bar['close']), 'high': float(bar['high']), 'low': float(bar['low'])
                         }
 
-        if state != 3:
+        if state not in [1, 3]:
             return None
+
+        is_trigger = (state == 3)
 
         return {
             'symbol': symbol,
             'name': name,
-            'is_trigger_met': True,
-            'entry_price': float(target_info_c2['close']),
-            'stop_loss': float(target_info_c2['low']),
+            'is_trigger_met': is_trigger,
+            'entry_price': float(target_info_c2['close']) if is_trigger else 0.0,
+            'stop_loss': float(target_info_c2['low']) if is_trigger else 0.0,
             'd1_date': "省略",
-            'c1_date': pd.to_datetime(target_info_c1['dt_str']).strftime('%Y-%m-%d'),
-            'c2_date': pd.to_datetime(target_info_c2['dt_str']).strftime('%Y-%m-%d')
+            'c1_date': pd.to_datetime(target_info_c1['dt_str']).strftime('%Y-%m-%d') if target_info_c1 else "未知",
+            'c2_date': pd.to_datetime(target_info_c2['dt_str']).strftime('%Y-%m-%d') if is_trigger else "未知"
         }
 
 async def main_loop():
