@@ -19,6 +19,7 @@ from datetime import datetime
 from dotenv import load_dotenv
 import sys
 import io
+import tw_scanner
 
 # ============================================================================
 # 系統初始化 (日誌與環境變數)
@@ -1896,21 +1897,38 @@ async def run_scan():
 
 async def scheduler():
     last_day = -1
+    last_tw_day = -1
+    
+    # 初始執行：加密貨幣
     try:
         await run_scan()
     except Exception as e:
         logger.error(f"初始掃描異常: {e}")
 
+    # 初始執行：台股 (無條件強制掃描)
+    try:
+        await tw_scanner.main_loop()
+    except Exception as e:
+        logger.error(f"台股初始掃描異常: {e}")
+
     while True:
         try:
             now = datetime.utcnow()
-            # 每日 UTC 00:00~00:10 觸發一次掃描
+            # 加密貨幣每日 UTC 00:00~00:10 觸發一次掃描
             if now.hour == 0 and now.minute <= 10 and now.day != last_day:
                 try:
                     await run_scan()
                 except Exception as e:
                     logger.error(f"定時掃描異常: {e}")
                 last_day = now.day
+
+            # 台股每日 UTC 06:30~06:40 (台灣時間 14:30) 觸發一次掃描
+            if now.hour == 6 and now.minute >= 30 and now.minute <= 40 and now.day != last_tw_day:
+                try:
+                    await tw_scanner.main_loop()
+                except Exception as e:
+                    logger.error(f"台股定時掃描異常: {e}")
+                last_tw_day = now.day
 
             # 倉位監控 (每個迴圈週期執行)
             if BITGET_API_KEY:
