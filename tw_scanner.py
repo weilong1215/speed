@@ -198,7 +198,6 @@ async def scan_stock(session, stock_info, semaphore, current_idx, total):
         c2_low = 0.0
         dynamic_sl = 0.0
         entry_price_scan = 0.0
-        breakout_threshold = 0.0
         
         for i in range(10, len(df_1d)):
             bar = df_1d.iloc[i]
@@ -218,7 +217,6 @@ async def scan_stock(session, stock_info, semaphore, current_idx, total):
                 
                 if c1_met:
                     state = 1
-                    breakout_threshold = max(prev1_body_high, prev2_body_high)
                     target_info_c1 = {
                         'dt_str': bar['dt'].isoformat(), 'ts': int(bar['ts']),
                         'close': float(bar['close']), 'high': float(bar['high']), 'low': float(bar['low'])
@@ -237,13 +235,12 @@ async def scan_stock(session, stock_info, semaphore, current_idx, total):
                     )
                     if c1_met:
                         state = 1
-                        breakout_threshold = max(prev1_body_high, prev2_body_high)
                         target_info_c1 = {
                             'dt_str': bar['dt'].isoformat(), 'ts': int(bar['ts']),
                             'close': float(bar['close']), 'high': float(bar['high']), 'low': float(bar['low'])
                         }
-                elif bar['close'] > breakout_threshold:
-                    # 條件二成立：突破條件一的實體高點，且前面已檢查未跌破 10MA
+                elif bar['close'] > max(prev1_body_high, prev2_body_high):
+                    # 條件二成立：收盤大於「前面兩根」的實體高點，且前面已檢查未跌破 10MA
                     state = 3
                     target_info_c2 = {
                         'dt_str': bar['dt'].isoformat(), 'ts': int(bar['ts']),
@@ -287,7 +284,6 @@ async def scan_stock(session, stock_info, semaphore, current_idx, total):
                     )
                     if c1_met:
                         state = 1
-                        breakout_threshold = max(prev1_body_high, prev2_body_high)
                         target_info_c1 = {
                             'dt_str': bar['dt'].isoformat(), 'ts': int(bar['ts']),
                             'close': float(bar['close']), 'high': float(bar['high']), 'low': float(bar['low'])
