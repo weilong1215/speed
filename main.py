@@ -1436,7 +1436,7 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
 
         c1_date_str = pd.to_datetime(target_info_c1['dt_str']).strftime('%Y-%m-%d') if target_info_c1 else "未知"
         c2_date_str = pd.to_datetime(target_info_c2['dt_str']).strftime('%Y-%m-%d') if target_info_c2 else "未知"
-        gap_date_str = pd.to_datetime(target_info_gap['dt_str']).strftime('%Y-%m-%d') if target_info_gap else "未知"
+        gap_date_str = "省略"
 
         return {
             'symbol': symbol,
@@ -1466,10 +1466,10 @@ def send_grouped_message(item_list, title):
     if not item_list:
         return
 
-    # 按 d1_date 分組
+    # 按 c1_date 分組
     date_groups = {}
     for item in item_list:
-        d = item.get('d1_date', '未知日期')
+        d = item.get('c1_date', '未知日期')
         if d not in date_groups:
             date_groups[d] = []
         date_groups[d].append(item)
