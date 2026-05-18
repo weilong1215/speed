@@ -1301,8 +1301,7 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
         
         # 1. 由舊到新執行狀態機掃描
         # State 0: 尋找條件一
-        # State 1: 條件一成立，當前為間隔 K 棒
-        # State 2: 間隔棒已過，下一根必須滿足條件二否則淘汰
+        # State 1: 條件一成立，彈性等待條件二 (只要守穩 10MA 即可)
         # State 3: 條件二成立，監控淘汰條件
         for i in range(10, len(df_1d)):
             bar = df_1d.iloc[i]
@@ -1313,8 +1312,13 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
             prev2_body_high = max(prev2['open'], prev2['close'])
             
             if state == 0:
-                # 尋找條件一：陰棒且收盤低於前兩根實體高點，三根皆在 10MA 之上，且前一根必須是陰棒
-                if bar['close'] < bar['open'] and prev1['close'] < prev1['open'] and bar['close'] < prev1_body_high and bar['close'] < prev2_body_high and bar['close'] > bar['sma_10'] and prev1['close'] > prev1['sma_10'] and prev2['close'] > prev2['sma_10']:
+                # 條件一：收盤價小於前兩根實體高點 (回檔)，且這三天收盤價均大於 10MA
+                c1_met = (
+                    bar['close'] < prev1_body_high and bar['close'] < prev2_body_high and 
+                    bar['close'] > bar['sma_10'] and prev1['close'] > prev1['sma_10'] and prev2['close'] > prev2['sma_10']
+                )
+                
+                if c1_met:
                     state = 1
                     target_info_c1 = {
                         'dt_str': bar['dt'].isoformat(),
@@ -1325,13 +1329,19 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
                     }
                     target_info_c2 = None
             elif state == 1:
-                # 間隔 K 棒：必須為陽棒，且不跌破 10MA，且不提前突破前兩根實體高點，且低點不破前一根低點
-                if bar['close'] <= bar['open'] or bar['close'] < bar['sma_10'] or bar['close'] > max(prev1_body_high, prev2_body_high) or bar['low'] < prev1['low']:
+                # 彈性等待期：條件一成立後，尋找條件二 (可不連續日期)
+                if bar['close'] < bar['sma_10']:
+                    # 跌破 10MA，條件失效，重新尋找條件一
                     state = 0
                     target_info_c1 = None
                     target_info_gap = None
-                    # 淘汰後檢查當前棒是否為新的條件一
-                    if bar['close'] < bar['open'] and prev1['close'] < prev1['open'] and bar['close'] < prev1_body_high and bar['close'] < prev2_body_high and bar['close'] > bar['sma_10'] and prev1['close'] > prev1['sma_10'] and prev2['close'] > prev2['sma_10']:
+                    
+                    # 順便檢查今天是否剛好符合新的條件一
+                    c1_met = (
+                        bar['close'] < prev1_body_high and bar['close'] < prev2_body_high and 
+                        bar['close'] > bar['sma_10'] and prev1['close'] > prev1['sma_10'] and prev2['close'] > prev2['sma_10']
+                    )
+                    if c1_met:
                         state = 1
                         target_info_c1 = {
                             'dt_str': bar['dt'].isoformat(),
@@ -1340,21 +1350,8 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
                             'high': float(bar['high']),
                             'low': float(bar['low'])
                         }
-                else:
-                    state = 2
-                    target_info_gap = {
-                        'dt_str': bar['dt'].isoformat(),
-                        'ts': int(bar['ts']),
-                        'close': float(bar['close']),
-                        'high': float(bar['high']),
-                        'low': float(bar['low'])
-                    }
-            elif state == 2:
-                # 必須滿足條件二 (突破+站上10MA+低點不破前根+止損距離<=30%)，否則淘汰重找條件一
-                is_breakout = bar['close'] > max(prev1_body_high, prev2_body_high) and bar['close'] > bar['sma_10'] and bar['low'] >= prev1['low']
-                sl_distance = (bar['close'] - bar['low']) / bar['close'] if bar['close'] > 0 else 1.0
-                
-                if is_breakout and sl_distance <= 0.30:
+                elif bar['close'] > max(prev1_body_high, prev2_body_high):
+                    # 條件二成立：收盤大於「前面兩根」的實體高點，且前面已確認未跌破 10MA
                     state = 3
                     target_info_c2 = {
                         'dt_str': bar['dt'].isoformat(),
@@ -1366,21 +1363,6 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
                     c2_low = float(bar['low'])
                     dynamic_sl = c2_low
                     entry_price_scan = float(bar['close'])
-                else:
-                    # 條件二不成立，淘汰並檢查當前棒是否為新的條件一
-                    state = 0
-                    target_info_c1 = None
-                    target_info_c2 = None
-                    target_info_gap = None
-                    if bar['close'] < bar['open'] and prev1['close'] < prev1['open'] and bar['close'] < prev1_body_high and bar['close'] < prev2_body_high and bar['close'] > bar['sma_10'] and prev1['close'] > prev1['sma_10'] and prev2['close'] > prev2['sma_10']:
-                        state = 1
-                        target_info_c1 = {
-                            'dt_str': bar['dt'].isoformat(),
-                            'ts': int(bar['ts']),
-                            'close': float(bar['close']),
-                            'high': float(bar['high']),
-                            'low': float(bar['low'])
-                        }
             elif state == 3:
                 # 1. 計算目前的 3D K 棒 (使用全部歷史資料到今天為止，確保與實盤 100% 同步)
                 historical_1d = df_1d.iloc[:i+1]
@@ -1412,7 +1394,13 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
                     target_info_c2 = None
                     target_info_gap = None
                     dynamic_sl = 0.0
-                    if bar['close'] < bar['open'] and prev1['close'] < prev1['open'] and bar['close'] < prev1_body_high and bar['close'] < prev2_body_high and bar['close'] > bar['sma_10'] and prev1['close'] > prev1['sma_10'] and prev2['close'] > prev2['sma_10']:
+                    
+                    # 重新判斷是否立即觸發新的條件一
+                    c1_met = (
+                        bar['close'] < prev1_body_high and bar['close'] < prev2_body_high and 
+                        bar['close'] > bar['sma_10'] and prev1['close'] > prev1['sma_10'] and prev2['close'] > prev2['sma_10']
+                    )
+                    if c1_met:
                         state = 1
                         target_info_c1 = {
                             'dt_str': bar['dt'].isoformat(),
@@ -1422,14 +1410,14 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
                             'low': float(bar['low'])
                         }
 
-        # State 0/1: 無有效訊號或條件一剛成立但間隔棒未完成
-        if state <= 1:
+        # State 0: 無有效訊號
+        if state == 0:
             return {'symbol': symbol, 'action': 'remove'}
 
-        # State 2: 間隔棒已過，等待條件二 (關注中)
+        # State 1: 條件一成立，等待條件二 (關注中)
         # State 3: 條件二已成立 (觸發進場)
         is_watchlist_eligible = True
-        target_info = target_info_gap if state == 2 else target_info_c2
+        target_info = target_info_c1 if state == 1 else target_info_c2
         
         action = 'update'
         if cached_info and target_info['ts'] == cached_info.get('ts', 0):
