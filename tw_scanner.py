@@ -26,6 +26,7 @@ load_dotenv()
 TG_BOT_TOKEN = os.getenv("TG_BOT_TOKEN", "")
 TG_CHAT_ID = os.getenv("TG_CHAT_ID", "")
 FUGLE_API_KEY = os.getenv("FUGLE_API_KEY", "")
+DEFAULT_LOSS_TWD = float(os.getenv("DEFAULT_LOSS_TWD", "10000"))
 
 if not FUGLE_API_KEY:
     logger.error("❌ 缺少 FUGLE_API_KEY，請在 .env 中設定。")
@@ -68,14 +69,31 @@ def send_grouped_message(item_list, title):
     send_telegram_message("\n".join(lines))
 
 def send_triggered_message(item):
+    entry_price = item['entry_price']
+    stop_loss = item['stop_loss']
+    protect_sl = item.get('protect_sl', 0.0)
+    
+    risk_per_share = entry_price - stop_loss
+    shares = int(DEFAULT_LOSS_TWD / risk_per_share) if risk_per_share > 0 else 0
+    
+    shares_str = f"{shares:,} 股"
+    if shares >= 1000:
+        sheets = shares / 1000.0
+        shares_str += f" (約 {sheets:.2f} 張)"
+        
     msg = (
         f"<b>🚀 台股(持倉中)</b>\n\n"
         f"💎 <b>標的:</b> {item['symbol']} {item['name']}\n"
         f"📅 <b>條件一日期:</b> <code>{item.get('c1_date', '未知')}</code>\n"
         f"📅 <b>條件二日期:</b> <code>{item.get('c2_date', '未知')}</code>\n"
-        f"📍 <b>收盤價格:</b> <code>{item['entry_price']:.2f}</code>\n"
-        f"🛡️ <b>保護止損:</b> <code>{item['stop_loss']:.2f}</code>"
+        f"📍 <b>進場價格:</b> <code>{entry_price:.2f}</code>\n"
+        f"🛡️ <b>止損價格:</b> <code>{stop_loss:.2f}</code>\n"
     )
+    
+    if protect_sl > stop_loss:
+        msg += f"🛡️ <b>保護止損價格:</b> <code>{protect_sl:.2f}</code>\n"
+        
+    msg += f"📊 <b>預估股數:</b> <code>{shares_str}</code> (單筆預設虧損 {int(DEFAULT_LOSS_TWD):,} TWD)"
     send_telegram_message(msg)
 
 # ============================================================================
@@ -304,6 +322,7 @@ async def scan_stock(session, stock_info, semaphore, current_idx, total):
             'is_trigger_met': is_trigger,
             'entry_price': float(target_info_c2['close']) if is_trigger else 0.0,
             'stop_loss': float(target_info_c2['low']) if is_trigger else 0.0,
+            'protect_sl': float(dynamic_sl) if is_trigger else 0.0,
             'd1_date': "省略",
             'c1_date': pd.to_datetime(target_info_c1['dt_str']).strftime('%Y-%m-%d') if target_info_c1 else "未知",
             'c2_date': pd.to_datetime(target_info_c2['dt_str']).strftime('%Y-%m-%d') if is_trigger else "未知"
