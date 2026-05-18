@@ -231,8 +231,8 @@ async def fetch_historical_candles(session, symbol):
 
 async def scan_stock(session, stock_info, semaphore, current_idx, total):
     async with semaphore:
-        # 防範 Fugle API Rate Limit (假設 60/min 則需較長睡眠，此處暫定 0.1s 平滑請求)
-        await asyncio.sleep(0.1)
+        # 防範 Fugle API Rate Limit (歷史行情上限 60/min，設定 1.05s 進行流量整形)
+        await asyncio.sleep(1.05)
         
         symbol = stock_info["symbol"]
         name = stock_info["name"]
@@ -387,8 +387,8 @@ async def main_loop():
 
     logger.info(f"🚀 開始全市場掃描，共 {len(stocks)} 檔標的...")
     
-    # Fugle API 平滑並發
-    semaphore = asyncio.Semaphore(10)
+    # 富果歷史行情 API 限制為 60/min，在此設定為單併發以確保 Traffic Shaping 完全生效
+    semaphore = asyncio.Semaphore(1)
     results = []
     
     async with aiohttp.ClientSession() as session:

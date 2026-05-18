@@ -1935,6 +1935,16 @@ async def run_scan():
     finally:
         await ex.close()
 
+async def run_tw_scanner_background():
+    try:
+        logger.info("🚀 啟動背景台股掃描任務...")
+        await tw_scanner.main_loop()
+        config = load_config()
+        send_system_settings_message(config)
+        logger.info("✅ 背景台股掃描任務與設定發送完成。")
+    except Exception as e:
+        logger.error(f"💥 背景台股掃描任務異常: {e}")
+
 async def scheduler():
     last_day = -1
     last_tw_day = -1
@@ -1945,13 +1955,8 @@ async def scheduler():
     except Exception as e:
         logger.error(f"初始掃描異常: {e}")
 
-    # 初始執行：台股 (無條件強制掃描)
-    try:
-        await tw_scanner.main_loop()
-        config = load_config()
-        send_system_settings_message(config)
-    except Exception as e:
-        logger.error(f"台股初始掃描異常: {e}")
+    # 初始執行：台股 (無條件強制掃描) - 改為背景任務非阻塞
+    asyncio.create_task(run_tw_scanner_background())
 
     while True:
         try:
@@ -1964,14 +1969,9 @@ async def scheduler():
                     logger.error(f"定時掃描異常: {e}")
                 last_day = now.day
 
-            # 台股每日 UTC 06:30~06:40 (台灣時間 14:30) 觸發一次掃描
+            # 台股每日 UTC 06:30~06:40 (台灣時間 14:30) 觸發一次掃描 - 改為背景任務非阻塞
             if now.hour == 6 and now.minute >= 30 and now.minute <= 40 and now.day != last_tw_day:
-                try:
-                    await tw_scanner.main_loop()
-                    config = load_config()
-                    send_system_settings_message(config)
-                except Exception as e:
-                    logger.error(f"台股定時掃描異常: {e}")
+                asyncio.create_task(run_tw_scanner_background())
                 last_tw_day = now.day
 
             # 倉位監控 (每個迴圈週期執行)
