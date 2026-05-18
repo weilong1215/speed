@@ -194,11 +194,9 @@ async def scan_stock(session, stock_info, semaphore, current_idx, total):
             
         candles = await fetch_historical_candles(session, symbol)
         
-        if current_idx == 1:
-            logger.info(f"🔍 API 測試回應 ({symbol}): {candles[:2] if candles else '無資料或連線失敗'}")
-            
         if not candles or len(candles) < 15:
             return None
+            
             
         ohlcv_1d = []
         for row in reversed(candles):
@@ -207,8 +205,6 @@ async def scan_stock(session, stock_info, semaphore, current_idx, total):
                 ts = int(dt.timestamp() * 1000)
                 ohlcv_1d.append([ts, float(row["open"]), float(row["high"]), float(row["low"]), float(row["close"]), float(row.get("volume", 0))])
             except Exception as e:
-                if current_idx == 1:
-                    logger.warning(f"日期解析失敗: {row.get('date')} -> {e}")
                 continue
                 
         df_1d = pd.DataFrame(ohlcv_1d, columns=['ts', 'open', 'high', 'low', 'close', 'vol'])
@@ -377,13 +373,4 @@ async def main_loop():
         send_telegram_message("🔍 今日台股掃描完成：無符合條件之標的。")
 
 if __name__ == "__main__":
-    import sys
-    # 提供手動測試模式，僅掃描前 20 檔股票驗證連線
-    if len(sys.argv) > 1 and sys.argv[1] == "--test-mode":
-        logger.info("🔧 進入測試模式，僅抓取部分標的")
-        old_get = get_tw_stock_list
-        def test_get():
-            return old_get()[:20]
-        get_tw_stock_list = test_get
-        
     asyncio.run(main_loop())
