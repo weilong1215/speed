@@ -1351,18 +1351,25 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
                             'low': float(bar['low'])
                         }
                 elif bar['close'] > max(prev1_body_high, prev2_body_high):
-                    # 條件二成立：收盤大於「前面兩根」的實體高點，且前面已確認未跌破 10MA
-                    state = 3
-                    target_info_c2 = {
-                        'dt_str': bar['dt'].isoformat(),
-                        'ts': int(bar['ts']),
-                        'close': float(bar['close']),
-                        'high': float(bar['high']),
-                        'low': float(bar['low'])
-                    }
-                    c2_low = float(bar['low'])
-                    dynamic_sl = c2_low
-                    entry_price_scan = float(bar['close'])
+                    # 條件二成立：收盤大於「前面兩根」的實體高點，且止損距離 <= 10%
+                    sl_distance = (bar['close'] - bar['low']) / bar['close'] if bar['close'] > 0 else 1.0
+                    if sl_distance <= 0.10:
+                        state = 3
+                        target_info_c2 = {
+                            'dt_str': bar['dt'].isoformat(),
+                            'ts': int(bar['ts']),
+                            'close': float(bar['close']),
+                            'high': float(bar['high']),
+                            'low': float(bar['low'])
+                        }
+                        c2_low = float(bar['low'])
+                        dynamic_sl = c2_low
+                        entry_price_scan = float(bar['close'])
+                    else:
+                        # 止損距離過大，訊號直接失效，重新尋找條件一
+                        state = 0
+                        target_info_c1 = None
+                        target_info_gap = None
             elif state == 3:
                 # 1. 計算目前的 3D K 棒 (使用全部歷史資料到今天為止，確保與實盤 100% 同步)
                 historical_1d = df_1d.iloc[:i+1]
