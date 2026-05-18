@@ -366,12 +366,12 @@ async def main_loop():
         else:
             watchlist_items.append(r)
 
-    if watchlist_items:
-        send_grouped_message(watchlist_items, "🔍 台股(關注中)")
-        
     if triggered_items:
         for item in triggered_items:
             send_triggered_message(item)
+
+    if watchlist_items:
+        send_grouped_message(watchlist_items, "🔍 台股(關注中)")
 
     if not watchlist_items and not triggered_items:
         send_telegram_message("🔍 今日台股掃描完成：無符合條件之標的。")
