@@ -177,16 +177,22 @@ async def scan_stock(session, stock_info, semaphore, current_idx, total):
             logger.info(f"📊 掃描進度: {current_idx}/{total}...")
             
         candles = await fetch_historical_candles(session, symbol)
+        
+        if current_idx == 1:
+            logger.info(f"🔍 API 測試回應 ({symbol}): {candles[:2] if candles else '無資料或連線失敗'}")
+            
         if not candles or len(candles) < 15:
             return None
             
         ohlcv_1d = []
         for row in reversed(candles):
             try:
-                dt = datetime.strptime(row["date"], "%Y-%m-%d").replace(tzinfo=timezone.utc)
+                dt = pd.to_datetime(row["date"]).tz_localize(None).replace(tzinfo=timezone.utc)
                 ts = int(dt.timestamp() * 1000)
                 ohlcv_1d.append([ts, float(row["open"]), float(row["high"]), float(row["low"]), float(row["close"]), float(row.get("volume", 0))])
-            except:
+            except Exception as e:
+                if current_idx == 1:
+                    logger.warning(f"日期解析失敗: {row.get('date')} -> {e}")
                 continue
                 
         df_1d = pd.DataFrame(ohlcv_1d, columns=['ts', 'open', 'high', 'low', 'close', 'vol'])
@@ -303,12 +309,6 @@ async def scan_stock(session, stock_info, semaphore, current_idx, total):
         c1_date_str = pd.to_datetime(target_info_c1['dt_str']).strftime('%Y-%m-%d') if target_info_c1 else "未知"
         c2_date_str = pd.to_datetime(target_info_c2['dt_str']).strftime('%Y-%m-%d') if target_info_c2 else "未知"
         gap_date_str = pd.to_datetime(target_info_gap['dt_str']).strftime('%Y-%m-%d') if target_info_gap else "未知"
-
-        # 台股日線延遲播報防護：僅推送近 3 天發生的訊號
-        today_ts = int(pd.Timestamp.now(tz='UTC').floor('1d').timestamp() * 1000)
-        signal_ts = target_info['ts']
-        if (today_ts - signal_ts) > 3 * 24 * 3600 * 1000:
-            return None
 
         return {
             'symbol': symbol,
