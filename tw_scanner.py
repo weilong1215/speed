@@ -210,31 +210,49 @@ def get_tw_stock_list():
     return stocks
 
 async def fetch_historical_candles(session, symbol):
-    today_str = datetime.now().strftime("%Y-%m-%d")
-    from_date_str = f"{datetime.now().year - 1}-01-01"
-    url = f"https://api.fugle.tw/marketdata/v1.0/stock/historical/candles/{symbol}?from={from_date_str}&to={today_str}&timeframe=D"
+    now = datetime.now()
+    year = now.year
+    
+    # Fugle API 有單次請求的時間跨度限制，因此分兩段請求：去年整年 + 今年至今
+    ranges = [
+        (f"{year - 1}-01-01", f"{year - 1}-12-31"),
+        (f"{year}-01-01", now.strftime("%Y-%m-%d"))
+    ]
+    
+    all_klines = []
     headers = {"X-API-KEY": FUGLE_API_KEY}
     
-    for attempt in range(1, 4):
-        try:
-            async with session.get(url, headers=headers, timeout=10) as response:
-                if response.status == 200:
-                    data = await response.json()
-                    return data.get("data", [])
-                elif response.status == 429:
-                    sleep_time = attempt * 2
-                    logger.warning(f"⚠️ Fugle API 頻率限制 (429) {symbol}，等待 {sleep_time} 秒後進行第 {attempt} 次重試...")
-                    await asyncio.sleep(sleep_time)
-                elif response.status == 403:
-                    logger.error(f"❌ Fugle API 權限錯誤 (403)，請檢查 API Key 是否有效！")
-                    return None
-                else:
-                    logger.warning(f"⚠️ Fugle API 回應異常 (狀態碼: {response.status}) {symbol}，準備重試...")
-                    await asyncio.sleep(1)
-        except Exception as e:
-            logger.warning(f"⚠️ Fugle API 請求異常 {symbol} ({e})，進行第 {attempt} 次重試...")
-            await asyncio.sleep(1)
-    return None
+    for from_date_str, to_date_str in ranges:
+        url = f"https://api.fugle.tw/marketdata/v1.0/stock/historical/candles/{symbol}?from={from_date_str}&to={to_date_str}&timeframe=D"
+        for attempt in range(1, 4):
+            try:
+                async with session.get(url, headers=headers, timeout=10) as response:
+                    if response.status == 200:
+                        data = await response.json()
+                        candles = data.get("data", [])
+                        if candles:
+                            all_klines.extend(candles)
+                        break
+                    elif response.status == 429:
+                        sleep_time = attempt * 2
+                        logger.warning(f"⚠️ Fugle API 頻率限制 (429) {symbol}，等待 {sleep_time} 秒後進行第 {attempt} 次重試...")
+                        await asyncio.sleep(sleep_time)
+                    elif response.status == 403:
+                        logger.error(f"❌ Fugle API 權限錯誤 (403)，請檢查 API Key 是否有效！")
+                        return None
+                    else:
+                        logger.warning(f"⚠️ Fugle API 回應異常 (狀態碼: {response.status}) {symbol} [{from_date_str}]，準備重試...")
+                        await asyncio.sleep(1)
+            except Exception as e:
+                logger.warning(f"⚠️ Fugle API 請求異常 {symbol} ({e})，進行第 {attempt} 次重試...")
+                await asyncio.sleep(1)
+                
+    if not all_klines:
+        return None
+        
+    # 確保回傳資料統一為「由新到舊」(Descending)，配合後續 scan_stock 裡的 reversed 邏輯
+    all_klines.sort(key=lambda x: x["date"], reverse=True)
+    return all_klines
 
 async def scan_stock(session, stock_info, semaphore, current_idx, total):
     async with semaphore:
