@@ -346,7 +346,29 @@ async def place_order(exchange, symbol, direction, entry, sl, precision, fixed_l
                     'clientOid': signal_id, 'stopLoss': {'triggerPrice': sl, 'type': 'market'}
                 }
 
-                order = await exchange.create_order(symbol, 'limit', side, qty, entry, params=params)
+                try:
+                    order = await exchange.create_order(symbol, 'limit', side, qty, entry, params=params)
+                except Exception as e:
+                    # 如果限價單失敗，檢查是否在「開倉價格與止損價格」之間，若是則改用市價單
+                    try:
+                        ticker = await exchange.fetch_ticker(symbol)
+                        current_p = float(ticker['last'])
+                        is_within_range = False
+                        if side == 'buy' and sl < current_p < entry:
+                            is_within_range = True
+                        elif side == 'sell' and sl > current_p > entry:
+                            is_within_range = True
+                            
+                        if is_within_range:
+                            logger.warning(f"  限價單 {entry} 遭拒絕 ({e})，但市價 {current_p} 在進場與止損區間內，改以市價單進場！")
+                            # 改以市價單下單，數量不變，風險只會變小
+                            order = await exchange.create_order(symbol, 'market', side, qty, None, params=params)
+                            entry = current_p  # 更新 entry 為當前市價，確保後續紀錄與停利計算正確
+                        else:
+                            raise e # 若不在區間內，拋出給外層的策略降級機制
+                    except Exception as inner_e:
+                        raise inner_e # 將錯誤拋出給外層
+
                 logger.info(f"✅ 下單成功: {symbol} @ {entry} (ID: {signal_id}, Strat: {strategy_name}, Lev: {leverage}x)")
 
                 signals = load_active_signals()
