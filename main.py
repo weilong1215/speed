@@ -906,44 +906,7 @@ async def monitor_positions(exchange):
                             except Exception as e:
                                 logger.warning(f"檢查訊號淘汰撤單異常 ({symbol}): {e}")
 
-                        # 保護止損產生檢查：若尚未進場但 3D K 棒已滿足保護止損上移條件，撤銷掛單
-                        if not is_runaway and sig.get('status') == 'active':
-                            try:
-                                ohlcv_1d_3d = ohlcv_1d
-                                composed_3d = compose_3d_bars(ohlcv_1d_3d)
-                                if composed_3d and len(composed_3d) >= 2:
-                                    df_3d = pd.DataFrame(composed_3d, columns=['ts', 'open', 'high', 'low', 'close', 'vol', 'close_ts'])
-                                    now_utc_3d = int(time.time() * 1000)
-                                    closed_3d = df_3d[df_3d['close_ts'] <= now_utc_3d]
 
-                                    has_generated_sl = False
-                                    for idx in range(1, len(closed_3d)):
-                                        curr_b = closed_3d.iloc[idx]
-                                        prev_b = closed_3d.iloc[idx-1]
-                                        if curr_b['close_ts'] > entry_ts:
-                                            prev_body_high = max(prev_b['open'], prev_b['close'])
-                                            if curr_b['close'] > prev_body_high and curr_b['low'] > entry_price:
-                                                has_generated_sl = True
-                                                break
-
-                                    if has_generated_sl:
-                                                logger.info(f"🛡️ 保護止損已產生 ({symbol})，撤銷未成交單 {signal_id}")
-                                                entry_orders = [o for o in open_orders if str(o.get('clientOrderId') or o.get('info', {}).get('clientOid') or "") == str(signal_id)]
-                                                for eo in entry_orders:
-                                                    try:
-                                                        await exchange.cancel_order(eo['id'], symbol)
-                                                        open_orders = [o for o in open_orders if o['id'] != eo['id']]
-                                                    except Exception as e:
-                                                        logger.warning(f"撤銷未成交單失敗 {eo['id']}: {e}")
-                                                send_telegram_message(
-                                                    f"<b>🛡️ 保護止損已產生 (撤銷進場)</b>\n\n"
-                                                    f"💎 <b>交易對:</b> {get_base_coin(symbol)} [{direction}]\n"
-                                                    f"📉 <b>狀態: 掛單未成交前已產生保護止損，已自動撤銷進場單</b>"
-                                                )
-                                                sig['status'] = 'closed'
-                                                continue
-                            except Exception as e:
-                                logger.warning(f"檢查保護止損產生撤單異常 ({symbol}): {e}")
 
                     except Exception as e:
                         logger.warning(f"檢查未成交單價格異常 ({symbol}): {e}")
@@ -1017,46 +980,7 @@ async def monitor_positions(exchange):
                             if "43001" not in str(e) and "does not exist" not in str(e).lower():
                                 logger.error(f"盲目清理失敗 {co_id}: {e}")
 
-        # 4. 未成交加倉單監測 (日K跌破 10MA → 撤銷)
-        add_orders_by_symbol = {}
-        for oo in open_orders:
-            co_id = str(oo.get('clientOrderId') or oo.get('info', {}).get('clientOid') or "")
-            if co_id.startswith("add_"):
-                sym = oo['symbol']
-                if sym not in add_orders_by_symbol:
-                    add_orders_by_symbol[sym] = []
-                add_orders_by_symbol[sym].append(oo)
 
-        for sym, add_orders in add_orders_by_symbol.items():
-            try:
-                ohlcv_1d_add = await exchange.fetch_ohlcv(sym, '1d', limit=200)
-                ohlcv_3d_add = compose_3d_bars(ohlcv_1d_add)
-                if not ohlcv_3d_add or len(ohlcv_3d_add) < 15:
-                    continue
-                df_3d_add = pd.DataFrame(ohlcv_3d_add, columns=['ts', 'open', 'high', 'low', 'close', 'vol', 'close_ts'])
-                df_3d_add['sma_10'] = df_3d_add['close'].rolling(window=10).mean()
-                now_utc_3d_add = int(time.time() * 1000)
-                closed_3d_add = df_3d_add[df_3d_add['close_ts'] <= now_utc_3d_add]
-
-                if len(closed_3d_add) > 0:
-                    last_bar_add = closed_3d_add.iloc[-1]
-                    if pd.notna(last_bar_add['sma_10']) and last_bar_add['close'] < last_bar_add['sma_10']:
-                        for ao in add_orders:
-                            ao_coid = str(ao.get('clientOrderId') or ao.get('info', {}).get('clientOid') or "")
-                            try:
-                                await exchange.cancel_order(ao['id'], sym)
-                                open_orders = [o for o in open_orders if o['id'] != ao['id']]
-                                logger.info(f"🚫 加倉單已作廢 (跌破10MA): {ao_coid} ({sym})")
-                            except Exception as e:
-                                if "43001" not in str(e) and "does not exist" not in str(e).lower():
-                                    logger.warning(f"撤銷加倉單失敗 {ao_coid}: {e}")
-                        send_telegram_message(
-                            f"<b>🚫 加倉單已作廢 (跌破10MA)</b>\n\n"
-                            f"💎 <b>交易對:</b> {get_base_coin(sym)}\n"
-                            f"📉 <b>狀態:</b> 3D線收盤跌破 10MA，已自動撤銷未成交加倉單"
-                        )
-            except Exception as e:
-                logger.warning(f"監測加倉單異常 ({sym}): {e}")
 
         save_active_signals(saved_signals)
     except Exception as e:
@@ -1276,10 +1200,7 @@ def send_grouped_message(item_list, title):
             base = get_base_coin(item['symbol'])
             if item.get('missed'):
                 coin_strs.append(f"{base} (未上車)")
-            elif 'protect_sl' in item:
-                psl = item['protect_sl']
-                psl_str = f"{int(psl)}" if isinstance(psl, float) and psl.is_integer() else f"{psl}"
-                coin_strs.append(f"{base} (保護止損：{psl_str})")
+
             else:
                 coin_strs.append(base)
         coins = " · ".join(coin_strs)
