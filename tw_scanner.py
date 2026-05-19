@@ -111,29 +111,36 @@ def compose_3d_bars(ohlcv_1d):
     if not ohlcv_1d or len(ohlcv_1d) < 3:
         return []
     
-    # 改為與 TradingView 完全一致的 Unix Epoch (1970-01-01) 固定日曆對齊
-    # 這樣無論拉多少天的歷史，3D 棒的切割邊界永遠固定不變
-    PERIOD_MS = 3 * 24 * 3600 * 1000
-    groups = {}
+    from datetime import datetime, timezone
+    
+    # 按照年份分組
+    years_data = {}
     for bar in ohlcv_1d:
         ts = bar[0]
-        group_key = (ts // PERIOD_MS) * PERIOD_MS
-        if group_key not in groups:
-            groups[group_key] = []
-        groups[group_key].append(bar)
+        dt = datetime.fromtimestamp(ts / 1000, tz=timezone.utc)
+        y = dt.year
+        if y not in years_data:
+            years_data[y] = []
+        years_data[y].append(bar)
         
     result = []
-    for gts in sorted(groups.keys()):
-        bars = groups[gts]
-        result.append([
-            gts,                         # 用固定的 Epoch 週期起點作為 3D K棒日期 (與 TV 對齊)
-            bars[0][1],                  # open
-            max(b[2] for b in bars),     # high
-            min(b[3] for b in bars),     # low
-            bars[-1][4],                 # close
-            sum(b[5] for b in bars),     # vol
-            gts + PERIOD_MS              # close_ts (固定為週期結束時間)
-        ])
+    # 每個年份獨立切分，每 3 個營業日合成一根 3D K 棒
+    for y in sorted(years_data.keys()):
+        bars_of_year = sorted(years_data[y], key=lambda x: x[0])
+        for i in range(0, len(bars_of_year), 3):
+            bars = bars_of_year[i:i+3]
+            
+            gts = bars[0][0]
+            result.append([
+                gts,                         # 以該 3D 棒的第一個營業日作為 K 棒時間
+                bars[0][1],                  # open
+                max(b[2] for b in bars),     # high
+                min(b[3] for b in bars),     # low
+                bars[-1][4],                 # close
+                sum(b[5] for b in bars),     # vol
+                bars[-1][0] + 24 * 3600 * 1000 # close_ts (最後一根營業日的結束時間)
+            ])
+            
     return result
 
 # ============================================================================
@@ -204,7 +211,7 @@ def get_tw_stock_list():
 
 async def fetch_historical_candles(session, symbol):
     today_str = datetime.now().strftime("%Y-%m-%d")
-    from_date_str = (datetime.now() - pd.Timedelta(days=200)).strftime("%Y-%m-%d")
+    from_date_str = f"{datetime.now().year - 1}-01-01"
     url = f"https://api.fugle.tw/marketdata/v1.0/stock/historical/candles/{symbol}?from={from_date_str}&to={today_str}&timeframe=D"
     headers = {"X-API-KEY": FUGLE_API_KEY}
     
