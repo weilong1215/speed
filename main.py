@@ -180,19 +180,24 @@ def get_exchange():
 # ============================================================================
 
 def compose_3d_bars(ohlcv_1d):
-    """將 1D OHLCV 合成 3D K 棒 (按固定週期對齊)
+    """將 1D OHLCV 合成 3D K 棒 (按每年 1/1 起算，保持加密貨幣原有正常邏輯)
     輸入: [[ts, open, high, low, close, vol], ...]
     輸出: 同格式的 3D K 棒列表
     """
     if not ohlcv_1d or len(ohlcv_1d) < 3:
         return []
 
-    # 改為與 TradingView 完全一致的 Unix Epoch (1970-01-01) 固定日曆對齊
+    from datetime import datetime, timezone
     PERIOD_MS = 3 * 24 * 3600 * 1000
     groups = {}
     for bar in ohlcv_1d:
         ts = bar[0]
-        group_key = (ts // PERIOD_MS) * PERIOD_MS
+        dt = datetime.fromtimestamp(ts / 1000, tz=timezone.utc)
+        year_start_dt = datetime(dt.year, 1, 1, tzinfo=timezone.utc)
+        year_epoch_ms = int(year_start_dt.timestamp() * 1000)
+        
+        group_idx = (ts - year_epoch_ms) // PERIOD_MS
+        group_key = year_epoch_ms + group_idx * PERIOD_MS
         
         if group_key not in groups:
             groups[group_key] = []
@@ -205,13 +210,13 @@ def compose_3d_bars(ohlcv_1d):
         bars = sorted(groups[gts], key=lambda x: x[0])
         
         result.append([
-            gts,                         # 用固定的 Epoch 週期起點作為 3D K棒日期 (與 TV 對齊)
-            bars[0][1],                  # open
-            max(b[2] for b in bars),     # high
-            min(b[3] for b in bars),     # low
-            bars[-1][4],                 # close
-            sum(b[5] for b in bars),     # vol
-            gts + PERIOD_MS              # close_ts (固定為週期結束時間)
+            gts,
+            bars[0][1],
+            max(b[2] for b in bars),
+            min(b[3] for b in bars),
+            bars[-1][4],
+            sum(b[5] for b in bars),
+            gts + PERIOD_MS
         ])
     return result
 
