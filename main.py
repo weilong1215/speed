@@ -182,23 +182,17 @@ def get_exchange():
 def compose_3d_bars(ohlcv_1d):
     """將 1D OHLCV 合成 3D K 棒 (按固定週期對齊)
     輸入: [[ts, open, high, low, close, vol], ...]
-    輸出: 同格式的 3D K 棒列表，僅包含完整的 3 天週期
+    輸出: 同格式的 3D K 棒列表
     """
     if not ohlcv_1d or len(ohlcv_1d) < 3:
         return []
 
-    from datetime import datetime, timezone
-    
+    # 改為與 TradingView 完全一致的 Unix Epoch (1970-01-01) 固定日曆對齊
     PERIOD_MS = 3 * 24 * 3600 * 1000
     groups = {}
     for bar in ohlcv_1d:
         ts = bar[0]
-        dt = datetime.fromtimestamp(ts / 1000, tz=timezone.utc)
-        year_start_dt = datetime(dt.year, 1, 1, tzinfo=timezone.utc)
-        year_epoch_ms = int(year_start_dt.timestamp() * 1000)
-        
-        group_idx = (ts - year_epoch_ms) // PERIOD_MS
-        group_key = year_epoch_ms + group_idx * PERIOD_MS
+        group_key = (ts // PERIOD_MS) * PERIOD_MS
         
         if group_key not in groups:
             groups[group_key] = []
@@ -210,24 +204,15 @@ def compose_3d_bars(ohlcv_1d):
     for i, gts in enumerate(sorted_gts):
         bars = sorted(groups[gts], key=lambda x: x[0])
         
-        # 判斷是否為已完成的 3D 週期：
-        # 1. 滿 3 天
-        # 2. 或是跨年時的殘餘天數 (即它不是整個陣列的最後一組)
-        is_completed = (len(bars) >= 3) or (i < len(sorted_gts) - 1)
-        
-        if not is_completed:
-            continue
-            
         result.append([
-            gts,
-            bars[0][1],
-            max(b[2] for b in bars),
-            min(b[3] for b in bars),
-            bars[-1][4],
-            sum(b[5] for b in bars),
-            bars[-1][0] + 24 * 3600 * 1000  # 第 7 個元素：實際收盤時間 (最後一根 1D 棒結束時)
+            gts,                         # 用固定的 Epoch 週期起點作為 3D K棒日期 (與 TV 對齊)
+            bars[0][1],                  # open
+            max(b[2] for b in bars),     # high
+            min(b[3] for b in bars),     # low
+            bars[-1][4],                 # close
+            sum(b[5] for b in bars),     # vol
+            gts + PERIOD_MS              # close_ts (固定為週期結束時間)
         ])
-
     return result
 
 # ============================================================================
@@ -1108,8 +1093,8 @@ async def monitor_positions(exchange):
                                         
                                         # 只檢查訊號產生之後的 K 棒
                                         if last_close_time > entry_ts:
-                                            # 如果收盤低於 10MA，或最低價跌破原止損 (C2_low)
-                                            if last_closed['close'] < last_closed['sma_10'] or last_closed['low'] < float(sig['original_sl_price']):
+                                            # 如果收盤低於 10MA，或最低價跌破/觸及原止損 (C2_low)
+                                            if last_closed['close'] < last_closed['sma_10'] or last_closed['low'] <= float(sig['original_sl_price']):
                                                 logger.info(f"🚫 淘汰條件已成立 (跌破10MA或最低價) ({symbol})，撤銷未成交單 {signal_id}")
                                                 entry_orders = [o for o in open_orders if str(o.get('clientOrderId') or o.get('info', {}).get('clientOid') or "") == str(signal_id)]
                                                 for eo in entry_orders:
@@ -1403,8 +1388,8 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
                     if bar['low'] > dynamic_sl:
                         dynamic_sl = float(bar['low'])
 
-                # 淘汰條件：最低價跌破動態止損，或收盤跌破 10MA
-                if bar['low'] < dynamic_sl or bar['close'] < bar['sma_10']:
+                # 淘汰條件：最低價觸發動態止損，或收盤跌破 10MA
+                if bar['low'] <= dynamic_sl or bar['close'] < bar['sma_10']:
                     state = 0
                     target_info_c1 = None
                     target_info_c2 = None

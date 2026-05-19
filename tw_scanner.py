@@ -111,28 +111,28 @@ def compose_3d_bars(ohlcv_1d):
     if not ohlcv_1d or len(ohlcv_1d) < 3:
         return []
     
-    # 台股特製版：捨棄加密貨幣的固定 UTC 日曆分組
-    # 改為直接依賴「實際交易日」，每 3 根 K 線合成一根 3D K 棒
-    # 完美避開週末或國定假日導致的「單日殘缺 3D 棒」問題
-    result = []
-    
-    for i in range(0, len(ohlcv_1d), 3):
-        bars = ohlcv_1d[i:i+3]
+    # 改為與 TradingView 完全一致的 Unix Epoch (1970-01-01) 固定日曆對齊
+    # 這樣無論拉多少天的歷史，3D 棒的切割邊界永遠固定不變
+    PERIOD_MS = 3 * 24 * 3600 * 1000
+    groups = {}
+    for bar in ohlcv_1d:
+        ts = bar[0]
+        group_key = (ts // PERIOD_MS) * PERIOD_MS
+        if group_key not in groups:
+            groups[group_key] = []
+        groups[group_key].append(bar)
         
-        # 必須滿 3 根才合成，除非是最新的一組 (允許進行中)
-        is_completed = (len(bars) == 3) or (i + 3 >= len(ohlcv_1d))
-        if not is_completed:
-            continue
-            
-        gts = bars[0][0]
+    result = []
+    for gts in sorted(groups.keys()):
+        bars = groups[gts]
         result.append([
-            gts,
-            bars[0][1], # open
-            max(b[2] for b in bars), # high
-            min(b[3] for b in bars), # low
-            bars[-1][4], # close
-            sum(b[5] for b in bars), # vol
-            bars[-1][0] + 24 * 3600 * 1000 # close_ts (最後一根 K 的結束時間)
+            gts,                         # 用固定的 Epoch 週期起點作為 3D K棒日期 (與 TV 對齊)
+            bars[0][1],                  # open
+            max(b[2] for b in bars),     # high
+            min(b[3] for b in bars),     # low
+            bars[-1][4],                 # close
+            sum(b[5] for b in bars),     # vol
+            gts + PERIOD_MS              # close_ts (固定為週期結束時間)
         ])
     return result
 
@@ -337,7 +337,7 @@ async def scan_stock(session, stock_info, semaphore, current_idx, total):
                         dynamic_sl = float(bar['low'])
 
                 # 淘汰條件：最低價跌破動態止損，或收盤跌破 10MA
-                if bar['low'] < dynamic_sl or bar['close'] < bar['sma_10']:
+                if bar['low'] <= dynamic_sl or bar['close'] < bar['sma_10']:
                     state = 0
                     dynamic_sl = 0.0
                     
