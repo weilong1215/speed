@@ -240,6 +240,9 @@ async def fetch_historical_candles(session, symbol):
                     elif response.status == 403:
                         logger.error(f"❌ Fugle API 權限錯誤 (403)，請檢查 API Key 是否有效！")
                         return None
+                    elif response.status == 404:
+                        # 404 表示該段期間沒有此股票的資料 (可能尚未上市)，直接跳過不需重試
+                        break
                     else:
                         logger.warning(f"⚠️ Fugle API 回應異常 (狀態碼: {response.status}) {symbol} [{from_date_str}]，準備重試...")
                         await asyncio.sleep(1)
