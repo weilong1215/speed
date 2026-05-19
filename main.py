@@ -786,7 +786,7 @@ async def monitor_positions(exchange):
                     # 止損未上移 (sl_price == original_sl_price) 且日線收盤跌破 10MA → 不值得繼續持有
                     if float(sig['sl_price']) == float(sig.get('original_sl_price', sig['sl_price'])):
                         try:
-                            ohlcv_1d_chk = await exchange.fetch_ohlcv(symbol, '1d', limit=100)
+                            ohlcv_1d_chk = await exchange.fetch_ohlcv(symbol, '1d', limit=200)
                             ohlcv_3d_chk = compose_3d_bars(ohlcv_1d_chk)
                             if ohlcv_3d_chk and len(ohlcv_3d_chk) >= 15:
                                 df_3d_chk = pd.DataFrame(ohlcv_3d_chk, columns=['ts', 'open', 'high', 'low', 'close', 'vol', 'close_ts'])
@@ -844,7 +844,7 @@ async def monitor_positions(exchange):
                             precision = sig.get('precision', 4)
                             current_price_pc = 0
 
-                            ohlcv_1d_pc = await exchange.fetch_ohlcv(symbol, '1d', limit=100)
+                            ohlcv_1d_pc = await exchange.fetch_ohlcv(symbol, '1d', limit=200)
                             ohlcv_3d_pc = compose_3d_bars(ohlcv_1d_pc)
                             if ohlcv_3d_pc and len(ohlcv_3d_pc) >= 15:
                                 df_3d_pc = pd.DataFrame(ohlcv_3d_pc, columns=['ts', 'open', 'high', 'low', 'close', 'vol', 'close_ts'])
@@ -1035,7 +1035,7 @@ async def monitor_positions(exchange):
                 if has_entry:
                     try:
                         entry_ts = int(sig.get('timestamp', 0))
-                        ohlcv_1d = await exchange.fetch_ohlcv(symbol, '1d', limit=100)
+                        ohlcv_1d = await exchange.fetch_ohlcv(symbol, '1d', limit=200)
                         ticker = await exchange.fetch_ticker(symbol)
                         current_price = float(ticker['last'])
                         original_sl = float(sig.get('original_sl_price', sig['sl_price']))
@@ -1251,7 +1251,7 @@ async def monitor_positions(exchange):
 
         for sym, add_orders in add_orders_by_symbol.items():
             try:
-                ohlcv_1d_add = await exchange.fetch_ohlcv(sym, '1d', limit=100)
+                ohlcv_1d_add = await exchange.fetch_ohlcv(sym, '1d', limit=200)
                 ohlcv_3d_add = compose_3d_bars(ohlcv_1d_add)
                 if not ohlcv_3d_add or len(ohlcv_3d_add) < 15:
                     continue
@@ -1293,7 +1293,7 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
         if current_idx > 0 and (current_idx % 50 == 0 or current_idx == total_coins):
             logger.info(f"📊 掃描進度: {current_idx}/{total_coins}...")
 
-        ohlcv_1d = await exchange.fetch_ohlcv(symbol, '1d', limit=100)
+        ohlcv_1d = await exchange.fetch_ohlcv(symbol, '1d', limit=200)
 
         if not ohlcv_1d: return None
         
