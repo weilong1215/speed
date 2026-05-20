@@ -1573,7 +1573,13 @@ async def run_scan():
     try:
         try:
             markets = await ex.load_markets()
-            coins = [s for s, m in markets.items() if m.get('linear') and m.get('quote') == 'USDT']
+            exclude_bases = {"USDC", "FDUSD", "TUSD", "USDP", "BUSD", "EUR", "GBP", "DAI"}
+            coins = []
+            for s, m in markets.items():
+                if m.get('linear') and m.get('quote') == 'USDT':
+                    base = s.split('/')[0]
+                    if base not in exclude_bases:
+                        coins.append(s)
             precisions = {s: max(0, int(round(-np.log10(markets[s].get('precision', {}).get('price', 1e-8))))) for s in coins}
         except:
             coins = ["BTC/USDT:USDT", "ETH/USDT:USDT", "SOL/USDT:USDT", "XRP/USDT:USDT", "DOGE/USDT:USDT", "ADA/USDT:USDT"]
