@@ -1269,6 +1269,9 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
         c1_valid = False
         c2_valid = False
         
+        l1_valid_ts = 0
+        l2_valid_ts = 0
+        
         l1_date_str = "未知"
         l2_date_str = "未知"
         c1_date_str = "未知"
@@ -1287,10 +1290,12 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
                 evt = l1_events[t]
                 if evt['type'] == 'found':
                     l1_valid = True
+                    l1_valid_ts = t
                     l1_date_str = evt['dt_str']
                     # 新 L1 出現，重置 L2 與 C1
                     l2_valid = False
                     c1_valid = False
+                    l2_valid_ts = 0
                     l2_date_str = "未知"
                     c1_date_str = "未知"
                 elif evt['type'] == 'invalid':
@@ -1312,11 +1317,14 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
                         c2_date_str = "未知"
                     elif l1_valid and not l2_valid:
                         # 只有在 L1 成立，且目前沒有 L2 時，才尋找新 L2
-                        if b3d['close'] > b3d['open'] and b3d['close'] > b3d['sma_10']:
-                            l2_valid = True
-                            l2_date_str = pd.to_datetime(b3d['ts'], unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d')
-                            c1_valid = False
-                            c1_date_str = "未知"
+                        # 必須在 L1 成立「之後」的 3D K 棒才能當作 L2 (確保開盤時間 >= L1 收盤時間)
+                        if b3d['ts'] >= l1_valid_ts:
+                            if b3d['close'] > b3d['open'] and b3d['close'] > b3d['sma_10']:
+                                l2_valid = True
+                                l2_valid_ts = t
+                                l2_date_str = pd.to_datetime(b3d['ts'], unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d')
+                                c1_valid = False
+                                c1_date_str = "未知"
                             
             # 3. 處理 3H (L3) 事件
             if pd.isna(row['sma_100']):
@@ -1334,10 +1342,11 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
                 # [非持倉]
                 if l2_valid:
                     if not c1_valid:
-                        # 尋找 C1
-                        if row['close'] < row['sma_100']:
-                            c1_valid = True
-                            c1_date_str = pd.to_datetime(row['ts'], unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d %H:%M:%S')
+                        # 尋找 C1 (確保開盤時間 >= L2 收盤時間)
+                        if row['ts'] >= l2_valid_ts:
+                            if row['close'] < row['sma_100']:
+                                c1_valid = True
+                                c1_date_str = pd.to_datetime(row['ts'], unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d %H:%M:%S')
                     else:
                         # 尋找 C2
                         if row['close'] > row['sma_100']:
