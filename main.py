@@ -1026,7 +1026,7 @@ async def monitor_positions(exchange):
                                     sig['status'] = 'closed'
                                 continue
 
-                        # 訊號淘汰條件撤單：若尚未進場，且3D線收盤跌破 10MA 或最低點低於止損價，則作廢訊號撤單
+                        # 訊號淘汰條件撤單：若尚未進場，且3D線收盤跌破 10SMA 或最低點低於止損價，則作廢訊號撤單
                         if not is_runaway:
                             try:
                                 ohlcv_3d = compose_3d_bars(ohlcv_1d)
@@ -1043,9 +1043,9 @@ async def monitor_positions(exchange):
                                         
                                         # 只檢查訊號產生之後的 K 棒
                                         if last_close_time > entry_ts:
-                                            # 如果收盤低於 10MA，或最低價跌破/觸及原止損 (C2_low)
+                                            # 如果收盤低於 10SMA，或最低價跌破/觸及原止損 (C2_low)
                                             if last_closed['close'] < last_closed['sma_10'] or last_closed['low'] <= float(sig['original_sl_price']):
-                                                logger.info(f"🚫 淘汰條件已成立 (跌破10MA或最低價) ({symbol})，撤銷未成交單 {signal_id}")
+                                                logger.info(f"🚫 淘汰條件已成立 (跌破10SMA或最低價) ({symbol})，撤銷未成交單 {signal_id}")
                                                 entry_orders = [o for o in open_orders if str(o.get('clientOrderId') or o.get('info', {}).get('clientOid') or "") == str(signal_id)]
                                                 for eo in entry_orders:
                                                     try:
@@ -1056,7 +1056,7 @@ async def monitor_positions(exchange):
                                                 send_telegram_message(
                                                     f"<b>🚫 訊號已淘汰 (撤銷進場)</b>\n\n"
                                                     f"💎 <b>交易對:</b> {get_base_coin(symbol)} [{direction}]\n"
-                                                    f"📉 <b>狀態: 3D線跌破 10MA 或止損價，已自動撤銷進場單</b>"
+                                                    f"📉 <b>狀態: 3D線跌破 10SMA 或止損價，已自動撤銷進場單</b>"
                                                 )
                                                 sig['status'] = 'closed'
                                                 continue
@@ -1174,7 +1174,7 @@ async def monitor_positions(exchange):
                             if "43001" not in str(e) and "does not exist" not in str(e).lower():
                                 logger.error(f"盲目清理失敗 {co_id}: {e}")
 
-        # 4. 未成交加倉單監測 (日K跌破 10MA → 撤銷)
+        # 4. 未成交加倉單監測 (日K跌破 10SMA → 撤銷)
         add_orders_by_symbol = {}
         for oo in open_orders:
             co_id = str(oo.get('clientOrderId') or oo.get('info', {}).get('clientOid') or "")
@@ -1203,14 +1203,14 @@ async def monitor_positions(exchange):
                             try:
                                 await exchange.cancel_order(ao['id'], sym)
                                 open_orders = [o for o in open_orders if o['id'] != ao['id']]
-                                logger.info(f"🚫 加倉單已作廢 (跌破10MA): {ao_coid} ({sym})")
+                                logger.info(f"🚫 加倉單已作廢 (跌破10SMA): {ao_coid} ({sym})")
                             except Exception as e:
                                 if "43001" not in str(e) and "does not exist" not in str(e).lower():
                                     logger.warning(f"撤銷加倉單失敗 {ao_coid}: {e}")
                         send_telegram_message(
-                            f"<b>🚫 加倉單已作廢 (跌破10MA)</b>\n\n"
+                            f"<b>🚫 加倉單已作廢 (跌破10SMA)</b>\n\n"
                             f"💎 <b>交易對:</b> {get_base_coin(sym)}\n"
-                            f"📉 <b>狀態:</b> 3D線收盤跌破 10MA，已自動撤銷未成交加倉單"
+                            f"📉 <b>狀態:</b> 3D線收盤跌破 10SMA，已自動撤銷未成交加倉單"
                         )
             except Exception as e:
                 logger.warning(f"監測加倉單異常 ({sym}): {e}")
@@ -1326,7 +1326,7 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
                 b3d = dict_3d[t]
                 if pd.notna(b3d['sma_10']):
                     if b3d['close'] < b3d['sma_10']:
-                        # 跌破 10MA，L2 失效，連帶 C1 與 C2 也失效
+                        # 跌破 10SMA，L2 失效，連帶 C1 與 C2 也失效
                         l2_valid = False
                         c1_valid = False
                         c2_valid = False
@@ -1369,11 +1369,20 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
                     else:
                         # 尋找 C2
                         if row['close'] > row['sma_100']:
-                            c2_valid = True
-                            c2_date_str = pd.to_datetime(row['ts'], unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d %H:%M:%S')
-                            entry_price = float(row['close'])
-                            stop_loss = float(row['low'])
-                            trigger_ts = int(row['ts'])
+                            _candidate_entry = float(row['close'])
+                            _candidate_sl = float(row['low'])
+                            _sl_distance_pct = abs(_candidate_entry - _candidate_sl) / _candidate_entry * 100 if _candidate_entry > 0 else 999
+                            if _sl_distance_pct <= 10:
+                                # 止損距離 <= 10%，C2 成立
+                                c2_valid = True
+                                c2_date_str = pd.to_datetime(row['ts'], unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d %H:%M:%S')
+                                entry_price = _candidate_entry
+                                stop_loss = _candidate_sl
+                                trigger_ts = int(row['ts'])
+                            else:
+                                # 止損距離 > 10%，放棄此次突破，重置 C1 強制重新洗盤
+                                c1_valid = False
+                                c1_date_str = "未知"
 
         # 迴圈結束，判定最終狀態
         is_trigger_met = c2_valid
