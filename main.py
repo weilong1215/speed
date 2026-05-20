@@ -325,44 +325,75 @@ async def place_order(exchange, symbol, direction, entry, sl, precision, fixed_l
         if risk_per_unit == 0: return None
         qty_risk_ideal = fixed_loss_usdt / risk_per_unit
 
-        # 下單前先監測當前價格是否已達到 TP1 或已達到/跌破止損
+        # 下單前先監測當前價格與歷史 K 棒是否已達到 TP1 或已達到/跌破止損
         try:
-            ticker = await exchange.fetch_ticker(symbol)
-            current_price = float(ticker['last'])
             tp1_price = entry + 5 * risk_per_unit if direction == 'LONG' else entry - 5 * risk_per_unit
+            since_ts = trigger_ts - 5 * 60 * 1000 if trigger_ts > 0 else int(time.time() * 1000) - 48 * 3600 * 1000
+            
+            # 拉取 1H K 棒
+            ohlcv_1h = await exchange.fetch_ohlcv(symbol, '1h', since=since_ts, limit=500)
             
             skip_order = False
             skip_reason = ""
             
-            if direction == 'LONG':
-                if current_price >= tp1_price:
-                    skip_order = True
-                    skip_reason = f"當前價格 {current_price:.{precision}f} 已達到/超過 TP1 ({tp1_price:.{precision}f})"
-                elif current_price <= sl:
-                    skip_order = True
-                    skip_reason = f"當前價格 {current_price:.{precision}f} 已達到/跌破 止損價 ({sl:.{precision}f})"
-            else:  # SHORT
-                if current_price <= tp1_price:
-                    skip_order = True
-                    skip_reason = f"當前價格 {current_price:.{precision}f} 已達到/低於 TP1 ({tp1_price:.{precision}f})"
-                elif current_price >= sl:
-                    skip_order = True
-                    skip_reason = f"當前價格 {current_price:.{precision}f} 已達到/突破 止損價 ({sl:.{precision}f})"
-                    
+            # 1. 檢查歷史 1H K 棒
+            for candle in ohlcv_1h:
+                c_ts = int(candle[0])
+                c_high = float(candle[2])
+                c_low = float(candle[3])
+                
+                if trigger_ts <= 0 or c_ts >= trigger_ts - 60000:
+                    if direction == 'LONG':
+                        if c_high >= tp1_price:
+                            skip_order = True
+                            skip_reason = f"歷史 K 棒 ({pd.to_datetime(c_ts, unit='ms').strftime('%Y-%m-%d %H:%M')}) 最高價 {c_high:.{precision}f} 已達到/超過 TP1 ({tp1_price:.{precision}f})"
+                            break
+                        elif c_low <= sl:
+                            skip_order = True
+                            skip_reason = f"歷史 K 棒 ({pd.to_datetime(c_ts, unit='ms').strftime('%Y-%m-%d %H:%M')}) 最低價 {c_low:.{precision}f} 已達到/跌破止損 ({sl:.{precision}f})"
+                            break
+                    else:  # SHORT
+                        if c_low <= tp1_price:
+                            skip_order = True
+                            skip_reason = f"歷史 K 棒 ({pd.to_datetime(c_ts, unit='ms').strftime('%Y-%m-%d %H:%M')}) 最低價 {c_low:.{precision}f} 已達到/低於 TP1 ({tp1_price:.{precision}f})"
+                            break
+                        elif c_high >= sl:
+                            skip_order = True
+                            skip_reason = f"歷史 K 棒 ({pd.to_datetime(c_ts, unit='ms').strftime('%Y-%m-%d %H:%M')}) 最高價 {c_high:.{precision}f} 已達到/突破止損 ({sl:.{precision}f})"
+                            break
+                            
+            # 2. 檢查最新 Ticker 價格
+            if not skip_order:
+                ticker = await exchange.fetch_ticker(symbol)
+                current_price = float(ticker['last'])
+                if direction == 'LONG':
+                    if current_price >= tp1_price:
+                        skip_order = True
+                        skip_reason = f"最新市價 {current_price:.{precision}f} 已達到/超過 TP1 ({tp1_price:.{precision}f})"
+                    elif current_price <= sl:
+                        skip_order = True
+                        skip_reason = f"最新市價 {current_price:.{precision}f} 已達到/跌破止損 ({sl:.{precision}f})"
+                else:  # SHORT
+                    if current_price <= tp1_price:
+                        skip_order = True
+                        skip_reason = f"最新市價 {current_price:.{precision}f} 已達到/低於 TP1 ({tp1_price:.{precision}f})"
+                    elif current_price >= sl:
+                        skip_order = True
+                        skip_reason = f"最新市價 {current_price:.{precision}f} 已達到/突破止損 ({sl:.{precision}f})"
+                        
             if skip_order:
-                logger.warning(f"⚠️ {symbol} 跳過下單: {skip_reason}")
+                logger.warning(f"⚠️ {symbol} 下單前監測觸發過期，跳過下單: {skip_reason}")
                 send_telegram_message(
                     f"<b>🚫 跳過自動下單 (已達TP1/止損)</b>\n\n"
                     f"💎 <b>交易對:</b> {get_base_coin(symbol)} [{direction}]\n"
                     f"🎯 進場價格: <code>{entry:.{precision}f}</code>\n"
                     f"🛑 止損價格: <code>{sl:.{precision}f}</code>\n"
-                    f"🎯 TP1價格: <code>{tp1_price:.{precision}f}</code>\n"
-                    f"📍 當前市價: <code>{current_price:.{precision}f}</code>\n\n"
+                    f"🎯 TP1價格: <code>{tp1_price:.{precision}f}</code>\n\n"
                     f"⚠️ <b>原因:</b> {skip_reason}"
                 )
                 return None
         except Exception as e:
-            logger.warning(f"  下單前價格監測異常 ({symbol}): {e}，跳過監測直接嘗試下單")
+            logger.warning(f"  下單前 1H K 棒價格監測異常 ({symbol}): {e}，跳過監測直接嘗試下單")
 
         # 1. 建構槓桿策略列表: MAX (幣種實際最大槓桿) → 20x → 10x
         # 應對 Bitget V2 API 欄位異動，同步檢查 maxLever、maxLeverage 與 limits 結構
@@ -840,6 +871,14 @@ async def monitor_positions(exchange):
                 if has_entry:
                     try:
                         entry_ts = int(sig.get('timestamp', 0))
+                        
+                        # 同時拉取 1h 與 1d K 棒，用 1h 來更精準判斷是否碰過 TP1 (5R)
+                        ohlcv_1h = []
+                        try:
+                            ohlcv_1h = await exchange.fetch_ohlcv(symbol, '1h', since=entry_ts - 5 * 60 * 1000, limit=500)
+                        except Exception as e:
+                            logger.warning(f"  監控拉取 1H K 棒異常 ({symbol}): {e}")
+
                         ohlcv_1d = await exchange.fetch_ohlcv(symbol, '1d', limit=200)
                         ticker = await exchange.fetch_ticker(symbol)
                         current_price = float(ticker['last'])
@@ -854,7 +893,21 @@ async def monitor_positions(exchange):
                             elif direction == 'SHORT' and current_price <= entry_price - TP_STEP_R * risk:
                                 is_runaway = True
 
-                            if not is_runaway and len(ohlcv_1d) > 0:
+                            # 1. 優先使用 1h K 棒做高低點精細比對
+                            if not is_runaway and len(ohlcv_1h) > 0:
+                                for candle in ohlcv_1h:
+                                    candle_ts = int(candle[0])
+                                    if candle_ts >= entry_ts - 60000:
+                                        c_high = float(candle[2])
+                                        c_low = float(candle[3])
+                                        if direction == 'LONG' and c_high >= entry_price + 5 * risk:
+                                            is_runaway = True
+                                            break
+                                        elif direction == 'SHORT' and c_low <= entry_price - 5 * risk:
+                                            is_runaway = True
+                                            break
+                            # 2. 若 1h K 棒缺失，則使用 1d K 棒 fallback 比對
+                            elif not is_runaway and len(ohlcv_1d) > 0:
                                 for candle in ohlcv_1d:
                                     candle_ts = int(candle[0])
                                     if candle_ts > entry_ts:
