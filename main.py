@@ -1412,7 +1412,18 @@ def send_grouped_message(item_list, title):
     # 按 c1_date 分組與排序
     date_groups = {}
     for item in item_list:
-        d = item.get('c1_date', '未知日期')
+        c1 = item.get('c1_date', '未知日期')
+        if c1 == '未知' or c1 == '未知日期':
+            state = item.get('scan_state', '')
+            if state == 'l3_c1_waiting':
+                d = f"⏳ 等待 C1 (L2 於 {item.get('l2_date', '未知')} 成立)"
+            elif state == 'l2_waiting':
+                d = f"⏳ 等待 L2 (L1 於 {item.get('l1_date', '未知')} 成立)"
+            else:
+                d = "⏳ 等待訊號"
+        else:
+            d = c1
+
         if d not in date_groups:
             date_groups[d] = []
         date_groups[d].append(item)
@@ -1741,7 +1752,7 @@ async def run_tw_scanner_background():
         logger.error(f"💥 背景台股掃描任務異常: {e}")
 
 async def scheduler():
-    last_day = -1
+    last_hour = -1
     last_tw_day = -1
     
     # 初始執行：加密貨幣
@@ -1756,13 +1767,13 @@ async def scheduler():
     while True:
         try:
             now = datetime.utcnow()
-            # 加密貨幣每日 UTC 00:00~00:10 觸發一次掃描
-            if now.hour == 0 and now.minute <= 10 and now.day != last_day:
+            # 加密貨幣每 3 小時 (UTC 0, 3, 6, 9...) 觸發一次掃描
+            if now.hour % 3 == 0 and now.minute <= 10 and now.hour != last_hour:
                 try:
                     await run_scan()
                 except Exception as e:
                     logger.error(f"定時掃描異常: {e}")
-                last_day = now.day
+                last_hour = now.hour
 
             # 台股每日 UTC 06:30~06:40 (台灣時間 14:30) 觸發一次掃描 - 改為背景任務非阻塞
             if now.hour == 6 and now.minute >= 30 and now.minute <= 40 and now.day != last_tw_day:
