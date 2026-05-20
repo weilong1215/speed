@@ -1254,7 +1254,7 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
             b = df_18d_closed.iloc[i]
             p = df_18d_closed.iloc[i - 1]
             t = int(b['close_ts'])
-            dt_str = pd.to_datetime(b['ts'], unit='ms', utc=True).strftime('%Y-%m-%d')
+            dt_str = pd.to_datetime(b['ts'], unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d')
             if b['close'] > b['open'] and p['close'] < p['open']:
                 l1_events[t] = {'type': 'found', 'dt_str': dt_str}
             elif b['close'] < b['open']:
@@ -1297,20 +1297,24 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
                     l1_valid = False
                     l2_valid = False
                     c1_valid = False
+                    c2_valid = False
+                    c2_date_str = "未知"
             
             # 2. 處理 3D (L2) 事件
             if t in dict_3d:
                 b3d = dict_3d[t]
                 if pd.notna(b3d['sma_10']):
                     if b3d['close'] < b3d['sma_10']:
-                        # 跌破 10MA，L2 失效，連帶 C1 也失效
+                        # 跌破 10MA，L2 失效，連帶 C1 與 C2 也失效
                         l2_valid = False
                         c1_valid = False
+                        c2_valid = False
+                        c2_date_str = "未知"
                     elif l1_valid and not l2_valid:
                         # 只有在 L1 成立，且目前沒有 L2 時，才尋找新 L2
                         if b3d['close'] > b3d['open'] and b3d['close'] > b3d['sma_10']:
                             l2_valid = True
-                            l2_date_str = pd.to_datetime(b3d['ts'], unit='ms', utc=True).strftime('%Y-%m-%d')
+                            l2_date_str = pd.to_datetime(b3d['ts'], unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d')
                             c1_valid = False
                             c1_date_str = "未知"
                             
@@ -1333,12 +1337,12 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
                         # 尋找 C1
                         if row['close'] < row['sma_100']:
                             c1_valid = True
-                            c1_date_str = pd.to_datetime(row['ts'], unit='ms', utc=True).strftime('%Y-%m-%d %H:%M:%S')
+                            c1_date_str = pd.to_datetime(row['ts'], unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d %H:%M:%S')
                     else:
                         # 尋找 C2
                         if row['close'] > row['sma_100']:
                             c2_valid = True
-                            c2_date_str = pd.to_datetime(row['ts'], unit='ms', utc=True).strftime('%Y-%m-%d %H:%M:%S')
+                            c2_date_str = pd.to_datetime(row['ts'], unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d %H:%M:%S')
                             entry_price = float(row['close'])
                             stop_loss = float(row['low'])
                             trigger_ts = int(row['ts'])
