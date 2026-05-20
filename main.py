@@ -1186,7 +1186,8 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
                     c1_valid = False 
                     c1_date_str = "未知"
                     c2_date_str = "未知"
-            else:
+
+            if not c2_valid:
                 if l2_valid:
                     if not c1_valid:
                         if row['ts'] >= l2_valid_ts:
