@@ -220,6 +220,80 @@ def compose_3d_bars(ohlcv_1d):
         ])
     return result
 
+def compose_18d_bars(ohlcv_1d):
+    """將 1D OHLCV 合成 18D K棒 (按每年 1/1 起算，與 compose_3d_bars 對齊邏輯相同)
+    輸入: [[ts, open, high, low, close, vol], ...]
+    輸出: [[ts, open, high, low, close, vol, close_ts], ...]
+    """
+    if not ohlcv_1d or len(ohlcv_1d) < 18:
+        return []
+
+    from datetime import datetime, timezone
+    PERIOD_MS = 18 * 24 * 3600 * 1000
+    groups = {}
+    for bar in ohlcv_1d:
+        ts = bar[0]
+        dt = datetime.fromtimestamp(ts / 1000, tz=timezone.utc)
+        year_start_dt = datetime(dt.year, 1, 1, tzinfo=timezone.utc)
+        year_epoch_ms = int(year_start_dt.timestamp() * 1000)
+
+        group_idx = (ts - year_epoch_ms) // PERIOD_MS
+        group_key = year_epoch_ms + group_idx * PERIOD_MS
+
+        if group_key not in groups:
+            groups[group_key] = []
+        groups[group_key].append(bar)
+
+    result = []
+    for gts in sorted(groups.keys()):
+        bars = sorted(groups[gts], key=lambda x: x[0])
+        result.append([
+            gts,
+            bars[0][1],
+            max(b[2] for b in bars),
+            min(b[3] for b in bars),
+            bars[-1][4],
+            sum(b[5] for b in bars),
+            gts + PERIOD_MS
+        ])
+    return result
+
+def compose_3h_bars(ohlcv_1h):
+    """將 1H OHLCV 合成 3H K棒 (從每天 00:00 UTC 起算，每 3 根 1H 合一根)
+    輸入: [[ts, open, high, low, close, vol], ...]
+    輸出: [[ts, open, high, low, close, vol, close_ts], ...]
+    """
+    if not ohlcv_1h or len(ohlcv_1h) < 3:
+        return []
+
+    PERIOD_MS = 3 * 3600 * 1000   # 3 小時
+    DAY_MS    = 24 * 3600 * 1000  # 1 天
+
+    groups = {}
+    for bar in ohlcv_1h:
+        ts = bar[0]
+        day_start = (ts // DAY_MS) * DAY_MS
+        slot_idx  = (ts - day_start) // PERIOD_MS
+        group_key = day_start + slot_idx * PERIOD_MS
+
+        if group_key not in groups:
+            groups[group_key] = []
+        groups[group_key].append(bar)
+
+    result = []
+    for gts in sorted(groups.keys()):
+        bars = sorted(groups[gts], key=lambda x: x[0])
+        result.append([
+            gts,
+            bars[0][1],
+            max(b[2] for b in bars),
+            min(b[3] for b in bars),
+            bars[-1][4],
+            sum(b[5] for b in bars),
+            gts + PERIOD_MS
+        ])
+    return result
+
 # ============================================================================
 # 交易執行
 # ============================================================================
@@ -794,164 +868,7 @@ async def monitor_positions(exchange):
                     found_signal = True
                     signal_id = sig.get('signal_id', str(sig.get('timestamp')))
 
-                    # === 跌破10MA 無保護止損 → 市價平倉 ===
-                    # 止損未上移 (sl_price == original_sl_price) 且日線收盤跌破 10MA → 不值得繼續持有
-                    if float(sig['sl_price']) == float(sig.get('original_sl_price', sig['sl_price'])):
-                        try:
-                            ohlcv_1d_chk = await exchange.fetch_ohlcv(symbol, '1d', limit=200)
-                            ohlcv_3d_chk = compose_3d_bars(ohlcv_1d_chk)
-                            if ohlcv_3d_chk and len(ohlcv_3d_chk) >= 15:
-                                df_3d_chk = pd.DataFrame(ohlcv_3d_chk, columns=['ts', 'open', 'high', 'low', 'close', 'vol', 'close_ts'])
-                                df_3d_chk['sma_10'] = df_3d_chk['close'].rolling(window=10).mean()
-                                now_utc_3d_fl = int(time.time() * 1000)
-                                closed_3d_chk = df_3d_chk[df_3d_chk['close_ts'] <= now_utc_3d_fl]
 
-                                if len(closed_3d_chk) > 0:
-                                    last_bar = closed_3d_chk.iloc[-1]
-                                    if pd.notna(last_bar['sma_10']) and last_bar['close'] < last_bar['sma_10']:
-                                        precision = sig.get('precision', 4)
-                                        logger.info(
-                                            f"🚨 跌破10MA且無保護止損 ({symbol})，執行市價平倉 | "
-                                            f"收盤={last_bar['close']:.{precision}f} < 10MA={last_bar['sma_10']:.{precision}f}"
-                                        )
-
-                                        # 撤銷所有相關掛單 (SL + TP)
-                                        related_orders = [o for o in open_orders
-                                                          if signal_id in str(o.get('clientOrderId') or o.get('info', {}).get('clientOid') or "")]
-                                        for ro in related_orders:
-                                            try:
-                                                cid_str = get_coid(ro)
-                                                is_plan = cid_str.startswith("sl_") or cid_str.startswith("tp")
-                                                await exchange.cancel_order(ro['id'], symbol, params={'stop': True} if is_plan else {})
-                                            except Exception as e:
-                                                if "43001" not in str(e) and "does not exist" not in str(e).lower():
-                                                    logger.warning(f"撤銷掛單失敗 {ro['id']}: {e}")
-
-                                        # 市價平倉 (reduce-only 確保不開反向單)
-                                        order_side = 'sell' if side.lower() == 'long' else 'buy'
-                                        close_params = {
-                                            'reduceOnly': True, 'hedged': True,
-                                            'holdSide': side.lower()
-                                        }
-                                        await exchange.create_order(symbol, 'market', order_side, size, None, params=close_params)
-
-                                        sig['status'] = 'closed'
-                                        save_active_signals(saved_signals)
-
-                                        send_telegram_message(
-                                            f"<b>🚨 跌破10MA 市價出場</b>\n\n"
-                                            f"💎 {get_base_coin(symbol)} [{sig['direction']}]\n"
-                                            f"📉 <b>原因:</b> 3D線收盤跌破 10MA 且無保護止損\n"
-                                            f"📊 <b>平倉數量:</b> {size}"
-                                        )
-                                        logger.info(f"✅ 跌破3D 10MA市價平倉完成: {symbol}")
-                                        continue
-                        except Exception as e:
-                            logger.warning(f"檢查10MA平倉異常 ({symbol}): {e}")
-
-                    else:
-                        # === 已保護止損：日線跌破10MA / 3D看跌吞噬 → 部分平倉 20% ===
-                        try:
-                            partial_log = sig.get('partial_close_log', {})
-                            precision = sig.get('precision', 4)
-                            current_price_pc = 0
-
-                            ohlcv_1d_pc = await exchange.fetch_ohlcv(symbol, '1d', limit=200)
-                            if ohlcv_1d_pc and len(ohlcv_1d_pc) >= 15:
-                                df_1d_pc = pd.DataFrame(ohlcv_1d_pc, columns=['ts', 'open', 'high', 'low', 'close', 'vol'])
-                                df_1d_pc['sma_10'] = df_1d_pc['close'].rolling(window=10).mean()
-                                now_utc_pc = int(pd.Timestamp.now(tz='UTC').floor('1d').timestamp() * 1000)
-                                closed_1d_pc = df_1d_pc[df_1d_pc['ts'] < now_utc_pc]
-
-                                # --- 條件 1: 日線收盤跌破 10MA ---
-                                if len(closed_1d_pc) > 0:
-                                    last_bar_pc = closed_1d_pc.iloc[-1]
-                                    bar_ts_1d = int(last_bar_pc['ts'])
-                                    log_1d_ma = partial_log.get('1d_10ma', [])
-
-                                    if (pd.notna(last_bar_pc['sma_10'])
-                                            and last_bar_pc['close'] < last_bar_pc['sma_10']
-                                            and bar_ts_1d not in log_1d_ma):
-                                        if current_price_pc == 0:
-                                            ticker_pc = await exchange.fetch_ticker(symbol)
-                                            current_price_pc = float(ticker_pc['last'])
-                                        close_qty = float(exchange.amount_to_precision(symbol, size * TP_CLOSE_PCT))
-
-                                        # 20% 不足 6U → 全倉平倉
-                                        if close_qty <= 0 or close_qty * current_price_pc < 6:
-                                            close_qty = float(exchange.amount_to_precision(symbol, size))
-                                            close_label = "全倉"
-                                        else:
-                                            close_label = "20%"
-
-                                        if close_qty > 0 and close_qty * current_price_pc >= 6:
-                                            order_side_pc = 'sell' if side.lower() == 'long' else 'buy'
-                                            await exchange.create_order(symbol, 'market', order_side_pc, close_qty, None, params={
-                                                'reduceOnly': True, 'hedged': True, 'holdSide': side.lower()
-                                            })
-                                            if '1d_10ma' not in partial_log:
-                                                partial_log['1d_10ma'] = []
-                                            partial_log['1d_10ma'].append(bar_ts_1d)
-                                            sig['partial_close_log'] = partial_log
-                                            save_active_signals(saved_signals)
-                                            size = size - close_qty
-
-                                            logger.info(
-                                                f"📉 日線跌破10MA減倉 ({symbol}): {close_label} = {close_qty} | "
-                                                f"收盤={last_bar_pc['close']:.{precision}f} < 10MA={last_bar_pc['sma_10']:.{precision}f}"
-                                            )
-                                            send_telegram_message(
-                                                f"<b>📉 日線跌破10MA 減倉 ({close_label})</b>\n\n"
-                                                f"💎 {get_base_coin(symbol)} [{sig['direction']}]\n"
-                                                f"📊 <b>平倉數量:</b> {close_qty}\n"
-                                                f"📊 <b>剩餘倉位:</b> {size:.{precision}f}"
-                                            )
-
-                                # --- 條件 2: 日線看跌吞噬 (收盤 < 前一根實體低點) ---
-                                if size > 0:
-                                    if len(closed_1d_pc) >= 2:
-                                        last_1d = closed_1d_pc.iloc[-1]
-                                        prev_1d = closed_1d_pc.iloc[-2]
-                                        bar_ts_1d_engulf = int(last_1d['ts'])
-                                        log_1d_engulf = partial_log.get('1d_engulf', [])
-                                        prev_body_low = min(prev_1d['open'], prev_1d['close'])
-
-                                        if last_1d['close'] < prev_body_low and bar_ts_1d_engulf not in log_1d_engulf:
-                                            if current_price_pc == 0:
-                                                ticker_pc = await exchange.fetch_ticker(symbol)
-                                                current_price_pc = float(ticker_pc['last'])
-                                            close_qty = float(exchange.amount_to_precision(symbol, size * TP_CLOSE_PCT))
-
-                                            if close_qty <= 0 or close_qty * current_price_pc < 6:
-                                                close_qty = float(exchange.amount_to_precision(symbol, size))
-                                                close_label = "全倉"
-                                            else:
-                                                close_label = "20%"
-
-                                            if close_qty > 0 and close_qty * current_price_pc >= 6:
-                                                order_side_pc = 'sell' if side.lower() == 'long' else 'buy'
-                                                await exchange.create_order(symbol, 'market', order_side_pc, close_qty, None, params={
-                                                    'reduceOnly': True, 'hedged': True, 'holdSide': side.lower()
-                                                })
-                                                if '1d_engulf' not in partial_log:
-                                                    partial_log['1d_engulf'] = []
-                                                partial_log['1d_engulf'].append(bar_ts_1d_engulf)
-                                                sig['partial_close_log'] = partial_log
-                                                save_active_signals(saved_signals)
-                                                size = size - close_qty
-
-                                                logger.info(
-                                                    f"📉 日線看跌吞噬減倉 ({symbol}): {close_label} = {close_qty} | "
-                                                    f"收盤={last_1d['close']} < 前根實體低={prev_body_low}"
-                                                )
-                                                send_telegram_message(
-                                                    f"<b>📉 日線看跌吞噬 減倉 ({close_label})</b>\n\n"
-                                                    f"💎 {get_base_coin(symbol)} [{sig['direction']}]\n"
-                                                    f"📊 <b>平倉數量:</b> {close_qty}\n"
-                                                    f"📊 <b>剩餘倉位:</b> {size:.{precision}f}"
-                                                )
-                        except Exception as e:
-                            logger.warning(f"檢查部分平倉條件異常 ({symbol}): {e}")
 
                     # A. 整理本訊號所屬的止損單
                     my_sl_orders = []
@@ -1298,185 +1215,163 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
         if current_idx > 0 and (current_idx % 50 == 0 or current_idx == total_coins):
             logger.info(f"📊 掃描進度: {current_idx}/{total_coins}...")
 
-        ohlcv_1d = await exchange.fetch_ohlcv(symbol, '1d', limit=200)
+        now_utc = int(time.time() * 1000)
 
-        if not ohlcv_1d: return None
-        
-        ohlcv_3d = compose_3d_bars(ohlcv_1d)
-        if not ohlcv_3d or len(ohlcv_3d) < 15: return None
-        
-        df = pd.DataFrame(ohlcv_3d, columns=['ts', 'open', 'high', 'low', 'close', 'vol', 'close_ts'])
-        df = df.sort_values('ts').drop_duplicates(subset=['ts']).reset_index(drop=True)
-        df['dt'] = pd.to_datetime(df['ts'], unit='ms', utc=True)
+        # 拉取 1D OHLCV (合成 18D + 3D)
+        ohlcv_1d = await exchange.fetch_ohlcv(symbol, '1d', limit=500)
+        if not ohlcv_1d or len(ohlcv_1d) < 36:
+            return None
 
-        # 排除未收盤的當前 3D K 棒
-        now_utc_3d = int(time.time() * 1000)
-        df_3d = df[df['close_ts'] <= now_utc_3d].reset_index(drop=True)
+        # ==================== Layer 1: 18日K棒 ====================
+        ohlcv_18d = compose_18d_bars(ohlcv_1d)
+        if not ohlcv_18d or len(ohlcv_18d) < 2:
+            return None
 
-        if len(df_3d) < 15: return None
+        df_18d = pd.DataFrame(ohlcv_18d, columns=['ts', 'open', 'high', 'low', 'close', 'vol', 'close_ts'])
+        df_18d_closed = df_18d[df_18d['close_ts'] <= now_utc].reset_index(drop=True)
 
-        # 計算 3D 線 10MA
-        df_3d['sma_10'] = df_3d['close'].rolling(window=10).mean()
+        if len(df_18d_closed) < 2:
+            return None
 
-        target_info_c1 = None
-        target_info_c2 = None
-        target_info_gap = None
-        state = 0
-        c2_low = 0.0
-        # 動態保護止損追蹤（掃描器內部模擬 3D K 棒，使用固定 epoch 對齊）
-        dynamic_sl = 0.0
-        entry_price_scan = 0.0
-        scan_3d_groups = {}   # {group_key: [bar_dict, ...]}
-        scan_3d_last = None   # 上一根已完成的 3D 棒
-        EPOCH_MS = 1483228800000  # 2017-01-01 00:00 UTC
-        PERIOD_MS = 3 * 24 * 3600 * 1000
-        
-        # 1. 由舊到新執行狀態機掃描
-        # State 0: 尋找條件一
-        # State 1: 條件一成立，彈性等待條件二 (只要守穩 10MA 即可)
-        # State 3: 條件二成立，監控淘汰條件
-        for i in range(10, len(df_3d)):
-            bar = df_3d.iloc[i]
-            prev1 = df_3d.iloc[i-1]
-            prev2 = df_3d.iloc[i-2]
-            
-            prev1_body_high = max(prev1['open'], prev1['close'])
-            prev2_body_high = max(prev2['open'], prev2['close'])
-            
-            if state == 0:
-                # 條件一：收盤價小於前兩根實體高點 (回檔)，且這三天收盤價均大於 10MA
-                c1_met = (
-                    bar['close'] < prev1_body_high and bar['close'] < prev2_body_high and 
-                    bar['close'] > bar['sma_10'] and prev1['close'] > prev1['sma_10'] and prev2['close'] > prev2['sma_10']
-                )
-                
-                if c1_met:
-                    state = 1
-                    target_info_c1 = {
-                        'dt_str': bar['dt'].isoformat(),
-                        'ts': int(bar['ts']),
-                        'close': float(bar['close']),
-                        'high': float(bar['high']),
-                        'low': float(bar['low'])
-                    }
-                    target_info_c2 = None
-            elif state == 1:
-                # 彈性等待期：條件一成立後，尋找條件二 (可不連續日期)
-                if bar['close'] < bar['sma_10']:
-                    # 跌破 10MA，條件失效，重新尋找條件一
-                    state = 0
-                    target_info_c1 = None
-                    target_info_gap = None
-                    
-                    # 順便檢查今天是否剛好符合新的條件一
-                    c1_met = (
-                        bar['close'] < prev1_body_high and bar['close'] < prev2_body_high and 
-                        bar['close'] > bar['sma_10'] and prev1['close'] > prev1['sma_10'] and prev2['close'] > prev2['sma_10']
-                    )
-                    if c1_met:
-                        state = 1
-                        target_info_c1 = {
-                            'dt_str': bar['dt'].isoformat(),
-                            'ts': int(bar['ts']),
-                            'close': float(bar['close']),
-                            'high': float(bar['high']),
-                            'low': float(bar['low'])
-                        }
-                elif bar['close'] > max(prev1_body_high, prev2_body_high) and bar['close'] > bar['sma_10']:
-                    # 條件二成立：收盤大於「前面兩根」的實體高點且大於10MA，止損距離 <= 10%
-                    sl_distance = (bar['close'] - bar['low']) / bar['close'] if bar['close'] > 0 else 1.0
-                    if sl_distance <= 0.10:
-                        state = 3
-                        target_info_c2 = {
-                            'dt_str': bar['dt'].isoformat(),
-                            'ts': int(bar['ts']),
-                            'close': float(bar['close']),
-                            'high': float(bar['high']),
-                            'low': float(bar['low'])
-                        }
-                        c2_low = float(bar['low'])
-                        dynamic_sl = c2_low
-                        entry_price_scan = float(bar['close'])
-                    else:
-                        # 止損距離過大，訊號直接失效，重新尋找條件一
-                        state = 0
-                        target_info_c1 = None
-                        target_info_gap = None
-            elif state == 3:
-                # 在主迴圈內更新保護止損：若當前 3D K 棒收盤高於前一根 3D 實體高點且低點大於進場價
-                if bar['close'] > prev1_body_high and bar['low'] > entry_price_scan:
-                    if bar['low'] > dynamic_sl:
-                        dynamic_sl = float(bar['low'])
+        # 掃描所有已收盤的 18D K棒，記錄最近一次「當根陽棒，前根陰棒」
+        l1_close_ts = None
+        l1_date_str = None
+        for i in range(1, len(df_18d_closed)):
+            bar  = df_18d_closed.iloc[i]
+            prev = df_18d_closed.iloc[i - 1]
+            if bar['close'] > bar['open'] and prev['close'] < prev['open']:
+                l1_close_ts = int(bar['close_ts'])
+                l1_date_str = pd.to_datetime(bar['ts'], unit='ms', utc=True).strftime('%Y-%m-%d')
+                # 不 break，繼續掃描以取得最近一次符合
 
-                # 淘汰條件：最低價觸發動態止損，或收盤跌破 10MA
-                if bar['low'] <= dynamic_sl or bar['close'] < bar['sma_10']:
-                    state = 0
-                    target_info_c1 = None
-                    target_info_c2 = None
-                    target_info_gap = None
-                    dynamic_sl = 0.0
-                    
-                    # 重新判斷是否立即觸發新的條件一
-                    c1_met = (
-                        bar['close'] < prev1_body_high and bar['close'] < prev2_body_high and 
-                        bar['close'] > bar['sma_10'] and prev1['close'] > prev1['sma_10'] and prev2['close'] > prev2['sma_10']
-                    )
-                    if c1_met:
-                        state = 1
-                        target_info_c1 = {
-                            'dt_str': bar['dt'].isoformat(),
-                            'ts': int(bar['ts']),
-                            'close': float(bar['close']),
-                            'high': float(bar['high']),
-                            'low': float(bar['low'])
-                        }
-
-        # State 0: 無有效訊號
-        if state == 0:
+        if l1_close_ts is None:
             return {'symbol': symbol, 'action': 'remove'}
 
-        # State 1: 條件一成立，等待條件二 (關注中)
-        # State 3: 條件二已成立 (觸發進場)
-        is_watchlist_eligible = True
-        target_info = target_info_c1 if state == 1 else target_info_c2
-        
-        action = 'update'
-        if cached_info and target_info['ts'] == cached_info.get('ts', 0):
-            action = 'keep'
+        # ==================== Layer 2: 3日K棒 ====================
+        ohlcv_3d = compose_3d_bars(ohlcv_1d)
+        if not ohlcv_3d or len(ohlcv_3d) < 11:
+            return {'symbol': symbol, 'action': 'remove'}
 
-        is_trigger_met = False
+        df_3d = pd.DataFrame(ohlcv_3d, columns=['ts', 'open', 'high', 'low', 'close', 'vol', 'close_ts'])
+        df_3d['sma_10'] = df_3d['close'].rolling(window=10).mean()
+        df_3d_closed = df_3d[df_3d['close_ts'] <= now_utc].reset_index(drop=True)
+
+        # 僅檢視 L1 收盤後開始的 3D K棒
+        df_3d_after_l1 = df_3d_closed[df_3d_closed['ts'] > l1_close_ts].reset_index(drop=True)
+
+        l2_close_ts = None
+        l2_date_str = None
+        for _, row in df_3d_after_l1.iterrows():
+            if pd.notna(row['sma_10']) and row['close'] > row['open'] and row['close'] > row['sma_10']:
+                l2_close_ts = int(row['close_ts'])
+                l2_date_str = pd.to_datetime(row['ts'], unit='ms', utc=True).strftime('%Y-%m-%d')
+                # 不 break，記錄最近一次符合
+
+        if l2_close_ts is None:
+            # L1 成立，等待 L2
+            cache_ts = l1_close_ts
+            action = 'update' if (not cached_info or cached_info.get('ts') != cache_ts) else 'keep'
+            return {
+                'symbol':             symbol,
+                'action':             action,
+                'data':               {'ts': cache_ts},
+                'is_trigger_met':     False,
+                'is_watchlist_eligible': True,
+                'entry_price':        0.0,
+                'stop_loss':          0.0,
+                'trigger_ts':         0,
+                'precision':          precision,
+                'c1_date':            l1_date_str,
+                'c2_date':            '未知',
+                'scan_state':         'l1_waiting',
+            }
+
+        # ==================== Layer 3: 3小時K棒 ====================
+        ohlcv_1h = await exchange.fetch_ohlcv(symbol, '1h', limit=700)
+        if not ohlcv_1h or len(ohlcv_1h) < 100:
+            cache_ts = l2_close_ts
+            action = 'update' if (not cached_info or cached_info.get('ts') != cache_ts) else 'keep'
+            return {
+                'symbol':             symbol,
+                'action':             action,
+                'data':               {'ts': cache_ts},
+                'is_trigger_met':     False,
+                'is_watchlist_eligible': True,
+                'entry_price':        0.0,
+                'stop_loss':          0.0,
+                'trigger_ts':         0,
+                'precision':          precision,
+                'c1_date':            l1_date_str,
+                'c2_date':            l2_date_str,
+                'scan_state':         'l2_waiting',
+            }
+
+        ohlcv_3h = compose_3h_bars(ohlcv_1h)
+        if not ohlcv_3h or len(ohlcv_3h) < 100:
+            return {'symbol': symbol, 'action': 'remove'}
+
+        df_3h = pd.DataFrame(ohlcv_3h, columns=['ts', 'open', 'high', 'low', 'close', 'vol', 'close_ts'])
+        df_3h['sma_100'] = df_3h['close'].rolling(window=100).mean()
+        df_3h_closed = df_3h[df_3h['close_ts'] <= now_utc].reset_index(drop=True)
+
+        # 僅檢視 L2 收盤後開始的 3H K棒
+        df_3h_after_l2 = df_3h_closed[df_3h_closed['ts'] > l2_close_ts].reset_index(drop=True)
+
+        # 3H 狀態機：0=找C1, 1=C1成立找C2, 2=C2觸發在交易中
+        l3_state   = 0
         entry_price = 0.0
-        stop_loss = 0.0
-        trigger_ts = 0
+        stop_loss   = 0.0
+        trigger_ts  = 0
+        c2_date_str = l2_date_str  # fallback
 
-        if state == 3:
-            is_trigger_met = True
-            entry_price = float(target_info_c2['close'])
-            stop_loss = float(target_info_c2['low'])
-            trigger_ts = int(target_info_c2['ts'])
+        for _, row in df_3h_after_l2.iterrows():
+            if pd.isna(row['sma_100']):
+                continue
+            if l3_state == 0:
+                if row['close'] < row['sma_100']:
+                    l3_state = 1
+            elif l3_state == 1:
+                if row['close'] > row['sma_100']:
+                    l3_state   = 2
+                    entry_price = float(row['close'])
+                    stop_loss   = float(row['low'])
+                    trigger_ts  = int(row['ts'])
+                    c2_date_str = pd.to_datetime(row['ts'], unit='ms', utc=True).strftime('%Y-%m-%d')
+            elif l3_state == 2:
+                # 碰到止損 → 重置回找 C1，L1/L2 狀態保留
+                if row['low'] <= stop_loss:
+                    l3_state    = 0
+                    entry_price = 0.0
+                    stop_loss   = 0.0
+                    trigger_ts  = 0
+                    c2_date_str = l2_date_str
 
-        c1_date_str = pd.to_datetime(target_info_c1['dt_str']).strftime('%Y-%m-%d') if target_info_c1 else "未知"
-        c2_date_str = pd.to_datetime(target_info_c2['dt_str']).strftime('%Y-%m-%d') if target_info_c2 else "未知"
-        gap_date_str = "省略"
+        is_trigger_met = (l3_state == 2)
+        scan_state_map = {0: 'l3_waiting', 1: 'l3_c1_waiting', 2: 'triggered'}
+        scan_state     = scan_state_map.get(l3_state, 'l3_waiting')
+
+        cache_ts = trigger_ts if is_trigger_met else l2_close_ts
+        action   = 'update' if (not cached_info or cached_info.get('ts') != cache_ts) else 'keep'
 
         return {
-            'symbol': symbol,
-            'action': action,
-            'data': target_info,
-            'is_trigger_met': is_trigger_met,
-            'is_watchlist_eligible': is_watchlist_eligible,
-            'entry_price': entry_price,
-            'stop_loss': stop_loss,
-            'trigger_ts': trigger_ts,
-            'precision': precision,
-            'd1_date': gap_date_str,
-            'c1_date': c1_date_str,
-            'c2_date': c2_date_str
+            'symbol':             symbol,
+            'action':             action,
+            'data':               {'ts': cache_ts},
+            'is_trigger_met':     is_trigger_met,
+            'is_watchlist_eligible': True,
+            'entry_price':        entry_price,
+            'stop_loss':          stop_loss,
+            'trigger_ts':         trigger_ts,
+            'precision':          precision,
+            'c1_date':            l1_date_str,
+            'c2_date':            c2_date_str,
+            'scan_state':         scan_state,
         }
 
     except Exception as e:
         logger.warning(f"掃描異常 ({symbol}): {type(e).__name__}: {e}")
         return None
+
 
 # ============================================================================
 # 訊息推送模組
@@ -1502,10 +1397,6 @@ def send_grouped_message(item_list, title):
             base = get_base_coin(item['symbol'])
             if item.get('missed'):
                 coin_strs.append(f"{base} (未上車)")
-            elif 'protect_sl' in item:
-                psl = item['protect_sl']
-                psl_str = f"{int(psl)}" if isinstance(psl, float) and psl.is_integer() else f"{psl}"
-                coin_strs.append(f"{base} (保護止損：{psl_str})")
             else:
                 coin_strs.append(base)
         coins = " · ".join(coin_strs)
@@ -1529,35 +1420,11 @@ def send_triggered_message(item, default_loss):
 
     msg = (
         f"💎 <b>交易對:</b> {display_symbol}\n\n"
-        f"📅 <b>條件一日期:</b> <code>{c1_d}</code>\n"
-        f"📅 <b>條件二日期:</b> <code>{c2_d}</code>\n"
+        f"📅 <b>L1 (18日) 日期:</b> <code>{c1_d}</code>\n"
+        f"📅 <b>L3 C2 (3H) 日期:</b> <code>{c2_d}</code>\n"
         f"📍 <b>進場價格:</b> <code>{entry:.{precision}f}</code>\n"
         f"🛡️ <b>止損價格:</b> <code>{sl:.{precision}f}</code>\n"
         f"💰 <b>倉位價值:</b> <code>{position_value:.2f} USDT</code>"
-    )
-    send_telegram_message(msg)
-
-def send_holding_trigger_message(item, default_loss, protect_sl):
-    """持倉中偵測到加倉訊號，顯示加倉計算資訊"""
-    display_symbol = get_base_coin(item['symbol'])
-    precision = item['precision']
-    entry = item['entry_price']
-    c1_d = item.get('c1_date', '未知')
-    c2_d = item.get('c2_date', '未知')
-
-    half_loss = default_loss / 2
-    risk = abs(entry - protect_sl)
-    position_value = (half_loss / risk) * entry if risk > 0 else 0
-
-    msg = (
-        f"<b>📈 [持倉中] 加倉訊號</b>\n\n"
-        f"💎 <b>交易對:</b> {display_symbol}\n\n"
-        f"📅 <b>條件一日期:</b> <code>{c1_d}</code>\n"
-        f"📅 <b>條件二日期:</b> <code>{c2_d}</code>\n"
-        f"📍 <b>進場價格:</b> <code>{entry:.{precision}f}</code>\n"
-        f"🛡️ <b>保護止損:</b> <code>{protect_sl:.{precision}f}</code>\n"
-        f"💰 <b>加倉價值:</b> <code>{position_value:.2f} USDT</code>\n"
-        f"💵 <b>風險金額:</b> <code>{half_loss:.1f} USDT</code>"
     )
     send_telegram_message(msg)
 
@@ -1801,114 +1668,10 @@ async def run_scan():
 
         # 下單後重新載入 active_signals，避免用掃描開始時的舊快照覆蓋 place_order 新寫入的訊號
         signals = load_active_signals()
-
-        # === 處理持倉保護止損 (持久化 + 實際更新 SL 單) ===
-        if holding_items and BITGET_API_KEY:
-            for item in holding_items:
-                sym = item['symbol']
-                try:
-                    entry_price = 0
-                    entry_time = 0
-                    matched_sig = None
-                    for slist in signals.values():
-                        for s in slist:
-                            if s['symbol'] == sym and s['status'] == 'active':
-                                entry_price = float(s['entry_price'])
-                                entry_time = int(s.get('timestamp', 0))
-                                matched_sig = s
-                                break
-                    if entry_price > 0 and matched_sig:
-                        current_sl = float(matched_sig['sl_price'])
-                        batch_1d = await ex.fetch_ohlcv(sym, '1d', limit=30)
-                        batch = compose_3d_bars(batch_1d)
-                        if batch:
-                            df_3d = pd.DataFrame(batch, columns=['ts', 'open', 'high', 'low', 'close', 'vol', 'close_ts'])
-                            now_utc_3d = int(time.time() * 1000)
-                            closed_3d = df_3d[df_3d['close_ts'] <= now_utc_3d]
-                            original_sl = float(matched_sig.get('original_sl_price', 0))
-                            candidate_sl = original_sl
-                            
-                            for idx in range(1, len(closed_3d)):
-                                curr_b = closed_3d.iloc[idx]
-                                prev_b = closed_3d.iloc[idx-1]
-                                if curr_b['close_ts'] > entry_time:
-                                    prev_body_high = max(prev_b['open'], prev_b['close'])
-                                    if curr_b['close'] > prev_body_high and curr_b['low'] > entry_price:
-                                        if curr_b['low'] > candidate_sl:
-                                            candidate_sl = curr_b['low']
-                            
-                            # 若重新推演出的正確止損不等於當前檔案記錄，強制更新/修復
-                            if candidate_sl != current_sl:
-                                precision = matched_sig.get('precision', 4)
-                                old_sl = current_sl
-                                matched_sig['sl_price'] = candidate_sl
-                                save_active_signals(signals)
-                                
-                                if candidate_sl > old_sl:
-                                    logger.info(f"🛡️ 保護止損上移: {sym} | {old_sl:.{precision}f} → {candidate_sl:.{precision}f}")
-                                    send_telegram_message(
-                                        f"🛡️ <b>保護止損已上移</b>\n\n"
-                                        f"💎 {get_base_coin(sym)}\n"
-                                        f"📍 <code>{old_sl:.{precision}f}</code> → <code>{candidate_sl:.{precision}f}</code>"
-                                    )
-                                else:
-                                    logger.info(f"🔧 保護止損向下修復(修正舊算法殘留錯誤): {sym} | {old_sl:.{precision}f} → {candidate_sl:.{precision}f}")
-                                    
-                            # 只有當保護止損確實大於初始止損時，才在推播中顯示
-                            if candidate_sl > original_sl:
-                                item['protect_sl'] = float(candidate_sl)
-                except Exception as e:
-                    logger.warning(f"獲取保護止損失敗 ({sym}): {e}")
-
         # === 排序與推播 ===
         # 1. 新進場訊號 (Triggered)
         for item in real_new_triggers:
             send_triggered_message(item, default_loss)
-
-        # 1.5 持倉中加倉訊號
-        for item in real_holding_new_triggers:
-            sym = item['symbol']
-            matched_sig = None
-            for slist in signals.values():
-                for s in slist:
-                    if s['symbol'] == sym and s['status'] == 'active':
-                        matched_sig = s
-                        break
-                if matched_sig:
-                    break
-
-            if not matched_sig:
-                continue
-
-            protect_sl = float(matched_sig['sl_price'])
-            original_sl = float(matched_sig.get('original_sl_price', matched_sig['sl_price']))
-
-            # 只有保護止損已上移時才執行加倉 (止損未上移代表風險期，不適合加倉)
-            if protect_sl <= original_sl:
-                logger.info(f"⏭️ 跳過加倉 ({sym}): 保護止損尚未上移")
-                continue
-
-            trigger_ts = item.get('trigger_ts', 0)
-            added_list = matched_sig.get('added_signals', [])
-            if trigger_ts in added_list:
-                logger.info(f"⏭️ 跳過加倉 ({sym}): trigger_ts={trigger_ts} 已處理過")
-                continue
-
-            # 推播加倉訊號資訊
-            send_holding_trigger_message(item, default_loss, protect_sl)
-
-            if BITGET_API_KEY:
-                half_loss = default_loss / 2
-                parent_signal_id = matched_sig['signal_id']
-                order = await place_add_order(
-                    ex, sym, 'LONG', item['entry_price'], protect_sl,
-                    item['precision'], half_loss, trigger_ts, parent_signal_id
-                )
-                if order:
-                    if 'added_signals' not in matched_sig:
-                        matched_sig['added_signals'] = []
-                    matched_sig['added_signals'].append(trigger_ts)
-                    save_active_signals(signals)
             
         # 2. 持倉中 (Holding)
         if holding_items:
