@@ -1222,7 +1222,7 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
         if not ohlcv_1d or len(ohlcv_1d) < 36:
             return None
 
-        ohlcv_1h = await exchange.fetch_ohlcv(symbol, '1h', limit=700)
+        ohlcv_1h = await exchange.fetch_ohlcv(symbol, '1h', limit=1000)
         if not ohlcv_1h or len(ohlcv_1h) < 100:
             return None
 
@@ -1400,10 +1400,10 @@ def send_grouped_message(item_list, title):
     if not item_list:
         return
 
-    # 按 l1_date 分組
+    # 按 c1_date 分組與排序
     date_groups = {}
     for item in item_list:
-        d = item.get('l1_date', '未知日期')
+        d = item.get('c1_date', '未知日期')
         if d not in date_groups:
             date_groups[d] = []
         date_groups[d].append(item)
