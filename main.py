@@ -1316,6 +1316,9 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
                     l2_valid = False
                     c1_valid = False
                     c2_valid = False
+                    l2_valid_ts = 0
+                    l2_date_str = "未知"
+                    c1_date_str = "未知"
                     c2_date_str = "未知"
             
             # 2. 處理 3D (L2) 事件
@@ -1327,6 +1330,9 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
                         l2_valid = False
                         c1_valid = False
                         c2_valid = False
+                        l2_valid_ts = 0
+                        l2_date_str = "未知"
+                        c1_date_str = "未知"
                         c2_date_str = "未知"
                     elif l1_valid and not l2_valid:
                         # 只有在 L1 成立，且目前沒有 L2 時，才尋找新 L2
