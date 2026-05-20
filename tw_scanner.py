@@ -213,9 +213,8 @@ async def fetch_historical_candles(session, symbol):
     now = datetime.now()
     year = now.year
     
-    # 為了能計算日K線的 100MA (需要至少 100 根 1D 棒)，在此獲取過去 3 年的歷史日線
+    # 獲取 2 年歷史以確保狀態演進有足夠長度，並優化為 2 次請求以減輕富果 API 頻率限制
     ranges = [
-        (f"{year - 2}-01-01", f"{year - 2}-12-31"),
         (f"{year - 1}-01-01", f"{year - 1}-12-31"),
         (f"{year}-01-01", now.strftime("%Y-%m-%d"))
     ]
