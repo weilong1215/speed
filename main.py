@@ -964,9 +964,12 @@ async def monitor_positions(exchange):
                                         last_close_time = int(last_closed['close_ts'])
                                         
                                         if last_close_time > entry_ts:
-                                            # 如果收盤低於 10MA，或最低價跌破/觸及原止損 (C2_low)
-                                            if last_closed['close'] < last_closed['ma_10'] or last_closed['low'] <= float(sig['original_sl_price']):
-                                                logger.info(f"🚫 淘汰條件已成立 (跌破10MA或最低價) ({symbol})，撤銷未成交單 {signal_id}")
+                                            # 僅判斷收盤價是否跌破 10MA，避免 3D K 棒歷史極值誤觸止損
+                                            c_close = float(last_closed['close'])
+                                            c_ma10 = float(last_closed['ma_10'])
+                                            if c_close < c_ma10:
+                                                revoke_reason = f"3D線收盤 ({c_close:.4f}) 跌破 10MA ({c_ma10:.4f})"
+                                                logger.info(f"🚫 淘汰條件已成立 [{revoke_reason}] ({symbol})，撤銷未成交單 {signal_id}")
                                                 entry_orders = [o for o in open_orders if str(o.get('clientOrderId') or o.get('info', {}).get('clientOid') or "") == str(signal_id)]
                                                 for eo in entry_orders:
                                                     try:
@@ -977,7 +980,7 @@ async def monitor_positions(exchange):
                                                 send_telegram_message(
                                                     f"<b>🚫 訊號已淘汰 (撤銷進場)</b>\n\n"
                                                     f"💎 <b>交易對:</b> {get_base_coin(symbol)} [{direction}]\n"
-                                                    f"📉 <b>狀態: 3D線跌破 10MA 或止損價，已自動撤銷進場單</b>"
+                                                    f"📉 <b>狀態: {revoke_reason}，已自動撤銷進場單</b>"
                                                 )
                                                 sig['status'] = 'closed'
                                                 continue
