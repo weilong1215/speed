@@ -1217,141 +1217,161 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
 
         now_utc = int(time.time() * 1000)
 
-        # 拉取 1D OHLCV (合成 18D + 3D)
+        # 拉取 1D 與 1H 資料
         ohlcv_1d = await exchange.fetch_ohlcv(symbol, '1d', limit=500)
         if not ohlcv_1d or len(ohlcv_1d) < 36:
             return None
 
-        # ==================== Layer 1: 18日K棒 ====================
+        ohlcv_1h = await exchange.fetch_ohlcv(symbol, '1h', limit=700)
+        if not ohlcv_1h or len(ohlcv_1h) < 100:
+            return None
+
+        # 合成各層級 K 棒
         ohlcv_18d = compose_18d_bars(ohlcv_1d)
-        if not ohlcv_18d or len(ohlcv_18d) < 2:
+        ohlcv_3d = compose_3d_bars(ohlcv_1d)
+        ohlcv_3h = compose_3h_bars(ohlcv_1h)
+
+        if not ohlcv_18d or not ohlcv_3d or not ohlcv_3h:
             return None
 
         df_18d = pd.DataFrame(ohlcv_18d, columns=['ts', 'open', 'high', 'low', 'close', 'vol', 'close_ts'])
         df_18d_closed = df_18d[df_18d['close_ts'] <= now_utc].reset_index(drop=True)
 
-        if len(df_18d_closed) < 2:
-            return None
-
-        # 掃描所有已收盤的 18D K棒，記錄最近一次「當根陽棒，前根陰棒」
-        l1_close_ts = None
-        l1_date_str = None
-        for i in range(1, len(df_18d_closed)):
-            bar  = df_18d_closed.iloc[i]
-            prev = df_18d_closed.iloc[i - 1]
-            if bar['close'] > bar['open'] and prev['close'] < prev['open']:
-                l1_close_ts = int(bar['close_ts'])
-                l1_date_str = pd.to_datetime(bar['ts'], unit='ms', utc=True).strftime('%Y-%m-%d')
-                # 不 break，繼續掃描以取得最近一次符合
-
-        if l1_close_ts is None:
-            return {'symbol': symbol, 'action': 'remove'}
-
-        # ==================== Layer 2: 3日K棒 ====================
-        ohlcv_3d = compose_3d_bars(ohlcv_1d)
-        if not ohlcv_3d or len(ohlcv_3d) < 11:
-            return {'symbol': symbol, 'action': 'remove'}
-
         df_3d = pd.DataFrame(ohlcv_3d, columns=['ts', 'open', 'high', 'low', 'close', 'vol', 'close_ts'])
         df_3d['sma_10'] = df_3d['close'].rolling(window=10).mean()
         df_3d_closed = df_3d[df_3d['close_ts'] <= now_utc].reset_index(drop=True)
-
-        # 僅檢視 L1 收盤後開始的 3D K棒
-        df_3d_after_l1 = df_3d_closed[df_3d_closed['ts'] > l1_close_ts].reset_index(drop=True)
-
-        l2_close_ts = None
-        l2_date_str = None
-        for _, row in df_3d_after_l1.iterrows():
-            if pd.notna(row['sma_10']) and row['close'] > row['open'] and row['close'] > row['sma_10']:
-                l2_close_ts = int(row['close_ts'])
-                l2_date_str = pd.to_datetime(row['ts'], unit='ms', utc=True).strftime('%Y-%m-%d')
-                # 不 break，記錄最近一次符合
-
-        if l2_close_ts is None:
-            # L1 成立，等待 L2
-            cache_ts = l1_close_ts
-            action = 'update' if (not cached_info or cached_info.get('ts') != cache_ts) else 'keep'
-            return {
-                'symbol':             symbol,
-                'action':             action,
-                'data':               {'ts': cache_ts},
-                'is_trigger_met':     False,
-                'is_watchlist_eligible': True,
-                'entry_price':        0.0,
-                'stop_loss':          0.0,
-                'trigger_ts':         0,
-                'precision':          precision,
-                'c1_date':            l1_date_str,
-                'c2_date':            '未知',
-                'scan_state':         'l1_waiting',
-            }
-
-        # ==================== Layer 3: 3小時K棒 ====================
-        ohlcv_1h = await exchange.fetch_ohlcv(symbol, '1h', limit=700)
-        if not ohlcv_1h or len(ohlcv_1h) < 100:
-            cache_ts = l2_close_ts
-            action = 'update' if (not cached_info or cached_info.get('ts') != cache_ts) else 'keep'
-            return {
-                'symbol':             symbol,
-                'action':             action,
-                'data':               {'ts': cache_ts},
-                'is_trigger_met':     False,
-                'is_watchlist_eligible': True,
-                'entry_price':        0.0,
-                'stop_loss':          0.0,
-                'trigger_ts':         0,
-                'precision':          precision,
-                'c1_date':            l1_date_str,
-                'c2_date':            l2_date_str,
-                'scan_state':         'l2_waiting',
-            }
-
-        ohlcv_3h = compose_3h_bars(ohlcv_1h)
-        if not ohlcv_3h or len(ohlcv_3h) < 100:
-            return {'symbol': symbol, 'action': 'remove'}
 
         df_3h = pd.DataFrame(ohlcv_3h, columns=['ts', 'open', 'high', 'low', 'close', 'vol', 'close_ts'])
         df_3h['sma_100'] = df_3h['close'].rolling(window=100).mean()
         df_3h_closed = df_3h[df_3h['close_ts'] <= now_utc].reset_index(drop=True)
 
-        # 僅檢視 L2 收盤後開始的 3H K棒
-        df_3h_after_l2 = df_3h_closed[df_3h_closed['ts'] > l2_close_ts].reset_index(drop=True)
+        # 找出所有 L1 候選點 (ts)
+        l1_candidates = []
+        for i in range(1, len(df_18d_closed)):
+            bar = df_18d_closed.iloc[i]
+            prev = df_18d_closed.iloc[i - 1]
+            if bar['close'] > bar['open'] and prev['close'] < prev['open']:
+                l1_candidates.append({
+                    'close_ts': int(bar['close_ts']),
+                    'date_str': pd.to_datetime(bar['ts'], unit='ms', utc=True).strftime('%Y-%m-%d')
+                })
 
-        # 3H 狀態機：0=找C1, 1=C1成立找C2, 2=C2觸發在交易中
-        l3_state   = 0
+        if not l1_candidates:
+            return {'symbol': symbol, 'action': 'remove'}
+
+        # 找出所有 L2 候選點
+        l2_candidates = []
+        for _, row in df_3d_closed.iterrows():
+            if pd.notna(row['sma_10']) and row['close'] > row['open'] and row['close'] > row['sma_10']:
+                l2_candidates.append({
+                    'close_ts': int(row['close_ts']),
+                    'date_str': pd.to_datetime(row['ts'], unit='ms', utc=True).strftime('%Y-%m-%d')
+                })
+
+        # =========================================================
+        # 時間推進狀態機：從舊往新找，舊的沒失效就不找新的
+        # =========================================================
+        current_time = 0
+        final_state = 'l1_waiting'
+        is_trigger_met = False
+        
+        l1_date_str = "未知"
+        l2_date_str = "未知"
+        c1_date_str = "未知"
+        c2_date_str = "未知"
         entry_price = 0.0
-        stop_loss   = 0.0
-        trigger_ts  = 0
-        c2_date_str = l2_date_str  # fallback
+        stop_loss = 0.0
+        trigger_ts = 0
 
-        for _, row in df_3h_after_l2.iterrows():
-            if pd.isna(row['sma_100']):
-                continue
-            if l3_state == 0:
-                if row['close'] < row['sma_100']:
-                    l3_state = 1
-            elif l3_state == 1:
+        while True:
+            # 1. 找下一個 L1
+            next_l1 = None
+            for c in l1_candidates:
+                if c['close_ts'] > current_time:
+                    next_l1 = c
+                    break
+            
+            if not next_l1:
+                break # 找不到新的 L1，結束迴圈
+                
+            l1_date_str = next_l1['date_str']
+            final_state = 'l2_waiting'
+            
+            # 2. 找下一個 L2
+            next_l2 = None
+            for c in l2_candidates:
+                if c['close_ts'] > next_l1['close_ts']:
+                    next_l2 = c
+                    break
+                    
+            if not next_l2:
+                break # 找不到 L2，結束
+                
+            l2_date_str = next_l2['date_str']
+            final_state = 'l3_c1_waiting'
+            
+            # 3. 找 C1
+            c1_idx = -1
+            for i, row in df_3h_closed.iterrows():
+                if row['close_ts'] > next_l2['close_ts'] and pd.notna(row['sma_100']):
+                    if row['close'] < row['sma_100']:
+                        c1_idx = i
+                        c1_date_str = pd.to_datetime(row['ts'], unit='ms', utc=True).strftime('%Y-%m-%d %H:%M:%S')
+                        break
+                        
+            if c1_idx == -1:
+                break # 找不到 C1
+                
+            final_state = 'l3_c2_waiting'
+            
+            # 4. 找 C2
+            c2_idx = -1
+            for i in range(c1_idx + 1, len(df_3h_closed)):
+                row = df_3h_closed.iloc[i]
                 if row['close'] > row['sma_100']:
-                    l3_state   = 2
+                    c2_idx = i
+                    c2_date_str = pd.to_datetime(row['ts'], unit='ms', utc=True).strftime('%Y-%m-%d %H:%M:%S')
                     entry_price = float(row['close'])
-                    stop_loss   = float(row['low'])
-                    trigger_ts  = int(row['ts'])
-                    c2_date_str = pd.to_datetime(row['ts'], unit='ms', utc=True).strftime('%Y-%m-%d')
-            elif l3_state == 2:
-                # 碰到止損 → 重置回找 C1，L1/L2 狀態保留
+                    stop_loss = float(row['low'])
+                    trigger_ts = int(row['ts'])
+                    break
+                    
+            if c2_idx == -1:
+                break # 找不到 C2
+                
+            final_state = 'triggered'
+            is_trigger_met = True
+            
+            # 5. 監控止損 (觸發後，若跌破止損，則舊訊號失效，推進 current_time)
+            sl_hit = False
+            for i in range(c2_idx + 1, len(df_3h_closed)):
+                row = df_3h_closed.iloc[i]
                 if row['low'] <= stop_loss:
-                    l3_state    = 0
+                    sl_hit = True
+                    current_time = int(row['close_ts']) # 止損失效，推進時間重新尋找 L1
+                    
+                    is_trigger_met = False
+                    final_state = 'l1_waiting'
+                    l1_date_str = "未知"
+                    l2_date_str = "未知"
+                    c1_date_str = "未知"
+                    c2_date_str = "未知"
                     entry_price = 0.0
-                    stop_loss   = 0.0
-                    trigger_ts  = 0
-                    c2_date_str = l2_date_str
+                    stop_loss = 0.0
+                    trigger_ts = 0
+                    break
+                    
+            if not sl_hit:
+                # 舊訊號沒失效！終止搜尋並保留這個有效訊號
+                break
 
-        is_trigger_met = (l3_state == 2)
-        scan_state_map = {0: 'l3_waiting', 1: 'l3_c1_waiting', 2: 'triggered'}
-        scan_state     = scan_state_map.get(l3_state, 'l3_waiting')
+        cache_ts = trigger_ts if is_trigger_met else (next_l1['close_ts'] if 'next_l1' in locals() and next_l1 else 0)
+        action = 'update' if (not cached_info or cached_info.get('ts') != cache_ts) else 'keep'
+        if final_state == 'l1_waiting':
+            action = 'remove'
 
-        cache_ts = trigger_ts if is_trigger_met else l2_close_ts
-        action   = 'update' if (not cached_info or cached_info.get('ts') != cache_ts) else 'keep'
+        if action == 'remove':
+            return {'symbol': symbol, 'action': 'remove'}
 
         return {
             'symbol':             symbol,
@@ -1363,9 +1383,11 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
             'stop_loss':          stop_loss,
             'trigger_ts':         trigger_ts,
             'precision':          precision,
-            'c1_date':            l1_date_str,
+            'c1_date':            c1_date_str,
             'c2_date':            c2_date_str,
-            'scan_state':         scan_state,
+            'l1_date':            l1_date_str,
+            'l2_date':            l2_date_str,
+            'scan_state':         final_state,
         }
 
     except Exception as e:
@@ -1382,10 +1404,10 @@ def send_grouped_message(item_list, title):
     if not item_list:
         return
 
-    # 按 c1_date 分組
+    # 按 l1_date 分組
     date_groups = {}
     for item in item_list:
-        d = item.get('c1_date', '未知日期')
+        d = item.get('l1_date', '未知日期')
         if d not in date_groups:
             date_groups[d] = []
         date_groups[d].append(item)
@@ -1411,6 +1433,8 @@ def send_triggered_message(item, default_loss):
     precision = item['precision']
     entry = item['entry_price']
     sl = item['stop_loss']
+    l1_d = item.get('l1_date', '未知')
+    l2_d = item.get('l2_date', '未知')
     c1_d = item.get('c1_date', '未知')
     c2_d = item.get('c2_date', '未知')
 
@@ -1420,8 +1444,10 @@ def send_triggered_message(item, default_loss):
 
     msg = (
         f"💎 <b>交易對:</b> {display_symbol}\n\n"
-        f"📅 <b>L1 (18日) 日期:</b> <code>{c1_d}</code>\n"
-        f"📅 <b>L3 C2 (3H) 日期:</b> <code>{c2_d}</code>\n"
+        f"📅 <b>L1 (18日) 日期:</b> <code>{l1_d}</code>\n"
+        f"📅 <b>L2 (3日) 日期:</b> <code>{l2_d}</code>\n"
+        f"📅 <b>C1 (3H) 成立時間:</b> <code>{c1_d}</code>\n"
+        f"📅 <b>C2 (3H) 觸發時間:</b> <code>{c2_d}</code>\n"
         f"📍 <b>進場價格:</b> <code>{entry:.{precision}f}</code>\n"
         f"🛡️ <b>止損價格:</b> <code>{sl:.{precision}f}</code>\n"
         f"💰 <b>倉位價值:</b> <code>{position_value:.2f} USDT</code>"
@@ -1605,13 +1631,13 @@ async def run_scan():
                     sym = s['symbol']
                     ts = s.get('timestamp', 0)
                     dt_str = datetime.fromtimestamp(ts/1000).strftime('%Y-%m-%d') if ts > 0 else '持續追蹤'
-                    holding_map[sym] = {'symbol': sym, 'c1_date': dt_str}
+                    holding_map[sym] = {'symbol': sym, 'l1_date': dt_str}
                     
         for p in existing_positions:
             if p['side'].upper() == 'LONG':
                 sym = p['symbol']
                 if sym not in holding_map:
-                    holding_map[sym] = {'symbol': sym, 'c1_date': '外部建倉'}
+                    holding_map[sym] = {'symbol': sym, 'l1_date': '外部建倉'}
 
         holding_items = []
         real_watching = []
