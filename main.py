@@ -964,11 +964,17 @@ async def monitor_positions(exchange):
                                         last_close_time = int(last_closed['close_ts'])
                                         
                                         if last_close_time > entry_ts:
-                                            # 僅判斷收盤價是否跌破 10MA，避免 3D K 棒歷史極值誤觸止損
+                                            # 多空分流判斷 3D 10MA 淘汰條件，避免 3D K 棒歷史極值誤觸止損
                                             c_close = float(last_closed['close'])
                                             c_ma10 = float(last_closed['ma_10'])
-                                            if c_close < c_ma10:
+                                            revoke_reason = None
+                                            if direction == 'LONG' and c_close < c_ma10:
+                                                # 多單：收盤跌破 10MA，趨勢轉弱，淘汰訊號
                                                 revoke_reason = f"3D線收盤 ({c_close:.4f}) 跌破 10MA ({c_ma10:.4f})"
+                                            elif direction == 'SHORT' and c_close > c_ma10:
+                                                # 空單：收盤漲破 10MA，趨勢轉強，淘汰訊號
+                                                revoke_reason = f"3D線收盤 ({c_close:.4f}) 漲破 10MA ({c_ma10:.4f})"
+                                            if revoke_reason:
                                                 logger.info(f"🚫 淘汰條件已成立 [{revoke_reason}] ({symbol})，撤銷未成交單 {signal_id}")
                                                 entry_orders = [o for o in open_orders if str(o.get('clientOrderId') or o.get('info', {}).get('clientOid') or "") == str(signal_id)]
                                                 for eo in entry_orders:
