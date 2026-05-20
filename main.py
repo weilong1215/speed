@@ -893,7 +893,7 @@ async def monitor_positions(exchange):
                             elif direction == 'SHORT' and current_price <= entry_price - TP_STEP_R * risk:
                                 is_runaway = True
 
-                            # 1. 優先使用 1h K 棒做高低點精細比對
+                            # 使用 1h K 棒做高低點精細比對
                             if not is_runaway and len(ohlcv_1h) > 0:
                                 for candle in ohlcv_1h:
                                     candle_ts = int(candle[0])
@@ -906,18 +906,6 @@ async def monitor_positions(exchange):
                                         elif direction == 'SHORT' and c_low <= entry_price - 5 * risk:
                                             is_runaway = True
                                             break
-                            # 2. 若 1h K 棒缺失，則使用 1d K 棒 fallback 比對
-                            elif not is_runaway and len(ohlcv_1d) > 0:
-                                for candle in ohlcv_1d:
-                                    candle_ts = int(candle[0])
-                                    if candle_ts > entry_ts:
-                                        c_high = float(candle[2])
-                                        c_low = float(candle[3])
-                                        if direction == 'LONG' and c_high >= entry_price + 5 * risk:
-                                            is_runaway = True
-                                            break
-                                        elif direction == 'SHORT' and c_low <= entry_price - 5 * risk:
-                                            is_runaway = True
                                             break
 
                             if is_runaway:
