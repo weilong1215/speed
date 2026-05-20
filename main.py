@@ -1265,7 +1265,9 @@ def send_grouped_message(item_list, title):
 
     date_groups = {}
     for item in filtered_items:
-        d = item.get('c1_date')
+        raw_date = item.get('c1_date', '')
+        # 只截取前 10 碼 YYYY-MM-DD，不要具體時間
+        d = raw_date[:10] if len(raw_date) >= 10 else raw_date
         if d not in date_groups:
             date_groups[d] = []
         date_groups[d].append(item)
