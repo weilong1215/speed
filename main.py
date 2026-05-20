@@ -1245,127 +1245,119 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
         df_3h['sma_100'] = df_3h['close'].rolling(window=100).mean()
         df_3h_closed = df_3h[df_3h['close_ts'] <= now_utc].reset_index(drop=True)
 
-        # 找出所有 L1 候選點 (ts)
-        l1_candidates = []
+        # =========================================================
+        # 單一時間軸事件推進：從舊往新找，即時監控失效條件
+        # =========================================================
+        # 預先計算 L1 的狀態轉換事件
+        l1_events = {}
         for i in range(1, len(df_18d_closed)):
-            bar = df_18d_closed.iloc[i]
-            prev = df_18d_closed.iloc[i - 1]
-            if bar['close'] > bar['open'] and prev['close'] < prev['open']:
-                l1_candidates.append({
-                    'close_ts': int(bar['close_ts']),
-                    'date_str': pd.to_datetime(bar['ts'], unit='ms', utc=True).strftime('%Y-%m-%d')
-                })
+            b = df_18d_closed.iloc[i]
+            p = df_18d_closed.iloc[i - 1]
+            t = int(b['close_ts'])
+            dt_str = pd.to_datetime(b['ts'], unit='ms', utc=True).strftime('%Y-%m-%d')
+            if b['close'] > b['open'] and p['close'] < p['open']:
+                l1_events[t] = {'type': 'found', 'dt_str': dt_str}
+            elif b['close'] < b['open']:
+                l1_events[t] = {'type': 'invalid'}
 
-        if not l1_candidates:
-            return {'symbol': symbol, 'action': 'remove'}
+        # 將 3D 資料轉為 Dict 方便依時間查詢
+        dict_3d = {int(row['close_ts']): row for _, row in df_3d_closed.iterrows()}
 
-        # 找出所有 L2 候選點
-        l2_candidates = []
-        for _, row in df_3d_closed.iterrows():
-            if pd.notna(row['sma_10']) and row['close'] > row['open'] and row['close'] > row['sma_10']:
-                l2_candidates.append({
-                    'close_ts': int(row['close_ts']),
-                    'date_str': pd.to_datetime(row['ts'], unit='ms', utc=True).strftime('%Y-%m-%d')
-                })
-
-        # =========================================================
-        # 時間推進狀態機：從舊往新找，舊的沒失效就不找新的
-        # =========================================================
-        current_time = 0
-        final_state = 'l1_waiting'
-        is_trigger_met = False
+        # 狀態變數
+        l1_valid = False
+        l2_valid = False
+        c1_valid = False
+        c2_valid = False
         
         l1_date_str = "未知"
         l2_date_str = "未知"
         c1_date_str = "未知"
         c2_date_str = "未知"
+        
         entry_price = 0.0
         stop_loss = 0.0
         trigger_ts = 0
 
-        while True:
-            # 1. 找下一個 L1
-            next_l1 = None
-            for c in l1_candidates:
-                if c['close_ts'] > current_time:
-                    next_l1 = c
-                    break
+        # 主迴圈：以 3H (最高解析度) 推進
+        for _, row in df_3h_closed.iterrows():
+            t = int(row['close_ts'])
             
-            if not next_l1:
-                break # 找不到新的 L1，結束迴圈
-                
-            l1_date_str = next_l1['date_str']
-            final_state = 'l2_waiting'
-            
-            # 2. 找下一個 L2
-            next_l2 = None
-            for c in l2_candidates:
-                if c['close_ts'] > next_l1['close_ts']:
-                    next_l2 = c
-                    break
-                    
-            if not next_l2:
-                break # 找不到 L2，結束
-                
-            l2_date_str = next_l2['date_str']
-            final_state = 'l3_c1_waiting'
-            
-            # 3. 找 C1
-            c1_idx = -1
-            for i, row in df_3h_closed.iterrows():
-                if row['close_ts'] > next_l2['close_ts'] and pd.notna(row['sma_100']):
-                    if row['close'] < row['sma_100']:
-                        c1_idx = i
-                        c1_date_str = pd.to_datetime(row['ts'], unit='ms', utc=True).strftime('%Y-%m-%d %H:%M:%S')
-                        break
-                        
-            if c1_idx == -1:
-                break # 找不到 C1
-                
-            final_state = 'l3_c2_waiting'
-            
-            # 4. 找 C2
-            c2_idx = -1
-            for i in range(c1_idx + 1, len(df_3h_closed)):
-                row = df_3h_closed.iloc[i]
-                if row['close'] > row['sma_100']:
-                    c2_idx = i
-                    c2_date_str = pd.to_datetime(row['ts'], unit='ms', utc=True).strftime('%Y-%m-%d %H:%M:%S')
-                    entry_price = float(row['close'])
-                    stop_loss = float(row['low'])
-                    trigger_ts = int(row['ts'])
-                    break
-                    
-            if c2_idx == -1:
-                break # 找不到 C2
-                
-            final_state = 'triggered'
-            is_trigger_met = True
-            
-            # 5. 監控止損 (觸發後，若跌破止損，則舊訊號失效，推進 current_time)
-            sl_hit = False
-            for i in range(c2_idx + 1, len(df_3h_closed)):
-                row = df_3h_closed.iloc[i]
-                if row['low'] <= stop_loss:
-                    sl_hit = True
-                    current_time = int(row['close_ts']) # 止損失效，推進時間重新尋找 L1
-                    
-                    is_trigger_met = False
-                    final_state = 'l1_waiting'
-                    l1_date_str = "未知"
+            # 1. 處理 18D (L1) 事件
+            if t in l1_events:
+                evt = l1_events[t]
+                if evt['type'] == 'found':
+                    l1_valid = True
+                    l1_date_str = evt['dt_str']
+                    # 新 L1 出現，重置 L2 與 C1
+                    l2_valid = False
+                    c1_valid = False
                     l2_date_str = "未知"
                     c1_date_str = "未知"
+                elif evt['type'] == 'invalid':
+                    l1_valid = False
+                    l2_valid = False
+                    c1_valid = False
+            
+            # 2. 處理 3D (L2) 事件
+            if t in dict_3d:
+                b3d = dict_3d[t]
+                if pd.notna(b3d['sma_10']):
+                    if b3d['close'] < b3d['sma_10']:
+                        # 跌破 10MA，L2 失效，連帶 C1 也失效
+                        l2_valid = False
+                        c1_valid = False
+                    elif l1_valid and not l2_valid:
+                        # 只有在 L1 成立，且目前沒有 L2 時，才尋找新 L2
+                        if b3d['close'] > b3d['open'] and b3d['close'] > b3d['sma_10']:
+                            l2_valid = True
+                            l2_date_str = pd.to_datetime(b3d['ts'], unit='ms', utc=True).strftime('%Y-%m-%d')
+                            c1_valid = False
+                            c1_date_str = "未知"
+                            
+            # 3. 處理 3H (L3) 事件
+            if pd.isna(row['sma_100']):
+                continue
+                
+            if c2_valid:
+                # [持倉中] 只監控止損。背景的 L1/L2 失效不會中斷當前持倉。
+                if row['low'] <= stop_loss:
+                    c2_valid = False
+                    # 跌破止損後，若背景 L1 與 L2 依然有效，就只會退回尋找 C1
+                    c1_valid = False 
+                    c1_date_str = "未知"
                     c2_date_str = "未知"
-                    entry_price = 0.0
-                    stop_loss = 0.0
-                    trigger_ts = 0
-                    break
-                    
-            if not sl_hit:
-                # 舊訊號沒失效！終止搜尋並保留這個有效訊號
-                break
+            else:
+                # [非持倉]
+                if l2_valid:
+                    if not c1_valid:
+                        # 尋找 C1
+                        if row['close'] < row['sma_100']:
+                            c1_valid = True
+                            c1_date_str = pd.to_datetime(row['ts'], unit='ms', utc=True).strftime('%Y-%m-%d %H:%M:%S')
+                    else:
+                        # 尋找 C2
+                        if row['close'] > row['sma_100']:
+                            c2_valid = True
+                            c2_date_str = pd.to_datetime(row['ts'], unit='ms', utc=True).strftime('%Y-%m-%d %H:%M:%S')
+                            entry_price = float(row['close'])
+                            stop_loss = float(row['low'])
+                            trigger_ts = int(row['ts'])
 
-        cache_ts = trigger_ts if is_trigger_met else (next_l1['close_ts'] if 'next_l1' in locals() and next_l1 else 0)
+        # 迴圈結束，判定最終狀態
+        is_trigger_met = c2_valid
+        if is_trigger_met:
+            final_state = 'triggered'
+        elif c1_valid:
+            final_state = 'l3_c2_waiting'
+        elif l2_valid:
+            final_state = 'l3_c1_waiting'
+        elif l1_valid:
+            final_state = 'l2_waiting'
+        else:
+            final_state = 'l1_waiting'
+
+        # 根據最終狀態決定是否保留或通知
+        cache_ts = trigger_ts if is_trigger_met else (list(l1_events.keys())[-1] if l1_events else 0)
         action = 'update' if (not cached_info or cached_info.get('ts') != cache_ts) else 'keep'
         if final_state == 'l1_waiting':
             action = 'remove'
