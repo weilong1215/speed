@@ -46,6 +46,7 @@ if sys.stdout.encoding != 'utf-8':
 TG_BOT_TOKEN = os.getenv("TG_BOT_TOKEN", "")
 TG_CHAT_ID = os.getenv("TG_CHAT_ID", "")
 
+# 優先讀取 API_SECRET & API_PASSWORD 格式以防大小寫解析錯誤
 BITGET_API_KEY = os.getenv("BITGET_API_KEY", "")
 BITGET_SECRET_KEY = os.getenv("BITGET_API_SECRET", "") or os.getenv("BITGET_SECRET_KEY", "")
 BITGET_PASSWORD = os.getenv("BITGET_API_PASSWORD", "") or os.getenv("BITGET_PASSWORD", "")
@@ -53,7 +54,6 @@ BITGET_PASSWORD = os.getenv("BITGET_API_PASSWORD", "") or os.getenv("BITGET_PASS
 # 無限階梯 TP：每 5R 平掉剩餘倉位的 20%
 TP_STEP_R = 5
 TP_CLOSE_PCT = 0.20
-
 
 logger.info(f"✅ 系統配置檢查: TG_TOKEN={'已設定' if TG_BOT_TOKEN else '未設定'}, TG_CHAT_ID={'已設定' if TG_CHAT_ID else '未設定'}")
 logger.info(f"✅ 交易所配置檢查: API_KEY={'已設定' if BITGET_API_KEY else '未設定'}")
@@ -381,7 +381,6 @@ async def place_order(exchange, symbol, direction, entry, sl, precision, fixed_l
                 available = 0.0
                 try:
                     raw_info = balance.get('info', {})
-                    # Debug: 輸出 info 結構供排查
                     if isinstance(raw_info, dict):
                         logger.debug(f"  balance info keys: {list(raw_info.keys())}")
                         info_data = raw_info.get('data', [])
@@ -390,7 +389,6 @@ async def place_order(exchange, symbol, direction, entry, sl, precision, fixed_l
                     else:
                         info_data = []
 
-                    # data 可能是 list 或 dict
                     search_list = info_data if isinstance(info_data, list) else [info_data] if isinstance(info_data, dict) else []
                     for acct in search_list:
                         if not isinstance(acct, dict):
@@ -400,7 +398,6 @@ async def place_order(exchange, symbol, direction, entry, sl, precision, fixed_l
                             logger.info(f"  全倉可用保證金 (crossedMaxAvailable): {available:.2f} USDT")
                             break
 
-                    # 備選：從幣種層級的 info 取值
                     if available <= 0:
                         usdt_info = balance.get('USDT', {}).get('info', {})
                         if isinstance(usdt_info, dict):
@@ -448,13 +445,12 @@ async def place_order(exchange, symbol, direction, entry, sl, precision, fixed_l
                             
                         if is_within_range:
                             logger.warning(f"  限價單 {entry} 遭拒絕 ({e})，但市價 {current_p} 在進場與止損區間內，改以市價單進場！")
-                            # 改以市價單下單，數量不變，風險只會變小
                             order = await exchange.create_order(symbol, 'market', side, qty, None, params=params)
                             entry = current_p  # 更新 entry 為當前市價，確保後續紀錄與停利計算正確
                         else:
-                            raise e # 若不在區間內，拋出給外層的策略降級機制
+                            raise e 
                     except Exception as inner_e:
-                        raise inner_e # 將錯誤拋出給外層
+                        raise inner_e 
 
                 logger.info(f"✅ 下單成功: {symbol} @ {entry} (ID: {signal_id}, Strat: {strategy_name}, Lev: {leverage}x)")
 
@@ -480,7 +476,6 @@ async def place_order(exchange, symbol, direction, entry, sl, precision, fixed_l
 
             except Exception as e:
                 last_error = str(e)
-                # 下單失敗且屬於倉位/槓桿超限類 → 降層重試 (正常降層觸發條件)
                 if any(code in last_error for code in ORDER_RETRYABLE_CODES) or "leverage" in last_error.lower():
                     logger.warning(f"  策略 {strategy_name} ({leverage}x) 下單失敗 (倉位/槓桿超限)，降層至下一策略...")
                     continue
@@ -490,7 +485,6 @@ async def place_order(exchange, symbol, direction, entry, sl, precision, fixed_l
 
         err_msg = last_error or "未知錯誤"
         
-        # 將生硬的錯誤碼轉換為人類易讀的中文原因
         friendly_reason = err_msg
         if "22047" in err_msg:
             friendly_reason = "掛單價格偏離當前市價過大，觸發交易所限價保護"
@@ -519,139 +513,13 @@ async def place_order(exchange, symbol, direction, entry, sl, precision, fixed_l
         logger.error(f"下單執行異常 ({symbol}): {e}")
         return None
 
-
-async def place_add_order(exchange, symbol, direction, entry, sl, precision, fixed_loss_usdt, trigger_ts, parent_signal_id):
-    """
-    加倉下單：純 Limit Order，不附帶任何止盈止損。
-    風險控管完全交由主單的保護止損機制。
-    """
-    if not BITGET_API_KEY: return None
-    try:
-        risk_per_unit = abs(entry - sl)
-        if risk_per_unit == 0: return None
-        qty_risk_ideal = fixed_loss_usdt / risk_per_unit
-
-        leverage_strategies = []
-        try:
-            markets = await exchange.load_markets()
-            market = markets.get(symbol, {})
-            info = market.get('info', {})
-            max_lev = int(info.get('maxLever', info.get('maxLeverage', 0)))
-            if max_lev == 0:
-                max_lev = int(market.get('limits', {}).get('leverage', {}).get('max', 0) or 0)
-            leverage_strategies.append(('MAX', max_lev if max_lev > 0 else 20))
-        except Exception as e:
-            logger.warning(f"  加倉 MAX 獲取最大槓桿失敗: {e}，降級使用 20x")
-            leverage_strategies.append(('MAX', 20))
-
-        leverage_strategies.append(('STABLE', 20))
-        leverage_strategies.append(('FINAL', 10))
-
-        ORDER_RETRYABLE_CODES = ("40762", "40797", "45110", "200029")
-        last_error = None
-
-        for strategy_name, leverage in leverage_strategies:
-            try:
-                try:
-                    await exchange.set_position_mode(True, symbol)
-                    await exchange.set_margin_mode('cross', symbol)
-                except Exception as e:
-                    logger.debug(f"  加倉策略 {strategy_name} 倉位/保證金模式設定略過: {e}")
-
-                try:
-                    await exchange.set_leverage(leverage, symbol)
-                except Exception as e:
-                    err_str = str(e)
-                    logger.warning(f"  加倉策略 {strategy_name} ({leverage}x) set_leverage 失敗: {err_str}")
-                    last_error = err_str
-                    if any(code in err_str for code in ORDER_RETRYABLE_CODES) or "leverage" in err_str.lower():
-                        continue
-                    else:
-                        break
-
-                balance = await exchange.fetch_balance()
-                available = 0.0
-                try:
-                    raw_info = balance.get('info', {})
-                    if isinstance(raw_info, dict):
-                        info_data = raw_info.get('data', [])
-                    elif isinstance(raw_info, list):
-                        info_data = raw_info
-                    else:
-                        info_data = []
-                    search_list = info_data if isinstance(info_data, list) else [info_data] if isinstance(info_data, dict) else []
-                    for acct in search_list:
-                        if not isinstance(acct, dict):
-                            continue
-                        if acct.get('marginCoin', '').upper() == 'USDT':
-                            available = float(acct.get('crossedMaxAvailable', 0))
-                            break
-                    if available <= 0:
-                        usdt_info = balance.get('USDT', {}).get('info', {})
-                        if isinstance(usdt_info, dict):
-                            available = float(usdt_info.get('crossedMaxAvailable', 0))
-                except Exception as e:
-                    logger.warning(f"  加倉解析可用保證金異常: {e}")
-                if available <= 0:
-                    available = float(balance.get('USDT', {}).get('free', 0))
-
-                max_q = (available * 0.9) * leverage / entry
-                qty = min(qty_risk_ideal, max_q)
-                qty = float(exchange.amount_to_precision(symbol, qty))
-
-                # 加倉單價值不足 6 USDT → 放棄加倉
-                if qty * entry < 6:
-                    logger.warning(f"  加倉策略 {strategy_name} 價值不足 6 USDT，放棄加倉")
-                    return None
-
-                side = 'buy' if direction == 'LONG' else 'sell'
-                add_oid = f"add_{trigger_ts}_{parent_signal_id}"
-                params = {
-                    'hedged': True, 'holdSide': 'long' if direction == 'LONG' else 'short',
-                    'clientOid': add_oid
-                }
-
-                order = await exchange.create_order(symbol, 'limit', side, qty, entry, params=params)
-                logger.info(f"✅ 加倉下單成功: {symbol} @ {entry} (ID: {add_oid}, Strat: {strategy_name}, Lev: {leverage}x)")
-
-                send_telegram_message(
-                    f"<b>📈 加倉下單 ({leverage}x)</b>\n\n"
-                    f"💎 {get_base_coin(symbol)} [{direction}]\n"
-                    f"🎯 進場: <code>{entry:.{precision}f}</code>\n"
-                    f"🛡️ 保護止損: <code>{sl:.{precision}f}</code>\n"
-                    f"📊 數量: <code>{qty}</code>"
-                )
-                return order
-
-            except Exception as e:
-                last_error = str(e)
-                if any(code in last_error for code in ORDER_RETRYABLE_CODES) or "leverage" in last_error.lower():
-                    logger.warning(f"  加倉策略 {strategy_name} ({leverage}x) 下單失敗，降層...")
-                    continue
-                else:
-                    logger.error(f"  加倉策略 {strategy_name} 不可恢復錯誤: {last_error}")
-                    break
-
-        logger.error(f"❌ 加倉所有策略失效 ({symbol}), 錯誤: {last_error or '未知錯誤'}")
-        send_telegram_message(
-            f"<b>❌ 加倉下單失敗</b>\n\n"
-            f"💎 <b>交易對:</b> {get_base_coin(symbol)} [{direction}]\n"
-            f"⚠️ <b>原因:</b> {last_error or '未知錯誤'}"
-        )
-        return None
-    except Exception as e:
-        logger.error(f"加倉執行異常 ({symbol}): {e}")
-        return None
-
 # ============================================================================
-# 無限階梯止盈管理
+# 計畫委託歷史與停利管理
 # ============================================================================
 
 async def _query_plan_order_status(exchange, symbol, client_oid):
     """查詢 Bitget 歷史計畫委託單狀態 (executed / canceled / not_found / error)。
     使用 V2 API: GET /api/v2/mix/order/orders-plan-history
-    回傳 (planStatus, baseVolume)：planStatus 為 'executed'|'canceled'|'not_found'|'error'，
-    baseVolume 為實際成交的幣量 (僅 executed 時有效)。
     """
     try:
         product_type = 'USDT-FUTURES'
@@ -665,7 +533,6 @@ async def _query_plan_order_status(exchange, symbol, client_oid):
         entries = data.get('entrustedList', [])
         if not entries:
             return 'not_found', 0.0
-        # 取第一筆 (clientOid 應唯一)
         entry = entries[0]
         status = str(entry.get('planStatus', '')).lower()
         base_vol = float(entry.get('baseVolume', 0) or 0)
@@ -676,7 +543,6 @@ async def _query_plan_order_status(exchange, symbol, client_oid):
         else:
             return status, base_vol
     except Exception as e:
-        # 區分 API 錯誤與真正查無此單，避免上層誤判導致重複掛單
         logger.warning(f"查詢計畫委託歷史失敗 ({client_oid}): {e}")
         return 'error', 0.0
 
@@ -690,7 +556,6 @@ async def ensure_next_tp(exchange, symbol, side, sig, size, saved_signals, open_
     try:
         signal_id = sig.get('signal_id', str(sig.get('timestamp')))
         entry = sig['entry_price']
-        # 使用原始止損計算 R，避免保護止損上移後壓縮階梯間距
         original_sl = sig.get('original_sl_price', sig['sl_price'])
         risk = abs(entry - original_sl)
         if risk == 0:
@@ -702,30 +567,24 @@ async def ensure_next_tp(exchange, symbol, side, sig, size, saved_signals, open_
         tp_coid = f"tp{next_tier + 1}_{signal_id}"
         stored_tp_order_id = sig.get('tp_order_id', '')
 
-        # 動態計算當階 TP 的 R 乘數與平倉趴數
-        current_r_mult = 1 if next_tier == 0 else next_tier * 5
-        current_close_pct = 0.50 if next_tier == 0 else 0.20
+        current_r_mult = 5 if next_tier == 0 else (next_tier + 1) * 5
+        current_close_pct = 0.40 if next_tier == 0 else 0.20
 
         # === 情況 1: tp_order_id 有值 → 檢查該筆訂單是否還在掛單簿 ===
         if stored_tp_order_id:
             has_order = any(tp_coid in get_coid(o) for o in open_orders)
 
             if has_order:
-                # TP 單仍在掛單中 → 檢查數量是否因進場單追加成交而需修正
                 tp_order_obj = next((o for o in open_orders if tp_coid in get_coid(o)), None)
                 if tp_order_obj:
                     existing_qty = float(tp_order_obj.get('amount', 0) or tp_order_obj.get('info', {}).get('size', 0) or 0)
                     ideal_qty = float(exchange.amount_to_precision(symbol, size * current_close_pct))
-                    # 倉位變化超過 2% 時撤舊掛新 (例如進場單後續又成交了更多數量)
                     if existing_qty > 0 and ideal_qty > 0 and abs(existing_qty - ideal_qty) / ideal_qty > 0.02:
                         
-                        # 防無限迴圈: 如果目前理想份額不足 6U，代表當初是觸發「微小倉位全平防護」。
-                        # 此時應比對「當前全倉數量」而非「理想數量」。
                         chk_tp_price = entry + current_r_mult * risk if direction == 'LONG' else entry - current_r_mult * risk
                         chk_tp_price = round(chk_tp_price, precision)
                         full_qty = float(exchange.amount_to_precision(symbol, size))
                         
-                        # 若理想份額價值不足 6U，且當前掛單數量約等於全倉數量，則視為合法，不撤單
                         if ideal_qty * chk_tp_price < 6 and full_qty > 0 and abs(existing_qty - full_qty) / full_qty <= 0.02:
                             return
 
@@ -738,19 +597,16 @@ async def ensure_next_tp(exchange, symbol, side, sig, size, saved_signals, open_
                                 return
                         sig['tp_order_id'] = ''
                         save_active_signals(saved_signals)
-                        # 不 return，繼續往下走掛出新的 TP 單
                     else:
-                        return  # 數量一致，等待成交
+                        return 
 
             else:
-                # TP 單已從掛單簿消失 → 查詢交易所歷史狀態確認真實結果
                 plan_status, base_vol = await _query_plan_order_status(exchange, symbol, tp_coid)
 
                 if plan_status == 'executed':
-                    # 真實成交 → 推進至下一階
                     executed_tier = next_tier + 1
-                    executed_r_mult = 1 if next_tier == 0 else next_tier * 5
-                    executed_close_pct = 50 if next_tier == 0 else 20
+                    executed_r_mult = 5 if next_tier == 0 else (next_tier + 1) * 5
+                    executed_close_pct = 40 if next_tier == 0 else 20
 
                     sig['tp_next_tier'] = next_tier + 1
                     sig['tp_order_id'] = ''
@@ -765,33 +621,25 @@ async def ensure_next_tp(exchange, symbol, side, sig, size, saved_signals, open_
                         f"📊 <b>減倉比例:</b> {executed_close_pct}%\n"
                         f"📊 <b>剩餘倉位:</b> {size:.{precision}f}"
                     )
-                    # 繼續往下掛出下一階 TP
 
                 elif plan_status == 'canceled':
-                    # 手動撤銷或過期 → 不推進，清空 order_id 讓下方邏輯補掛同一階
                     logger.info(f"⚠️ TP{next_tier + 1} 被撤銷 ({symbol})，將自動補掛同一階")
                     sig['tp_order_id'] = ''
                     save_active_signals(saved_signals)
-                    # 繼續往下掛出同一階 TP
 
                 elif plan_status == 'error':
-                    # API 查詢本身失敗 → 保留 tp_order_id 不動，下輪重試查詢
                     logger.warning(f"  TP{next_tier + 1} 歷史查詢 API 錯誤，保留追蹤等下輪重試")
                     return
 
                 else:
-                    # not_found：訂單確實不存在 → 清空讓下方補掛，但會經過防重複檢查
                     logger.info(f"  TP{next_tier + 1} 歷史查無此單 ({symbol})，清空追蹤準備補掛")
                     sig['tp_order_id'] = ''
                     save_active_signals(saved_signals)
-                    # 繼續往下走掛單，但會經過防重複檢查
 
         # === 情況 2: tp_order_id 無值 → 掛出當階 TP 單 ===
-        # 防重複：掛單前掃描 open_orders，若同 clientOid 已存在則跳過
         existing_tp_in_orders = any(tp_coid in get_coid(o) for o in open_orders)
         if existing_tp_in_orders:
             logger.info(f"  TP{next_tier + 1} 已在掛單簿中 ({tp_coid})，跳過重複掛單")
-            # 補回 tp_order_id 追蹤 (可能是之前被誤清空的)
             tp_obj = next((o for o in open_orders if tp_coid in get_coid(o)), None)
             if tp_obj:
                 sig['tp_order_id'] = str(tp_obj.get('id', tp_coid))
@@ -802,9 +650,7 @@ async def ensure_next_tp(exchange, symbol, side, sig, size, saved_signals, open_
         tp_price = round(tp_price, precision)
         tp_qty = float(exchange.amount_to_precision(symbol, size * current_close_pct))
 
-        # 最小名義價值檢查 (使用 tp_price 而非 entry，因為交易所驗證的是觸發時的價值)
         if tp_qty <= 0 or tp_qty * tp_price < 6:
-            # 份額不足 6U → 嘗試 100% 全平 (微小倉位權宜策略)
             full_qty = float(exchange.amount_to_precision(symbol, size))
             if full_qty > 0 and full_qty * tp_price >= 6:
                 tp_qty = full_qty
@@ -823,12 +669,10 @@ async def ensure_next_tp(exchange, symbol, side, sig, size, saved_signals, open_
         logger.info(f"🚀 掛出 TP{next_tier + 1} ({current_r_mult}R): {symbol} @ {tp_price:.{precision}f} | qty: {tp_qty} | ID: {tp_coid}")
         try:
             result = await exchange.create_order(symbol, 'market', order_side, tp_qty, None, params=tp_params)
-            # 記錄交易所回傳的 order_id 供後續狀態追蹤
             sig['tp_order_id'] = str(result.get('id', ''))
         except Exception as e:
             if '40786' in str(e):
                 logger.warning(f"⚠️ TP ID 已存在 ({tp_coid})，視為已掛單。")
-                # clientOid 重複代表已存在，標記 tp_order_id 為 coid 本書作為追蹤依據
                 sig['tp_order_id'] = tp_coid
             else:
                 raise e
@@ -881,9 +725,6 @@ async def monitor_positions(exchange):
                     found_signal = True
                     signal_id = sig.get('signal_id', str(sig.get('timestamp')))
 
-
-
-                    # A. 整理本訊號所屬的止損單
                     my_sl_orders = []
                     sl_price_target = float(sig['sl_price'])
 
@@ -903,19 +744,15 @@ async def monitor_positions(exchange):
                         for dup in my_sl_orders[1:]:
                             await exchange.cancel_order(dup['id'], symbol, params={'stop': True})
 
-                    # B. SL 價格不一致偵測：保護止損上移後，撤銷舊單讓補掛機制用新價格重新掛出
                     if len(my_sl_orders) == 1:
                         existing_trig = float(my_sl_orders[0].get('triggerPrice', 0) or my_sl_orders[0].get('info', {}).get('triggerPrice') or 0)
-                        # 取得 SL 掛單數量
                         sl_order_qty = float(my_sl_orders[0].get('amount', 0) or my_sl_orders[0].get('info', {}).get('size', 0) or 0)
                         need_cancel = False
 
-                        # 價格不一致
                         if abs(existing_trig - sl_price_target) > 1e-8:
                             logger.info(f"🔄 SL 價格不一致 ({symbol}): 掛單={existing_trig} vs 目標={sl_price_target}，撤銷舊單")
                             need_cancel = True
 
-                        # 數量不一致 (TP 成交後倉位縮減，容許 2% 誤差)
                         if not need_cancel and sl_order_qty > 0 and abs(sl_order_qty - size) / size > 0.02:
                             logger.info(f"🔄 SL 數量不一致 ({symbol}): 掛單={sl_order_qty} vs 倉位={size}，撤銷舊單")
                             need_cancel = True
@@ -928,7 +765,6 @@ async def monitor_positions(exchange):
                                     logger.error(f"撤銷舊 SL 失敗: {e}")
                             my_sl_orders = []
 
-                    # C. 確保止損單掛出
                     if not my_sl_orders:
                         logger.info(f"🛡️ 補掛止損單: {symbol} @ {sl_price_target}")
                         try:
@@ -943,7 +779,6 @@ async def monitor_positions(exchange):
                             if '40786' not in str(e):
                                 logger.error(f"掛止損失敗: {e}")
 
-                    # C. 無限階梯 TP 管理
                     await ensure_next_tp(exchange, symbol, side, sig, size, saved_signals, open_orders)
 
             if not found_signal:
@@ -963,10 +798,6 @@ async def monitor_positions(exchange):
                     str(o.get('clientOrderId') or o.get('info', {}).get('clientOid') or "") == str(signal_id)
                     for o in open_orders)
 
-                # ==============================================================
-                # 追高防護：價格已達 TP1 目標 -> 撤銷殘餘未成交進場單
-                # 不論是否已有部分倉位，只要仍有進場掛單就檢查
-                # ==============================================================
                 if has_entry:
                     try:
                         entry_ts = int(sig.get('timestamp', 0))
@@ -979,23 +810,21 @@ async def monitor_positions(exchange):
 
                         if risk > 0:
                             is_runaway = False
-                            # 1. 檢查當前即時市價是否已達 TP1
                             if direction == 'LONG' and current_price >= entry_price + TP_STEP_R * risk:
                                 is_runaway = True
                             elif direction == 'SHORT' and current_price <= entry_price - TP_STEP_R * risk:
                                 is_runaway = True
 
-                            # 2. 檢查條件二成立之後的所有歷史 K 棒 high/low 是否曾達到 TP1
                             if not is_runaway and len(ohlcv_1d) > 0:
                                 for candle in ohlcv_1d:
                                     candle_ts = int(candle[0])
                                     if candle_ts > entry_ts:
                                         c_high = float(candle[2])
                                         c_low = float(candle[3])
-                                        if direction == 'LONG' and c_high >= entry_price + 1 * risk:
+                                        if direction == 'LONG' and c_high >= entry_price + 5 * risk:
                                             is_runaway = True
                                             break
-                                        elif direction == 'SHORT' and c_low <= entry_price - 1 * risk:
+                                        elif direction == 'SHORT' and c_low <= entry_price - 5 * risk:
                                             is_runaway = True
                                             break
 
@@ -1009,7 +838,6 @@ async def monitor_positions(exchange):
                                     except Exception as e:
                                         logger.warning(f"撤銷未成交單失敗 {eo['id']}: {e}")
 
-                                # 有部分倉位時僅撤進場單，訊號保持 active 讓 TP/SL 繼續管理
                                 if has_pos:
                                     send_telegram_message(
                                         f"<b>🏃 價格已達 TP1 (撤銷殘餘進場單)</b>\n\n"
@@ -1017,7 +845,6 @@ async def monitor_positions(exchange):
                                         f"📉 <b>狀態: 部分成交，殘餘進場單已撤銷，倉位繼續由 TP/SL 管理</b>"
                                     )
                                 else:
-                                    # 完全未成交 → 關閉訊號
                                     send_telegram_message(
                                         f"<b>🏃 價格已達 TP1 (錯失進場)</b>\n\n"
                                         f"💎 <b>交易對:</b> {get_base_coin(symbol)} [{direction}]\n"
@@ -1026,13 +853,13 @@ async def monitor_positions(exchange):
                                     sig['status'] = 'closed'
                                 continue
 
-                        # 訊號淘汰條件撤單：若尚未進場，且3D線收盤跌破 10SMA 或最低點低於止損價，則作廢訊號撤單
+                        # 訊號淘汰條件撤單：若尚未進場，且3D線收盤跌破 10MA 或最低點低於止損價，則作廢訊號撤單
                         if not is_runaway:
                             try:
                                 ohlcv_3d = compose_3d_bars(ohlcv_1d)
                                 if ohlcv_3d and len(ohlcv_3d) >= 15:
                                     df_3d = pd.DataFrame(ohlcv_3d, columns=['ts', 'open', 'high', 'low', 'close', 'vol', 'close_ts'])
-                                    df_3d['sma_10'] = df_3d['close'].rolling(window=10).mean()
+                                    df_3d['ma_10'] = df_3d['close'].rolling(window=10).mean()
                                     
                                     now_utc_3d_fl = int(time.time() * 1000)
                                     closed_3d = df_3d[df_3d['close_ts'] <= now_utc_3d_fl]
@@ -1041,11 +868,10 @@ async def monitor_positions(exchange):
                                         last_closed = closed_3d.iloc[-1]
                                         last_close_time = int(last_closed['close_ts'])
                                         
-                                        # 只檢查訊號產生之後的 K 棒
                                         if last_close_time > entry_ts:
-                                            # 如果收盤低於 10SMA，或最低價跌破/觸及原止損 (C2_low)
-                                            if last_closed['close'] < last_closed['sma_10'] or last_closed['low'] <= float(sig['original_sl_price']):
-                                                logger.info(f"🚫 淘汰條件已成立 (跌破10SMA或最低價) ({symbol})，撤銷未成交單 {signal_id}")
+                                            # 如果收盤低於 10MA，或最低價跌破/觸及原止損 (C2_low)
+                                            if last_closed['close'] < last_closed['ma_10'] or last_closed['low'] <= float(sig['original_sl_price']):
+                                                logger.info(f"🚫 淘汰條件已成立 (跌破10MA或最低價) ({symbol})，撤銷未成交單 {signal_id}")
                                                 entry_orders = [o for o in open_orders if str(o.get('clientOrderId') or o.get('info', {}).get('clientOid') or "") == str(signal_id)]
                                                 for eo in entry_orders:
                                                     try:
@@ -1056,60 +882,20 @@ async def monitor_positions(exchange):
                                                 send_telegram_message(
                                                     f"<b>🚫 訊號已淘汰 (撤銷進場)</b>\n\n"
                                                     f"💎 <b>交易對:</b> {get_base_coin(symbol)} [{direction}]\n"
-                                                    f"📉 <b>狀態: 3D線跌破 10SMA 或止損價，已自動撤銷進場單</b>"
+                                                    f"📉 <b>狀態: 3D線跌破 10MA 或止損價，已自動撤銷進場單</b>"
                                                 )
                                                 sig['status'] = 'closed'
                                                 continue
                             except Exception as e:
                                 logger.warning(f"檢查訊號淘汰撤單異常 ({symbol}): {e}")
 
-                        # 保護止損產生檢查：若尚未進場但 3D K 棒已滿足保護止損上移條件，撤銷掛單
-                        if not is_runaway and sig.get('status') == 'active':
-                            try:
-                                ohlcv_1d_3d = ohlcv_1d
-                                composed_3d = compose_3d_bars(ohlcv_1d_3d)
-                                if composed_3d and len(composed_3d) >= 2:
-                                    df_3d = pd.DataFrame(composed_3d, columns=['ts', 'open', 'high', 'low', 'close', 'vol', 'close_ts'])
-                                    now_utc_3d = int(time.time() * 1000)
-                                    closed_3d = df_3d[df_3d['close_ts'] <= now_utc_3d]
-
-                                    has_generated_sl = False
-                                    for idx in range(1, len(closed_3d)):
-                                        curr_b = closed_3d.iloc[idx]
-                                        prev_b = closed_3d.iloc[idx-1]
-                                        if curr_b['close_ts'] > entry_ts:
-                                            prev_body_high = max(prev_b['open'], prev_b['close'])
-                                            if curr_b['close'] > prev_body_high and curr_b['low'] > entry_price:
-                                                has_generated_sl = True
-                                                break
-
-                                    if has_generated_sl:
-                                                logger.info(f"🛡️ 保護止損已產生 ({symbol})，撤銷未成交單 {signal_id}")
-                                                entry_orders = [o for o in open_orders if str(o.get('clientOrderId') or o.get('info', {}).get('clientOid') or "") == str(signal_id)]
-                                                for eo in entry_orders:
-                                                    try:
-                                                        await exchange.cancel_order(eo['id'], symbol)
-                                                        open_orders = [o for o in open_orders if o['id'] != eo['id']]
-                                                    except Exception as e:
-                                                        logger.warning(f"撤銷未成交單失敗 {eo['id']}: {e}")
-                                                send_telegram_message(
-                                                    f"<b>🛡️ 保護止損已產生 (撤銷進場)</b>\n\n"
-                                                    f"💎 <b>交易對:</b> {get_base_coin(symbol)} [{direction}]\n"
-                                                    f"📉 <b>狀態: 掛單未成交前已產生保護止損，已自動撤銷進場單</b>"
-                                                )
-                                                sig['status'] = 'closed'
-                                                continue
-                            except Exception as e:
-                                logger.warning(f"檢查保護止損產生撤單異常 ({symbol}): {e}")
 
                     except Exception as e:
                         logger.warning(f"檢查未成交單價格異常 ({symbol}): {e}")
-                # ==============================================================
 
                 if not has_pos and not has_entry:
                     logger.info(f"🧹 偵測到歸零/孤兒訊號 {sig_key}，開始清理...")
 
-                    # 清理殘留掛單
                     orphan_orders = [o for o in open_orders
                                      if signal_id in str(o.get('clientOrderId') or
                                                          o.get('info', {}).get('clientOid') or "")]
@@ -1136,25 +922,19 @@ async def monitor_positions(exchange):
                 del saved_signals[sig_key]
 
         # 3. 盲目孤兒單清理 (訂單找名單)
-        # Entry 格式: 3d_{signal_id}, TP 格式: tp{n}_{signal_id}, SL 格式: sl_{signal_id}, Add 格式: add_{ts}_{signal_id}
+        # Entry 格式: 3d_{signal_id}, TP 格式: tp{n}_{signal_id}, SL 格式: sl_{signal_id}
         tp_prefix_pattern = re.compile(r'^tp\d+_')
-        add_prefix_pattern = re.compile(r'^add_\d+_')
         all_active_ids = [str(s['signal_id']) for slist in saved_signals.values() for s in slist]
         for oo in open_orders:
             co_id = str(oo.get('clientOrderId') or oo.get('info', {}).get('clientOid') or "")
             is_sl = co_id.startswith("sl_")
             is_tp = bool(tp_prefix_pattern.match(co_id))
             is_entry = co_id.startswith("3d_")
-            is_add = bool(add_prefix_pattern.match(co_id))
-            if is_sl or is_tp or is_entry or is_add:
+            if is_sl or is_tp or is_entry:
                 if is_sl:
                     raw_sig_id = co_id[3:]
                 elif is_tp:
                     raw_sig_id = tp_prefix_pattern.sub('', co_id)
-                elif is_add:
-                    # add_{trigger_ts}_{parent_signal_id} → 取 parent_signal_id
-                    parts = co_id.split('_')
-                    raw_sig_id = '_'.join(parts[2:]) if len(parts) >= 4 else co_id[4:]
                 else:
                     raw_sig_id = co_id
                 if raw_sig_id not in all_active_ids:
@@ -1165,7 +945,7 @@ async def monitor_positions(exchange):
                     if not has_related_pos:
                         logger.warning(f"🕵️ 發現無主孤兒單: {co_id} ({symbol})，執行盲目清理...")
                         try:
-                            is_plan = not is_entry and not is_add
+                            is_plan = not is_entry
                             await exchange.cancel_order(oo['id'], symbol, params={'stop': True} if is_plan else {})
                             open_orders = [o for o in open_orders if o['id'] != oo['id']]
                         except IndexError:
@@ -1173,47 +953,6 @@ async def monitor_positions(exchange):
                         except Exception as e:
                             if "43001" not in str(e) and "does not exist" not in str(e).lower():
                                 logger.error(f"盲目清理失敗 {co_id}: {e}")
-
-        # 4. 未成交加倉單監測 (日K跌破 10SMA → 撤銷)
-        add_orders_by_symbol = {}
-        for oo in open_orders:
-            co_id = str(oo.get('clientOrderId') or oo.get('info', {}).get('clientOid') or "")
-            if co_id.startswith("add_"):
-                sym = oo['symbol']
-                if sym not in add_orders_by_symbol:
-                    add_orders_by_symbol[sym] = []
-                add_orders_by_symbol[sym].append(oo)
-
-        for sym, add_orders in add_orders_by_symbol.items():
-            try:
-                ohlcv_1d_add = await exchange.fetch_ohlcv(sym, '1d', limit=200)
-                ohlcv_3d_add = compose_3d_bars(ohlcv_1d_add)
-                if not ohlcv_3d_add or len(ohlcv_3d_add) < 15:
-                    continue
-                df_3d_add = pd.DataFrame(ohlcv_3d_add, columns=['ts', 'open', 'high', 'low', 'close', 'vol', 'close_ts'])
-                df_3d_add['sma_10'] = df_3d_add['close'].rolling(window=10).mean()
-                now_utc_3d_add = int(time.time() * 1000)
-                closed_3d_add = df_3d_add[df_3d_add['close_ts'] <= now_utc_3d_add]
-
-                if len(closed_3d_add) > 0:
-                    last_bar_add = closed_3d_add.iloc[-1]
-                    if pd.notna(last_bar_add['sma_10']) and last_bar_add['close'] < last_bar_add['sma_10']:
-                        for ao in add_orders:
-                            ao_coid = str(ao.get('clientOrderId') or ao.get('info', {}).get('clientOid') or "")
-                            try:
-                                await exchange.cancel_order(ao['id'], sym)
-                                open_orders = [o for o in open_orders if o['id'] != ao['id']]
-                                logger.info(f"🚫 加倉單已作廢 (跌破10SMA): {ao_coid} ({sym})")
-                            except Exception as e:
-                                if "43001" not in str(e) and "does not exist" not in str(e).lower():
-                                    logger.warning(f"撤銷加倉單失敗 {ao_coid}: {e}")
-                        send_telegram_message(
-                            f"<b>🚫 加倉單已作廢 (跌破10SMA)</b>\n\n"
-                            f"💎 <b>交易對:</b> {get_base_coin(sym)}\n"
-                            f"📉 <b>狀態:</b> 3D線收盤跌破 10SMA，已自動撤銷未成交加倉單"
-                        )
-            except Exception as e:
-                logger.warning(f"監測加倉單異常 ({sym}): {e}")
 
         save_active_signals(saved_signals)
     except Exception as e:
@@ -1251,11 +990,11 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
         df_18d_closed = df_18d[df_18d['close_ts'] <= now_utc].reset_index(drop=True)
 
         df_3d = pd.DataFrame(ohlcv_3d, columns=['ts', 'open', 'high', 'low', 'close', 'vol', 'close_ts'])
-        df_3d['sma_10'] = df_3d['close'].rolling(window=10).mean()
+        df_3d['ma_10'] = df_3d['close'].rolling(window=10).mean()
         df_3d_closed = df_3d[df_3d['close_ts'] <= now_utc].reset_index(drop=True)
 
         df_3h = pd.DataFrame(ohlcv_3h, columns=['ts', 'open', 'high', 'low', 'close', 'vol', 'close_ts'])
-        df_3h['sma_100'] = df_3h['close'].rolling(window=100).mean()
+        df_3h['ma_100'] = df_3h['close'].rolling(window=100).mean()
         df_3h_closed = df_3h[df_3h['close_ts'] <= now_utc].reset_index(drop=True)
 
         # =========================================================
@@ -1305,7 +1044,6 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
                     l1_valid = True
                     l1_valid_ts = t
                     l1_date_str = evt['dt_str']
-                    # 新 L1 出現，重置 L2 與 C1
                     l2_valid = False
                     c1_valid = False
                     l2_valid_ts = 0
@@ -1324,9 +1062,9 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
             # 2. 處理 3D (L2) 事件
             if t in dict_3d:
                 b3d = dict_3d[t]
-                if pd.notna(b3d['sma_10']):
-                    if b3d['close'] < b3d['sma_10']:
-                        # 跌破 10SMA，L2 失效，連帶 C1 與 C2 也失效
+                if pd.notna(b3d['ma_10']):
+                    if b3d['close'] < b3d['ma_10']:
+                        # 跌破 10MA，L2 失效，連帶 C1 與 C2 也失效
                         l2_valid = False
                         c1_valid = False
                         c2_valid = False
@@ -1335,10 +1073,8 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
                         c1_date_str = "未知"
                         c2_date_str = "未知"
                     elif l1_valid and not l2_valid:
-                        # 只有在 L1 成立，且目前沒有 L2 時，才尋找新 L2
-                        # 必須在 L1 成立「之後」的 3D K 棒才能當作 L2 (確保開盤時間 >= L1 收盤時間)
                         if b3d['ts'] >= l1_valid_ts:
-                            if b3d['close'] > b3d['open'] and b3d['close'] > b3d['sma_10']:
+                            if b3d['close'] > b3d['open'] and b3d['close'] > b3d['ma_10']:
                                 l2_valid = True
                                 l2_valid_ts = t
                                 l2_date_str = pd.to_datetime(b3d['ts'], unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d')
@@ -1346,45 +1082,37 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
                                 c1_date_str = "未知"
                             
             # 3. 處理 3H (L3) 事件
-            if pd.isna(row['sma_100']):
+            if pd.isna(row['ma_100']):
                 continue
                 
             if c2_valid:
-                # [持倉中] 只監控止損。背景的 L1/L2 失效不會中斷當前持倉。
                 if row['low'] <= stop_loss:
                     c2_valid = False
-                    # 跌破止損後，若背景 L1 與 L2 依然有效，就只會退回尋找 C1
                     c1_valid = False 
                     c1_date_str = "未知"
                     c2_date_str = "未知"
             else:
-                # [非持倉]
                 if l2_valid:
                     if not c1_valid:
-                        # 尋找 C1 (確保開盤時間 >= L2 收盤時間)
                         if row['ts'] >= l2_valid_ts:
-                            if row['close'] < row['sma_100']:
+                            if row['close'] < row['ma_100']:
                                 c1_valid = True
                                 c1_date_str = pd.to_datetime(row['ts'], unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d %H:%M:%S')
                     else:
-                        # 尋找 C2
-                        if row['close'] > row['sma_100']:
+                        if row['close'] > row['ma_100']:
                             _candidate_entry = float(row['close'])
                             _candidate_sl = float(row['low'])
                             _sl_distance_pct = abs(_candidate_entry - _candidate_sl) / _candidate_entry * 100 if _candidate_entry > 0 else 999
                             if _sl_distance_pct <= 10:
-                                # 止損距離 <= 10%，C2 成立
                                 c2_valid = True
                                 c2_date_str = pd.to_datetime(row['ts'], unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d %H:%M:%S')
                                 entry_price = _candidate_entry
                                 stop_loss = _candidate_sl
                                 trigger_ts = int(row['ts'])
                             else:
-                                # 止損距離 > 10%，放棄此次突破，重置 C1 強制重新洗盤
                                 c1_valid = False
                                 c1_date_str = "未知"
 
-        # 迴圈結束，判定最終狀態
         is_trigger_met = c2_valid
         if is_trigger_met:
             final_state = 'triggered'
@@ -1397,7 +1125,6 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
         else:
             final_state = 'l1_waiting'
 
-        # 根據最終狀態決定是否保留或通知
         cache_ts = trigger_ts if is_trigger_met else (list(l1_events.keys())[-1] if l1_events else 0)
         action = 'update' if (not cached_info or cached_info.get('ts') != cache_ts) else 'keep'
         if final_state == 'l1_waiting':
@@ -1437,12 +1164,10 @@ def send_grouped_message(item_list, title):
     if not item_list:
         return
 
-    # 只顯示 C1 已經成立的幣種，過濾掉還在等 L2 或 C1 的
     filtered_items = [item for item in item_list if item.get('c1_date') not in (None, '未知', '未知日期', '')]
     if not filtered_items:
         return
 
-    # 按 c1_date 分組與排序
     date_groups = {}
     for item in filtered_items:
         d = item.get('c1_date')
@@ -1476,7 +1201,6 @@ def send_triggered_message(item, default_loss):
     c1_d = item.get('c1_date', '未知')
     c2_d = item.get('c2_date', '未知')
 
-    # 倉位價值 = 預設虧損金額 / |(進場價 - 止損價) / 進場價|
     loss_pct = abs((entry - sl) / entry) if entry != 0 else 0
     position_value = default_loss / loss_pct if loss_pct > 0 else 0
 
@@ -1518,7 +1242,6 @@ def send_system_settings_message(config):
 # Telegram 指令處理
 # ============================================================================
 
-# 全域 offset，避免重複處理同一條訊息
 _tg_update_offset = 0
 
 def poll_telegram_commands():
@@ -1545,14 +1268,11 @@ def poll_telegram_commands():
             text = message.get("text", "").strip()
             chat_id = str(message.get("chat", {}).get("id", ""))
 
-            # 僅處理來自目標 chat 的訊息
             if chat_id != str(TG_CHAT_ID) or not text:
                 continue
 
-            # 支援 inline_query_current_chat 自動帶入的 @botname 前綴
             text = re.sub(r'^@\w+\s*', '', text).strip()
 
-            # 處理指令
             reply = ""
             if text.startswith("/set_loss"):
                 parts = text.split()
@@ -1596,8 +1316,6 @@ def poll_telegram_commands():
                 payload = {"chat_id": chat_id, "text": reply, "parse_mode": "HTML"}
                 requests.post(send_url, json=payload, timeout=10)
 
-
-
     except Exception as e:
         logger.warning(f"Telegram 指令輪詢異常: {e}")
 
@@ -1627,7 +1345,6 @@ async def run_scan():
             coins = ["BTC/USDT:USDT", "ETH/USDT:USDT", "SOL/USDT:USDT", "XRP/USDT:USDT", "DOGE/USDT:USDT", "ADA/USDT:USDT"]
             precisions = {s: 4 for s in coins}; precisions.update({"BTC/USDT:USDT": 2, "ETH/USDT:USDT": 2})
 
-        # 一次性拉取持倉列表，供下單前判斷用
         existing_positions = []
         if BITGET_API_KEY:
             try:
@@ -1660,14 +1377,11 @@ async def run_scan():
 
             await asyncio.sleep(0.5)
 
-        # 回寫快取 (此處先寫一次，下方下單後可能再更新 last_trigger_ts)
         save_watchlist(watchlist)
         active_count = len(watchlist)
 
-        # === 分組歸類與下單邏輯 ===
         signals = load_active_signals()
         
-        # 收集當前所有已持倉或有 active 掛單的幣種
         holding_map = {}
         for slist in signals.values():
             for s in slist:
@@ -1698,8 +1412,6 @@ async def run_scan():
             sym = item['symbol']
             
             if sym in holding_items_dict:
-                # 持倉中不修改原始日期
-                # 檢查是否有新訊號觸發（僅通知不下單）
                 if item.get('is_trigger_met'):
                     cached = watchlist.get(sym, {})
                     trigger_ts = item.get('trigger_ts', 0)
@@ -1710,7 +1422,6 @@ async def run_scan():
             elif item.get('is_trigger_met'):
                 cached = watchlist.get(sym, {})
                 trigger_ts = item.get('trigger_ts', 0)
-                # 若同一觸發已處理過，不再進場，視為錯失後持續關注
                 if cached.get('last_trigger_ts') == trigger_ts and trigger_ts > 0:
                     item['missed'] = True
                     real_watching.append(item)
@@ -1721,7 +1432,6 @@ async def run_scan():
 
         holding_items = list(holding_items_dict.values())
 
-        # === 執行下單 ===
         for item in real_new_triggers:
             sym = item['symbol']
             if BITGET_API_KEY:
@@ -1729,25 +1439,19 @@ async def run_scan():
                     ex, sym, 'LONG', item['entry_price'], item['stop_loss'],
                     item['precision'], default_loss, item.get('trigger_ts', 0)
                 )
-                # 若下單成功 (回傳 dict) 或遇到不可恢復之交易所限制 (回傳 FATAL_REJECTED)
-                # 則標記該訊號已處理。若是資金不足或網路異常 (回傳 None)，則保留明天重試機會
                 if order:
                     if sym in watchlist:
                         watchlist[sym]['last_trigger_ts'] = item.get('trigger_ts', 0)
                     save_watchlist(watchlist)
 
-        # 下單後重新載入 active_signals，避免用掃描開始時的舊快照覆蓋 place_order 新寫入的訊號
         signals = load_active_signals()
-        # === 排序與推播 ===
-        # 1. 新進場訊號 (Triggered)
+        
         for item in real_new_triggers:
             send_triggered_message(item, default_loss)
             
-        # 2. 持倉中 (Holding)
         if holding_items:
             send_grouped_message(holding_items, "💼 <b>加密貨幣[持倉中]</b>")
             
-        # 3. 關注中 (Watching)
         if real_watching:
             send_grouped_message(real_watching, "👀 <b>加密貨幣[關注中]</b>")
 
@@ -1757,7 +1461,6 @@ async def run_scan():
         if not real_new_triggers and not holding_items and not real_watching:
             send_telegram_message(f"✅ <b>條件掃描完成</b>\n本次共掃描 {total_coins} 個幣種，無滿足條件標的。\n(當前清單追蹤中: {active_count} 個)")
 
-        # 4. 系統設定 (System Settings)
         if real_new_triggers or holding_items or real_watching or real_holding_new_triggers:
             send_system_settings_message(config)
     finally:
@@ -1777,19 +1480,16 @@ async def scheduler():
     last_hour = -1
     last_tw_day = -1
     
-    # 初始執行：加密貨幣
     try:
         await run_scan()
     except Exception as e:
         logger.error(f"初始掃描異常: {e}")
 
-    # 初始執行：台股 (無條件強制掃描) - 改為背景任務非阻塞
     asyncio.create_task(run_tw_scanner_background())
 
     while True:
         try:
             now = datetime.utcnow()
-            # 加密貨幣每 3 小時 (UTC 0, 3, 6, 9...) 觸發一次掃描
             if now.hour % 3 == 0 and now.minute <= 10 and now.hour != last_hour:
                 try:
                     await run_scan()
@@ -1797,12 +1497,10 @@ async def scheduler():
                     logger.error(f"定時掃描異常: {e}")
                 last_hour = now.hour
 
-            # 台股每日 UTC 06:30~06:40 (台灣時間 14:30) 觸發一次掃描 - 改為背景任務非阻塞
             if now.hour == 6 and now.minute >= 30 and now.minute <= 40 and now.day != last_tw_day:
                 asyncio.create_task(run_tw_scanner_background())
                 last_tw_day = now.day
 
-            # 倉位監控 (每個迴圈週期執行)
             if BITGET_API_KEY:
                 ex = get_exchange()
                 try:
@@ -1813,7 +1511,6 @@ async def scheduler():
                     await ex.close()
 
         except Exception as e:
-            # 頂層防護：確保背景執行緒在任何罕見異常下不會死亡
             logger.critical(f"💥 Scheduler 頂層異常 (已攔截): {e}")
         await asyncio.sleep(60)
 

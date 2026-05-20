@@ -83,7 +83,6 @@ def send_grouped_message(item_list, title):
 def send_triggered_message(item):
     entry_price = item['entry_price']
     stop_loss = item['stop_loss']
-    protect_sl = item.get('protect_sl', 0.0)
     
     tw_loss = load_tw_loss_amount()
     risk_per_share = entry_price - stop_loss
@@ -92,26 +91,22 @@ def send_triggered_message(item):
     msg = (
         f"<b>🚀 台股(持倉中)</b>\n\n"
         f"💎 <b>標的:</b> {item['symbol']} {item['name']}\n"
-        f"📅 <b>條件一日期:</b> <code>{item.get('c1_date', '未知')}</code>\n"
-        f"📅 <b>條件二日期:</b> <code>{item.get('c2_date', '未知')}</code>\n"
+        f"📅 <b>L1 日期:</b> <code>{item.get('l1_date', '未知')}</code>\n"
+        f"📅 <b>L2 日期:</b> <code>{item.get('l2_date', '未知')}</code>\n"
+        f"📅 <b>C1 日期:</b> <code>{item.get('c1_date', '未知')}</code>\n"
+        f"📅 <b>C2 日期:</b> <code>{item.get('c2_date', '未知')}</code>\n"
         f"📍 <b>進場價格:</b> <code>{entry_price:.2f}</code>\n"
         f"🛡️ <b>止損價格:</b> <code>{stop_loss:.2f}</code>\n"
+        f"📊 <b>股數:</b> <code>{shares:,}股</code>"
     )
-    
-    if protect_sl > stop_loss:
-        msg += f"🛡️ <b>保護止損價格:</b> <code>{protect_sl:.2f}</code>\n"
-        
-    msg += f"📊 <b>股數:</b> <code>{shares:,}股</code>"
     send_telegram_message(msg)
 
 # ============================================================================
-# 3D K 棒合成工具 (移植自 main.py)
+# K 棒合成工具 (按營業日順序，移植自加密貨幣架構)
 # ============================================================================
-def compose_3d_bars(ohlcv_1d):
-    if not ohlcv_1d or len(ohlcv_1d) < 3:
+def compose_nd_bars(ohlcv_1d, n):
+    if not ohlcv_1d or len(ohlcv_1d) < n:
         return []
-    
-    from datetime import datetime, timezone
     
     # 按照年份分組
     years_data = {}
@@ -124,24 +119,29 @@ def compose_3d_bars(ohlcv_1d):
         years_data[y].append(bar)
         
     result = []
-    # 每個年份獨立切分，每 3 個營業日合成一根 3D K 棒
+    # 每個年份獨立切分，每 n 個營業日合成一根 nD K 棒
     for y in sorted(years_data.keys()):
         bars_of_year = sorted(years_data[y], key=lambda x: x[0])
-        for i in range(0, len(bars_of_year), 3):
-            bars = bars_of_year[i:i+3]
-            
+        for i in range(0, len(bars_of_year), n):
+            bars = bars_of_year[i:i+n]
             gts = bars[0][0]
             result.append([
-                gts,                         # 以該 3D 棒的第一個營業日作為 K 棒時間
-                bars[0][1],                  # open
-                max(b[2] for b in bars),     # high
-                min(b[3] for b in bars),     # low
-                bars[-1][4],                 # close
-                sum(b[5] for b in bars),     # vol
+                gts,                           # 以該 K 棒的第一個營業日作為時間戳
+                bars[0][1],                    # open
+                max(b[2] for b in bars),       # high
+                min(b[3] for b in bars),       # low
+                bars[-1][4],                   # close
+                sum(b[5] for b in bars),       # vol
                 bars[-1][0] + 24 * 3600 * 1000 # close_ts (最後一根營業日的結束時間)
             ])
             
     return result
+
+def compose_18d_bars(ohlcv_1d):
+    return compose_nd_bars(ohlcv_1d, 18)
+
+def compose_49d_bars(ohlcv_1d):
+    return compose_nd_bars(ohlcv_1d, 49)
 
 # ============================================================================
 # 資料獲取與掃描
@@ -213,8 +213,9 @@ async def fetch_historical_candles(session, symbol):
     now = datetime.now()
     year = now.year
     
-    # Fugle API 有單次請求的時間跨度限制，因此分兩段請求：去年整年 + 今年至今
+    # 為了能計算日K線的 100MA (需要至少 100 根 1D 棒)，在此獲取過去 3 年的歷史日線
     ranges = [
+        (f"{year - 2}-01-01", f"{year - 2}-12-31"),
         (f"{year - 1}-01-01", f"{year - 1}-12-31"),
         (f"{year}-01-01", now.strftime("%Y-%m-%d"))
     ]
@@ -241,7 +242,6 @@ async def fetch_historical_candles(session, symbol):
                         logger.error(f"❌ Fugle API 權限錯誤 (403)，請檢查 API Key 是否有效！")
                         return None
                     elif response.status == 404:
-                        # 404 表示該段期間沒有此股票的資料 (可能尚未上市)，直接跳過不需重試
                         break
                     else:
                         logger.warning(f"⚠️ Fugle API 回應異常 (狀態碼: {response.status}) {symbol} [{from_date_str}]，準備重試...")
@@ -253,13 +253,12 @@ async def fetch_historical_candles(session, symbol):
     if not all_klines:
         return None
         
-    # 確保回傳資料統一為「由新到舊」(Descending)，配合後續 scan_stock 裡的 reversed 邏輯
     all_klines.sort(key=lambda x: x["date"], reverse=True)
     return all_klines
 
 async def scan_stock(session, stock_info, semaphore, current_idx, total):
     async with semaphore:
-        # 防範 Fugle API Rate Limit (歷史行情上限 60/min，因為現在每次掃描分兩段請求，故延長為 2.1s 進行流量整形)
+        # 防範 Fugle API Rate Limit
         await asyncio.sleep(2.1)
         
         symbol = stock_info["symbol"]
@@ -269,10 +268,8 @@ async def scan_stock(session, stock_info, semaphore, current_idx, total):
             logger.info(f"📊 掃描進度: {current_idx}/{total}...")
             
         candles = await fetch_historical_candles(session, symbol)
-        
-        if not candles or len(candles) < 15:
+        if not candles or len(candles) < 150:
             return None
-            
             
         ohlcv_1d = []
         for row in reversed(candles):
@@ -280,122 +277,176 @@ async def scan_stock(session, stock_info, semaphore, current_idx, total):
                 dt = pd.to_datetime(row["date"]).tz_localize(None).replace(tzinfo=timezone.utc)
                 ts = int(dt.timestamp() * 1000)
                 ohlcv_1d.append([ts, float(row["open"]), float(row["high"]), float(row["low"]), float(row["close"]), float(row.get("volume", 0))])
-            except Exception as e:
+            except Exception:
                 continue
                 
-        ohlcv_3d = compose_3d_bars(ohlcv_1d)
-        if not ohlcv_3d or len(ohlcv_3d) < 15:
+        # 合成 K 棒
+        ohlcv_49d = compose_49d_bars(ohlcv_1d)
+        ohlcv_18d = compose_18d_bars(ohlcv_1d)
+        
+        if not ohlcv_49d or not ohlcv_18d:
             return None
             
-        df_3d = pd.DataFrame(ohlcv_3d, columns=['ts', 'open', 'high', 'low', 'close', 'vol', 'close_ts'])
-        df_3d = df_3d.sort_values('ts').drop_duplicates(subset=['ts']).reset_index(drop=True)
-        df_3d['dt'] = pd.to_datetime(df_3d['ts'], unit='ms', utc=True)
+        df_49d = pd.DataFrame(ohlcv_49d, columns=['ts', 'open', 'high', 'low', 'close', 'vol', 'close_ts'])
+        df_49d = df_49d.sort_values('ts').drop_duplicates(subset=['ts']).reset_index(drop=True)
+
+        df_18d = pd.DataFrame(ohlcv_18d, columns=['ts', 'open', 'high', 'low', 'close', 'vol', 'close_ts'])
+        df_18d = df_18d.sort_values('ts').drop_duplicates(subset=['ts']).reset_index(drop=True)
+        df_18d['ma_10'] = df_18d['close'].rolling(window=10).mean()
+
+        # L3 直接使用 1D 棒
+        df_1d = pd.DataFrame(ohlcv_1d, columns=['ts', 'open', 'high', 'low', 'close', 'vol'])
+        df_1d['close_ts'] = df_1d['ts'] + 24 * 3600 * 1000
+        df_1d = df_1d.sort_values('ts').drop_duplicates(subset=['ts']).reset_index(drop=True)
+        df_1d['dt'] = pd.to_datetime(df_1d['ts'], unit='ms', utc=True)
+        df_1d['ma_100'] = df_1d['close'].rolling(window=100).mean()
         
-        # 使用 3D K 棒計算 10MA
-        df_3d['sma_10'] = df_3d['close'].rolling(window=10).mean()
+        now_utc = int(time.time() * 1000)
+        df_49d_closed = df_49d[df_49d['close_ts'] <= now_utc].reset_index(drop=True)
+        df_18d_closed = df_18d[df_18d['close_ts'] <= now_utc].reset_index(drop=True)
+        df_1d_closed = df_1d[df_1d['close_ts'] <= now_utc].reset_index(drop=True)
         
-        target_info_c1 = None
-        target_info_c2 = None
-        state = 0
-        c2_low = 0.0
-        dynamic_sl = 0.0
-        entry_price_scan = 0.0
-        
-        for i in range(10, len(df_3d)):
-            bar = df_3d.iloc[i]
-            prev1 = df_3d.iloc[i-1]
-            prev2 = df_3d.iloc[i-2]
+        if len(df_1d_closed) < 105 or len(df_18d_closed) < 11:
+            return None
             
-            prev1_body_high = max(prev1['open'], prev1['close'])
-            prev2_body_high = max(prev2['open'], prev2['close'])
-            
-            if state == 0:
-                # 條件一：收盤價小於前兩天實體高點 (回檔)，且這三天收盤價均大於 10MA
-                c1_met = (
-                    bar['close'] < prev1_body_high and bar['close'] < prev2_body_high and 
-                    bar['close'] > bar['sma_10'] and prev1['close'] > prev1['sma_10'] and prev2['close'] > prev2['sma_10']
-                )
+        # 1. 處理 49D (L1) 事件
+        l1_events = {}
+        for i in range(1, len(df_49d_closed)):
+            b = df_49d_closed.iloc[i]
+            p = df_49d_closed.iloc[i - 1]
+            t = int(b['close_ts'])
+            dt_str = pd.to_datetime(b['ts'], unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d')
+            if b['close'] > b['open'] and p['close'] < p['open']:
+                l1_events[t] = {'type': 'found', 'dt_str': dt_str}
+            elif b['close'] < b['open']:
+                l1_events[t] = {'type': 'invalid'}
                 
-                if c1_met:
-                    state = 1
-                    target_info_c1 = {
-                        'dt_str': bar['dt'].isoformat(), 'ts': int(bar['ts']),
-                        'close': float(bar['close']), 'high': float(bar['high']), 'low': float(bar['low'])
-                    }
-            elif state == 1:
-                # 等待期：條件一成立後，尋找條件二 (可不連續日期)
-                if bar['close'] < bar['sma_10']:
-                    # 跌破 10MA，條件失效，重新尋找條件一
-                    state = 0
-                    
-                    # 順便檢查今天是否剛好符合新的條件一
-                    c1_met = (
-                        bar['close'] < bar['open'] and prev1['close'] < prev1['open'] and 
-                        bar['close'] < prev1_body_high and bar['close'] < prev2_body_high and 
-                        bar['close'] > bar['sma_10'] and prev1['close'] > prev1['sma_10'] and prev2['close'] > prev2['sma_10']
-                    )
-                    if c1_met:
-                        state = 1
-                        target_info_c1 = {
-                            'dt_str': bar['dt'].isoformat(), 'ts': int(bar['ts']),
-                            'close': float(bar['close']), 'high': float(bar['high']), 'low': float(bar['low'])
-                        }
-                elif bar['close'] > max(prev1_body_high, prev2_body_high) and bar['close'] > bar['sma_10']:
-                    # 條件二成立：收盤大於「前面兩根」的實體高點且大於10MA，止損距離 <= 10%
-                    sl_distance = (bar['close'] - bar['low']) / bar['close'] if bar['close'] > 0 else 1.0
-                    if sl_distance <= 0.10:
-                        state = 3
-                        target_info_c2 = {
-                            'dt_str': bar['dt'].isoformat(), 'ts': int(bar['ts']),
-                            'close': float(bar['close']), 'high': float(bar['high']), 'low': float(bar['low']),
-                            'c1_dt_str': prev2['dt'].isoformat(),
-                            'gap_dt_str': prev1['dt'].isoformat()
-                        }
-                        c2_low = float(bar['low'])
-                        dynamic_sl = c2_low
-                        entry_price_scan = float(bar['close'])
+        dict_18d = {int(row['close_ts']): row for _, row in df_18d_closed.iterrows()}
+        
+        # 狀態變數
+        l1_valid = False
+        l2_valid = False
+        c1_valid = False
+        c2_valid = False
+        
+        l1_valid_ts = 0
+        l2_valid_ts = 0
+        
+        l1_date_str = "未知"
+        l2_date_str = "未知"
+        c1_date_str = "未知"
+        c2_date_str = "未知"
+        
+        entry_price = 0.0
+        stop_loss = 0.0
+        trigger_ts = 0
+
+        # 主迴圈：以 1D (L3) 推進
+        for _, row in df_1d_closed.iterrows():
+            t = int(row['close_ts'])
+            
+            # L1 事件
+            if t in l1_events:
+                evt = l1_events[t]
+                if evt['type'] == 'found':
+                    l1_valid = True
+                    l1_valid_ts = t
+                    l1_date_str = evt['dt_str']
+                    l2_valid = False
+                    c1_valid = False
+                    l2_valid_ts = 0
+                    l2_date_str = "未知"
+                    c1_date_str = "未知"
+                elif evt['type'] == 'invalid':
+                    l1_valid = False
+                    l2_valid = False
+                    c1_valid = False
+                    c2_valid = False
+                    l2_valid_ts = 0
+                    l2_date_str = "未知"
+                    c1_date_str = "未知"
+                    c2_date_str = "未知"
+            
+            # L2 事件
+            if t in dict_18d:
+                b18d = dict_18d[t]
+                if pd.notna(b18d['ma_10']):
+                    if b18d['close'] < b18d['ma_10']:
+                        l2_valid = False
+                        c1_valid = False
+                        c2_valid = False
+                        l2_valid_ts = 0
+                        l2_date_str = "未知"
+                        c1_date_str = "未知"
+                        c2_date_str = "未知"
+                    elif l1_valid and not l2_valid:
+                        if b18d['ts'] >= l1_valid_ts:
+                            if b18d['close'] > b18d['open'] and b18d['close'] > b18d['ma_10']:
+                                l2_valid = True
+                                l2_valid_ts = t
+                                l2_date_str = pd.to_datetime(b18d['ts'], unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d')
+                                c1_valid = False
+                                c1_date_str = "未知"
+                            
+            # L3 事件
+            if pd.isna(row['ma_100']):
+                continue
+                
+            if c2_valid:
+                if row['low'] <= stop_loss:
+                    c2_valid = False
+                    c1_valid = False 
+                    c1_date_str = "未知"
+                    c2_date_str = "未知"
+            else:
+                if l2_valid:
+                    if not c1_valid:
+                        if row['ts'] >= l2_valid_ts:
+                            if row['close'] < row['ma_100']:
+                                c1_valid = True
+                                c1_date_str = pd.to_datetime(row['ts'], unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d')
                     else:
-                        # 止損距離過大，訊號直接失效，重新尋找條件一
-                        state = 0
-                        target_info_c1 = None
-            elif state == 3:
-                # 在主迴圈內更新保護止損：若當前 3D K 棒收盤高於前一根 3D 實體高點且低點大於進場價
-                if bar['close'] > prev1_body_high and bar['low'] > entry_price_scan:
-                    if bar['low'] > dynamic_sl:
-                        dynamic_sl = float(bar['low'])
+                        if row['close'] > row['ma_100']:
+                            _candidate_entry = float(row['close'])
+                            _candidate_sl = float(row['low'])
+                            _sl_distance_pct = abs(_candidate_entry - _candidate_sl) / _candidate_entry * 100 if _candidate_entry > 0 else 999
+                            if _sl_distance_pct <= 10:
+                                c2_valid = True
+                                c2_date_str = pd.to_datetime(row['ts'], unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d')
+                                entry_price = _candidate_entry
+                                stop_loss = _candidate_sl
+                                trigger_ts = int(row['ts'])
+                            else:
+                                c1_valid = False
+                                c1_date_str = "未知"
 
-                # 淘汰條件：最低價跌破動態止損，或收盤跌破 10MA
-                if bar['low'] <= dynamic_sl or bar['close'] < bar['sma_10']:
-                    state = 0
-                    dynamic_sl = 0.0
-                    
-                    # 重新判斷是否立即觸發新的條件一
-                    c1_met = (
-                        bar['close'] < prev1_body_high and bar['close'] < prev2_body_high and 
-                        bar['close'] > bar['sma_10'] and prev1['close'] > prev1['sma_10'] and prev2['close'] > prev2['sma_10']
-                    )
-                    if c1_met:
-                        state = 1
-                        target_info_c1 = {
-                            'dt_str': bar['dt'].isoformat(), 'ts': int(bar['ts']),
-                            'close': float(bar['close']), 'high': float(bar['high']), 'low': float(bar['low'])
-                        }
+        is_trigger_met = c2_valid
+        if is_trigger_met:
+            final_state = 'triggered'
+        elif c1_valid:
+            final_state = 'l3_c2_waiting'
+        elif l2_valid:
+            final_state = 'l3_c1_waiting'
+        elif l1_valid:
+            final_state = 'l2_waiting'
+        else:
+            final_state = 'l1_waiting'
 
-        if state not in [1, 3]:
+        # 僅保留觸發 (triggered) 與 C1 成立在等 C2 (l3_c2_waiting) 的關注標的
+        if final_state not in ['triggered', 'l3_c2_waiting']:
             return None
-
-        is_trigger = (state == 3)
 
         return {
-            'symbol': symbol,
-            'name': name,
-            'is_trigger_met': is_trigger,
-            'entry_price': float(target_info_c2['close']) if is_trigger else 0.0,
-            'stop_loss': float(target_info_c2['low']) if is_trigger else 0.0,
-            'protect_sl': float(dynamic_sl) if is_trigger else 0.0,
-            'd1_date': "省略",
-            'c1_date': pd.to_datetime(target_info_c1['dt_str']).strftime('%Y-%m-%d') if target_info_c1 else "未知",
-            'c2_date': pd.to_datetime(target_info_c2['dt_str']).strftime('%Y-%m-%d') if is_trigger else "未知"
+            'symbol':             symbol,
+            'name':               name,
+            'is_trigger_met':     is_trigger_met,
+            'entry_price':        entry_price,
+            'stop_loss':          stop_loss,
+            'c1_date':            c1_date_str,
+            'c2_date':            c2_date_str,
+            'l1_date':            l1_date_str,
+            'l2_date':            l2_date_str,
+            'scan_state':         final_state
         }
 
 async def main_loop():
@@ -406,7 +457,7 @@ async def main_loop():
 
     logger.info(f"🚀 開始全市場掃描，共 {len(stocks)} 檔標的...")
     
-    # 富果歷史行情 API 限制為 60/min，在此設定為單併發以確保 Traffic Shaping 完全生效
+    # 限制單併發防範富果 API Rate Limit
     semaphore = asyncio.Semaphore(1)
     results = []
     
