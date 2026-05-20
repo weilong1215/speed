@@ -391,7 +391,7 @@ async def place_order(exchange, symbol, direction, entry, sl, precision, fixed_l
                     f"🎯 TP1價格: <code>{tp1_price:.{precision}f}</code>\n\n"
                     f"⚠️ <b>原因:</b> {skip_reason}"
                 )
-                return None
+                return 'skipped'
         except Exception as e:
             logger.warning(f"  下單前 1H K 棒價格監測異常 ({symbol}): {e}，跳過監測直接嘗試下單")
 
@@ -1512,6 +1512,7 @@ async def run_scan():
 
         holding_items = list(holding_items_dict.values())
 
+        real_new_triggers_final = []
         for item in real_new_triggers:
             sym = item['symbol']
             if BITGET_API_KEY:
@@ -1519,10 +1520,21 @@ async def run_scan():
                     ex, sym, 'LONG', item['entry_price'], item['stop_loss'],
                     item['precision'], default_loss, item.get('trigger_ts', 0)
                 )
-                if order:
+                if order == 'skipped':
+                    # 標記為錯失並更新 last_trigger_ts，防止重複下單與警報
                     if sym in watchlist:
                         watchlist[sym]['last_trigger_ts'] = item.get('trigger_ts', 0)
                     save_watchlist(watchlist)
+                    item['missed'] = True
+                    real_watching.append(item)
+                elif order:
+                    if sym in watchlist:
+                        watchlist[sym]['last_trigger_ts'] = item.get('trigger_ts', 0)
+                    save_watchlist(watchlist)
+                    real_new_triggers_final.append(item)
+            else:
+                real_new_triggers_final.append(item)
+        real_new_triggers = real_new_triggers_final
 
         signals = load_active_signals()
         
