@@ -148,19 +148,32 @@ def send_telegram_message(message: str, reply_markup: dict = None) -> bool:
     if not TG_BOT_TOKEN or not TG_CHAT_ID:
         logger.warning("Telegram 配置缺失，跳過通知。")
         return False
+        
+    MAX_LEN = 4000
+    parts = []
+    while len(message) > MAX_LEN:
+        cut_idx = message.rfind('\n', 0, MAX_LEN)
+        if cut_idx == -1: cut_idx = MAX_LEN
+        parts.append(message[:cut_idx])
+        message = message[cut_idx:].lstrip()
+    parts.append(message)
+
     url = f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendMessage"
-    payload = {"chat_id": TG_CHAT_ID, "text": message, "parse_mode": "HTML"}
-    if reply_markup is not None:
-        payload["reply_markup"] = reply_markup
-    try:
-        response = requests.post(url, json=payload, timeout=10)
-        if response.status_code != 200:
-            logger.error(f"Telegram 發送失敗 ({response.status_code}): {response.text}")
-            return False
-        return True
-    except Exception as e:
-        logger.error(f"Telegram 連線異常: {e}")
-        return False
+    success = True
+    for part in parts:
+        payload = {"chat_id": TG_CHAT_ID, "text": part, "parse_mode": "HTML"}
+        if reply_markup is not None:
+            payload["reply_markup"] = reply_markup
+        try:
+            response = requests.post(url, json=payload, timeout=10)
+            if response.status_code != 200:
+                logger.error(f"Telegram 發送失敗 ({response.status_code}): {response.text}")
+                success = False
+        except Exception as e:
+            logger.error(f"Telegram 連線異常: {e}")
+            success = False
+            
+    return success
 
 def get_exchange():
     exchange_config = {
@@ -1409,21 +1422,15 @@ def send_grouped_message(item_list, title):
     if not item_list:
         return
 
+    # 只顯示 C1 已經成立的幣種，過濾掉還在等 L2 或 C1 的
+    filtered_items = [item for item in item_list if item.get('c1_date') not in (None, '未知', '未知日期', '')]
+    if not filtered_items:
+        return
+
     # 按 c1_date 分組與排序
     date_groups = {}
-    for item in item_list:
-        c1 = item.get('c1_date', '未知日期')
-        if c1 == '未知' or c1 == '未知日期':
-            state = item.get('scan_state', '')
-            if state == 'l3_c1_waiting':
-                d = f"⏳ 等待 C1 (L2 於 {item.get('l2_date', '未知')} 成立)"
-            elif state == 'l2_waiting':
-                d = f"⏳ 等待 L2 (L1 於 {item.get('l1_date', '未知')} 成立)"
-            else:
-                d = "⏳ 等待訊號"
-        else:
-            d = c1
-
+    for item in filtered_items:
+        d = item.get('c1_date')
         if d not in date_groups:
             date_groups[d] = []
         date_groups[d].append(item)
