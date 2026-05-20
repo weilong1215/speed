@@ -325,6 +325,45 @@ async def place_order(exchange, symbol, direction, entry, sl, precision, fixed_l
         if risk_per_unit == 0: return None
         qty_risk_ideal = fixed_loss_usdt / risk_per_unit
 
+        # 下單前先監測當前價格是否已達到 TP1 或已達到/跌破止損
+        try:
+            ticker = await exchange.fetch_ticker(symbol)
+            current_price = float(ticker['last'])
+            tp1_price = entry + 5 * risk_per_unit if direction == 'LONG' else entry - 5 * risk_per_unit
+            
+            skip_order = False
+            skip_reason = ""
+            
+            if direction == 'LONG':
+                if current_price >= tp1_price:
+                    skip_order = True
+                    skip_reason = f"當前價格 {current_price:.{precision}f} 已達到/超過 TP1 ({tp1_price:.{precision}f})"
+                elif current_price <= sl:
+                    skip_order = True
+                    skip_reason = f"當前價格 {current_price:.{precision}f} 已達到/跌破 止損價 ({sl:.{precision}f})"
+            else:  # SHORT
+                if current_price <= tp1_price:
+                    skip_order = True
+                    skip_reason = f"當前價格 {current_price:.{precision}f} 已達到/低於 TP1 ({tp1_price:.{precision}f})"
+                elif current_price >= sl:
+                    skip_order = True
+                    skip_reason = f"當前價格 {current_price:.{precision}f} 已達到/突破 止損價 ({sl:.{precision}f})"
+                    
+            if skip_order:
+                logger.warning(f"⚠️ {symbol} 跳過下單: {skip_reason}")
+                send_telegram_message(
+                    f"<b>🚫 跳過自動下單 (已達TP1/止損)</b>\n\n"
+                    f"💎 <b>交易對:</b> {get_base_coin(symbol)} [{direction}]\n"
+                    f"🎯 進場價格: <code>{entry:.{precision}f}</code>\n"
+                    f"🛑 止損價格: <code>{sl:.{precision}f}</code>\n"
+                    f"🎯 TP1價格: <code>{tp1_price:.{precision}f}</code>\n"
+                    f"📍 當前市價: <code>{current_price:.{precision}f}</code>\n\n"
+                    f"⚠️ <b>原因:</b> {skip_reason}"
+                )
+                return None
+        except Exception as e:
+            logger.warning(f"  下單前價格監測異常 ({symbol}): {e}，跳過監測直接嘗試下單")
+
         # 1. 建構槓桿策略列表: MAX (幣種實際最大槓桿) → 20x → 10x
         # 應對 Bitget V2 API 欄位異動，同步檢查 maxLever、maxLeverage 與 limits 結構
         leverage_strategies = []
