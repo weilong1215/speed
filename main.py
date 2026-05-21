@@ -1099,6 +1099,9 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
 
         df_3h = pd.DataFrame(ohlcv_3h, columns=['ts', 'open', 'high', 'low', 'close', 'vol', 'close_ts'])
         df_3h['ma_100'] = df_3h['close'].rolling(window=100).mean()
+        df_3h['ma_20'] = df_3h['close'].rolling(window=20).mean()
+        df_3h['std_20'] = df_3h['close'].rolling(window=20).std()
+        df_3h['bb_lower'] = df_3h['ma_20'] - 2 * df_3h['std_20']
         df_3h_closed = df_3h[df_3h['close_ts'] <= now_utc].reset_index(drop=True)
 
         # =========================================================
@@ -1124,6 +1127,7 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
         l2_valid = False
         c1_valid = False
         c2_valid = False
+        bb_touched = False
         
         l1_valid_ts = 0
         l2_valid_ts = 0
@@ -1158,6 +1162,7 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
                     l2_valid = False
                     c1_valid = False
                     c2_valid = False
+                    bb_touched = False
                     l2_valid_ts = 0
                     l2_date_str = "未知"
                     c1_date_str = "未知"
@@ -1172,6 +1177,7 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
                         l2_valid = False
                         c1_valid = False
                         c2_valid = False
+                        bb_touched = False
                         l2_valid_ts = 0
                         l2_date_str = "未知"
                         c1_date_str = "未知"
@@ -1184,9 +1190,10 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
                                 l2_date_str = pd.to_datetime(b3d['ts'], unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d')
                                 c1_valid = False
                                 c1_date_str = "未知"
+                                bb_touched = False
                             
             # 3. 處理 3H (L3) 事件
-            if pd.isna(row['ma_100']):
+            if pd.isna(row['ma_100']) or pd.isna(row['bb_lower']):
                 continue
                 
             if c2_valid:
@@ -1195,6 +1202,7 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
                     c1_valid = False 
                     c1_date_str = "未知"
                     c2_date_str = "未知"
+                    bb_touched = False
 
             if not c2_valid:
                 if l2_valid:
@@ -1203,8 +1211,18 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
                             if row['close'] < row['ma_100']:
                                 c1_valid = True
                                 c1_date_str = pd.to_datetime(row['ts'], unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d %H:%M:%S')
+                                bb_touched = (row['low'] <= row['bb_lower'])
                     else:
+                        if row['low'] <= row['bb_lower']:
+                            bb_touched = True
+
                         if row['close'] > row['ma_100']:
+                            if not bb_touched:
+                                c1_valid = False
+                                c1_date_str = "未知"
+                                bb_touched = False
+                                continue
+                                
                             _candidate_entry = float(row['close'])
                             _candidate_sl = float(row['low'])
                             _sl_distance_pct = abs(_candidate_entry - _candidate_sl) / _candidate_entry * 100 if _candidate_entry > 0 else 999
@@ -1217,6 +1235,7 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
                             else:
                                 c1_valid = False
                                 c1_date_str = "未知"
+                                bb_touched = False
 
         is_trigger_met = c2_valid
         if is_trigger_met:
