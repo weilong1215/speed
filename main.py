@@ -1495,7 +1495,7 @@ async def run_scan():
                 if s['status'] == 'active':
                     sym = s['symbol']
                     ts = s.get('timestamp', 0)
-                    dt_str = datetime.fromtimestamp(ts/1000).strftime('%Y-%m-%d') if ts > 0 else '持續追蹤'
+                    dt_str = pd.to_datetime(ts, unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d') if ts > 0 else '持續追蹤'
                     holding_map[sym] = {'symbol': sym, 'c1_date': dt_str}
                     
         for p in existing_positions:
