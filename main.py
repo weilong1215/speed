@@ -1496,13 +1496,13 @@ async def run_scan():
                     sym = s['symbol']
                     ts = s.get('timestamp', 0)
                     dt_str = datetime.fromtimestamp(ts/1000).strftime('%Y-%m-%d') if ts > 0 else '持續追蹤'
-                    holding_map[sym] = {'symbol': sym, 'l1_date': dt_str}
+                    holding_map[sym] = {'symbol': sym, 'c1_date': dt_str}
                     
         for p in existing_positions:
             if p['side'].upper() == 'LONG':
                 sym = p['symbol']
                 if sym not in holding_map:
-                    holding_map[sym] = {'symbol': sym, 'l1_date': '外部建倉'}
+                    holding_map[sym] = {'symbol': sym, 'c1_date': '外部建倉'}
 
         holding_items = []
         real_watching = []
