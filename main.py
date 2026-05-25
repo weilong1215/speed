@@ -1257,7 +1257,7 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
 
         cache_ts = trigger_ts if is_trigger_met else l1_valid_ts
         action = 'update' if (not cached_info or cached_info.get('ts') != cache_ts) else 'keep'
-        if final_state == 'l1_waiting':
+        if final_state in ['l1_waiting', 'l2_waiting']:
             action = 'remove'
 
         if action == 'remove':
@@ -1294,13 +1294,15 @@ def send_grouped_message(item_list, title):
     if not item_list:
         return
 
-    filtered_items = [item for item in item_list if item.get('l2_date') not in (None, '未知', '未知日期', '')]
+    filtered_items = [item for item in item_list if item.get('l2_date') not in (None, '未知', '未知日期', '') or item.get('c1_date') not in (None, '未知', '未知日期', '')]
     if not filtered_items:
         return
 
     date_groups = {}
     for item in filtered_items:
-        raw_date = item.get('l2_date', '')
+        raw_date = item.get('l2_date')
+        if not raw_date or raw_date in ('未知', '未知日期', ''):
+            raw_date = item.get('c1_date', '')
         # 只截取前 10 碼 YYYY-MM-DD，不要具體時間
         d = raw_date[:10] if len(raw_date) >= 10 else raw_date
         if d not in date_groups:
