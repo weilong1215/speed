@@ -1101,146 +1101,153 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
         df_3h['ma_20'] = df_3h['close'].rolling(window=20).mean()
         df_3h['std_20'] = df_3h['close'].rolling(window=20).std()
         df_3h['bb_lower'] = df_3h['ma_20'] - 2 * df_3h['std_20']
+        df_3h['bb_upper'] = df_3h['ma_20'] + 2 * df_3h['std_20']
         df_3h_closed = df_3h[df_3h['close_ts'] <= now_utc].reset_index(drop=True)
 
         # =========================================================
         # 單一時間軸事件推進：從舊往新找，即時監控失效條件
         # =========================================================
-        # 預先計算 L1 的狀態轉換事件
-        l1_events = {}
-        for i in range(1, len(df_18d_closed)):
-            b = df_18d_closed.iloc[i]
-            p = df_18d_closed.iloc[i - 1]
-            t = int(b['close_ts'])
-            dt_str = pd.to_datetime(b['ts'], unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d')
-            if b['close'] > b['open'] and p['close'] < p['open']:
-                l1_events[t] = {'type': 'found', 'dt_str': dt_str}
-            elif b['close'] < b['open']:
-                l1_events[t] = {'type': 'invalid'}
-
-        # 將 3D 資料轉為 Dict 方便依時間查詢
+        # 將資料轉為 Dict 方便依時間查詢
+        dict_18d = {int(row['close_ts']): row for _, row in df_18d_closed.iterrows()}
         dict_3d = {int(row['close_ts']): row for _, row in df_3d_closed.iterrows()}
 
         # 狀態變數
         l1_valid = False
-        l2_valid = False
-        c1_valid = False
-        c2_valid = False
-        bb_touched = False
-        
         l1_valid_ts = 0
-        l2_valid_ts = 0
-        
+        l1_high = 0.0
+        l1_low = 0.0
         l1_date_str = "未知"
+
+        l2_valid = False
+        l2_valid_ts = 0
+        l2_direction = ""
         l2_date_str = "未知"
+
+        c1_valid = False
         c1_date_str = "未知"
+        
+        c2_valid = False
         c2_date_str = "未知"
         
         entry_price = 0.0
         stop_loss = 0.0
         trigger_ts = 0
+        
+        history_3h = []
 
         # 主迴圈：以 3H (最高解析度) 推進
         for _, row in df_3h_closed.iterrows():
             t = int(row['close_ts'])
+            history_3h.append(row)
+            if len(history_3h) > 3:
+                history_3h.pop(0)
             
             # 1. 處理 18D (L1) 事件
-            if t in l1_events:
-                evt = l1_events[t]
-                if evt['type'] == 'found':
-                    l1_valid = True
-                    l1_valid_ts = t
-                    l1_date_str = evt['dt_str']
-                    l2_valid = False
-                    c1_valid = False
-                    l2_valid_ts = 0
-                    l2_date_str = "未知"
-                    c1_date_str = "未知"
-                elif evt['type'] == 'invalid':
-                    l1_valid = False
-                    l2_valid = False
-                    c1_valid = False
-                    c2_valid = False
-                    bb_touched = False
-                    l2_valid_ts = 0
-                    l2_date_str = "未知"
-                    c1_date_str = "未知"
-                    c2_date_str = "未知"
-            
-            # 2. 處理 3D (L2) 事件
-            if t in dict_3d:
-                b3d = dict_3d[t]
-                if pd.notna(b3d['ma_10']):
-                    if b3d['close'] < b3d['ma_10']:
-                        # 跌破 10MA，L2 失效，連帶 C1 與 C2 也失效
+            if t in dict_18d:
+                curr_18d = dict_18d[t]
+                idx_18d = df_18d_closed[df_18d_closed['close_ts'] == t].index[0]
+                if idx_18d > 0:
+                    prev_18d = df_18d_closed.iloc[idx_18d - 1]
+                    if curr_18d['high'] >= prev_18d['high'] or curr_18d['low'] <= prev_18d['low']:
+                        l1_valid = True
+                        l1_valid_ts = t
+                        l1_high = float(curr_18d['high'])
+                        l1_low = float(curr_18d['low'])
+                        l1_date_str = pd.to_datetime(curr_18d['ts'], unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d')
                         l2_valid = False
+                        l2_direction = ""
                         c1_valid = False
                         c2_valid = False
-                        bb_touched = False
                         l2_valid_ts = 0
                         l2_date_str = "未知"
                         c1_date_str = "未知"
                         c2_date_str = "未知"
-                    elif l1_valid and not l2_valid:
+
+            # 2. 處理 3D (L2) 事件
+            if t in dict_3d:
+                b3d = dict_3d[t]
+                if pd.notna(b3d['ma_10']):
+                    if l2_valid:
+                        if l2_direction == 'LONG' and b3d['close'] < b3d['ma_10']:
+                            l2_valid = False
+                            c1_valid = False
+                            c2_valid = False
+                        elif l2_direction == 'SHORT' and b3d['close'] > b3d['ma_10']:
+                            l2_valid = False
+                            c1_valid = False
+                            c2_valid = False
+                    elif l1_valid:
                         if b3d['ts'] >= l1_valid_ts:
-                            if b3d['close'] > b3d['open'] and b3d['close'] > b3d['ma_10']:
+                            is_long = (b3d['high'] >= l1_high) and (b3d['close'] > b3d['ma_10'])
+                            is_short = (b3d['low'] <= l1_low) and (b3d['close'] < b3d['ma_10'])
+                            
+                            if is_long and not is_short:
                                 l2_valid = True
                                 l2_valid_ts = t
+                                l2_direction = 'LONG'
                                 l2_date_str = pd.to_datetime(b3d['ts'], unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d')
-                                c1_valid = False
-                                c1_date_str = "未知"
-                                bb_touched = False
-                            
+                            elif is_short and not is_long:
+                                l2_valid = True
+                                l2_valid_ts = t
+                                l2_direction = 'SHORT'
+                                l2_date_str = pd.to_datetime(b3d['ts'], unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d')
+
             # 3. 處理 3H (L3) 事件
             if pd.isna(row['ma_100']) or pd.isna(row['bb_lower']):
                 continue
                 
-            if c2_valid:
-                if row['low'] <= stop_loss:
-                    c2_valid = False
-                    c1_valid = False 
-                    c1_date_str = "未知"
-                    c2_date_str = "未知"
-                    bb_touched = False
+            if len(history_3h) == 3:
+                if c2_valid:
+                    if l2_direction == 'LONG' and row['low'] <= stop_loss:
+                        c2_valid = False
+                        c1_valid = False
+                    elif l2_direction == 'SHORT' and row['high'] >= stop_loss:
+                        c2_valid = False
+                        c1_valid = False
 
-            if not c2_valid:
-                if l2_valid:
-                    if not c1_valid:
-                        if row['ts'] >= l2_valid_ts:
-                            if row['close'] < row['ma_100']:
-                                c1_valid = True
-                                c1_date_str = pd.to_datetime(row['ts'], unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d %H:%M:%S')
-                                bb_touched = (row['low'] <= row['bb_lower'])
-                    else:
-                        if row['low'] <= row['bb_lower']:
-                            bb_touched = True
-
-                        if row['close'] > row['ma_100']:
-                            if not bb_touched:
-                                c1_valid = False
-                                c1_date_str = "未知"
-                                bb_touched = False
-                                continue
-                                
-                            _candidate_entry = float(row['close'])
-                            _candidate_sl = float(row['low'])
-                            _sl_distance_pct = abs(_candidate_entry - _candidate_sl) / _candidate_entry * 100 if _candidate_entry > 0 else 999
-                            if _sl_distance_pct <= 10:
-                                c2_valid = True
-                                c2_date_str = pd.to_datetime(row['ts'], unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d %H:%M:%S')
-                                entry_price = _candidate_entry
-                                stop_loss = _candidate_sl
-                                trigger_ts = int(row['ts'])
-                            else:
-                                c1_valid = False
-                                c1_date_str = "未知"
-                                bb_touched = False
+                if not c2_valid and l2_valid:
+                    if row['ts'] >= l2_valid_ts:
+                        k1, k2, k3 = history_3h[0], history_3h[1], history_3h[2]
+                        
+                        if l2_direction == 'LONG':
+                            cond1 = (k1['low'] <= k1['bb_lower']) or (k2['low'] <= k2['bb_lower']) or (k3['low'] <= k3['bb_lower'])
+                            cond2 = (k2['low'] < k1['low']) and (k2['low'] < k3['low'])
+                            cond3 = k3['close'] > max(k2['open'], k2['close'])
+                            
+                            if cond1 and cond2 and cond3:
+                                _entry = float(k3['close'])
+                                _sl = float(k2['low'])
+                                _dist = abs(_entry - _sl) / _entry * 100 if _entry > 0 else 999
+                                if _dist <= 10:
+                                    c2_valid = True
+                                    c2_date_str = pd.to_datetime(k3['ts'], unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d %H:%M:%S')
+                                    entry_price = _entry
+                                    stop_loss = _sl
+                                    trigger_ts = int(k3['ts'])
+                                    c1_valid = True
+                                    c1_date_str = c2_date_str
+                        
+                        elif l2_direction == 'SHORT':
+                            cond1 = (k1['high'] >= k1['bb_upper']) or (k2['high'] >= k2['bb_upper']) or (k3['high'] >= k3['bb_upper'])
+                            cond2 = (k2['high'] > k1['high']) and (k2['high'] > k3['high'])
+                            cond3 = k3['close'] < min(k2['open'], k2['close'])
+                            
+                            if cond1 and cond2 and cond3:
+                                _entry = float(k3['close'])
+                                _sl = float(k2['high'])
+                                _dist = abs(_sl - _entry) / _entry * 100 if _entry > 0 else 999
+                                if _dist <= 10:
+                                    c2_valid = True
+                                    c2_date_str = pd.to_datetime(k3['ts'], unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d %H:%M:%S')
+                                    entry_price = _entry
+                                    stop_loss = _sl
+                                    trigger_ts = int(k3['ts'])
+                                    c1_valid = True
+                                    c1_date_str = c2_date_str
 
         is_trigger_met = c2_valid
         if is_trigger_met:
             final_state = 'triggered'
-        elif c1_valid:
-            final_state = 'l3_c2_waiting'
         elif l2_valid:
             final_state = 'l3_c1_waiting'
         elif l1_valid:
@@ -1248,7 +1255,7 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
         else:
             final_state = 'l1_waiting'
 
-        cache_ts = trigger_ts if is_trigger_met else (list(l1_events.keys())[-1] if l1_events else 0)
+        cache_ts = trigger_ts if is_trigger_met else l1_valid_ts
         action = 'update' if (not cached_info or cached_info.get('ts') != cache_ts) else 'keep'
         if final_state == 'l1_waiting':
             action = 'remove'
@@ -1287,13 +1294,13 @@ def send_grouped_message(item_list, title):
     if not item_list:
         return
 
-    filtered_items = [item for item in item_list if item.get('c1_date') not in (None, '未知', '未知日期', '')]
+    filtered_items = [item for item in item_list if item.get('l2_date') not in (None, '未知', '未知日期', '')]
     if not filtered_items:
         return
 
     date_groups = {}
     for item in filtered_items:
-        raw_date = item.get('c1_date', '')
+        raw_date = item.get('l2_date', '')
         # 只截取前 10 碼 YYYY-MM-DD，不要具體時間
         d = raw_date[:10] if len(raw_date) >= 10 else raw_date
         if d not in date_groups:
