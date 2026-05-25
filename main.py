@@ -1122,6 +1122,7 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
         l2_valid_ts = 0
         l2_direction = ""
         l2_date_str = "未知"
+        l2_locked_l1_date = "未知"
 
         c1_valid = False
         c1_date_str = "未知"
@@ -1178,11 +1179,13 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
                                 l2_valid_ts = t
                                 l2_direction = 'LONG'
                                 l2_date_str = pd.to_datetime(b3d['ts'], unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d')
+                                l2_locked_l1_date = l1_date_str
                             elif is_short and not is_long:
                                 l2_valid = True
                                 l2_valid_ts = t
                                 l2_direction = 'SHORT'
                                 l2_date_str = pd.to_datetime(b3d['ts'], unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d')
+                                l2_locked_l1_date = l1_date_str
 
             # 3. 處理 3H (L3) 事件
             if pd.isna(row['ma_100']) or pd.isna(row['bb_lower']):
@@ -1267,7 +1270,7 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
             'precision':          precision,
             'c1_date':            c1_date_str,
             'c2_date':            c2_date_str,
-            'l1_date':            l1_date_str,
+            'l1_date':            l2_locked_l1_date if l2_valid else l1_date_str,
             'l2_date':            l2_date_str,
             'scan_state':         final_state,
         }
