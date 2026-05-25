@@ -1272,7 +1272,11 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
             action = 'remove'
 
         if action == 'remove':
-            return {'symbol': symbol, 'action': 'remove'}
+            return {
+                'symbol': symbol, 
+                'action': 'remove',
+                'l1_date': l1_date_str if l1_valid else '未知'
+            }
 
         return {
             'symbol':             symbol,
@@ -1306,7 +1310,11 @@ def send_grouped_message(item_list, title):
     if not item_list:
         return
 
-    filtered_items = [item for item in item_list if item.get('l2_date') not in (None, '未知', '未知日期', '') or item.get('c1_date') not in (None, '未知', '未知日期', '')]
+    if title == '🗺️ <b>加密貨幣[邊界名單]</b>':
+        filtered_items = [item for item in item_list if item.get('l1_date') not in (None, '未知', '未知日期', '')]
+    else:
+        filtered_items = [item for item in item_list if item.get('l2_date') not in (None, '未知', '未知日期', '') or item.get('c1_date') not in (None, '未知', '未知日期', '')]
+        
     if not filtered_items:
         return
 
@@ -1316,6 +1324,8 @@ def send_grouped_message(item_list, title):
             raw_date = item.get('c1_date')
             if not raw_date or raw_date in ('未知', '未知日期', ''):
                 raw_date = item.get('l2_date', '')
+        elif title == '🗺️ <b>加密貨幣[邊界名單]</b>':
+            raw_date = item.get('l1_date', '')
         else:
             raw_date = item.get('l2_date')
             if not raw_date or raw_date in ('未知', '未知日期', ''):
@@ -1488,6 +1498,7 @@ async def run_scan():
                 logger.warning(f"拉取持倉列表失敗 (下單防重複查詢): {e}")
 
         all_results = []
+        boundary_items = []
         total_coins = len(coins)
         for i in range(0, total_coins, 20):
             batch = coins[i:i+20]
@@ -1497,6 +1508,9 @@ async def run_scan():
             for res in results:
                 if res is None: continue
                 sym = res['symbol']
+                
+                if res.get('l1_date') and res.get('l1_date') != '未知':
+                    boundary_items.append(res)
                 
                 if res.get('is_watchlist_eligible'):
                     if res['action'] == 'update' or res['action'] == 'keep':
@@ -1604,6 +1618,9 @@ async def run_scan():
             
         if missed_items:
             send_grouped_message(missed_items, "🛑 <b>加密貨幣[未上車]</b>")
+            
+        if boundary_items:
+            send_grouped_message(boundary_items, "🗺️ <b>加密貨幣[邊界名單]</b>")
 
         active_count = len(watchlist)
         logger.info(f"✅ 掃描完成。新觸發: {len(real_new_triggers)} / 持倉: {len(holding_items)} / 持倉新訊號: {len(real_holding_new_triggers)} / 關注: {len(real_watching)} / 未上車: {len(missed_items)} / 追蹤總數: {active_count}")
