@@ -1154,14 +1154,6 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
                         l1_high = float(curr_18d['high'])
                         l1_low = float(curr_18d['low'])
                         l1_date_str = pd.to_datetime(curr_18d['ts'], unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d')
-                        l2_valid = False
-                        l2_direction = ""
-                        c1_valid = False
-                        c2_valid = False
-                        l2_valid_ts = 0
-                        l2_date_str = "未知"
-                        c1_date_str = "未知"
-                        c2_date_str = "未知"
 
             # 2. 處理 3D (L2) 事件
             if t in dict_3d:
