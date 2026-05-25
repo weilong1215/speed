@@ -199,12 +199,10 @@ def compose_3d_bars(ohlcv_1d):
     if not ohlcv_1d or len(ohlcv_1d) < 3:
         return []
 
-    from datetime import datetime, timezone
     PERIOD_MS = 3 * 24 * 3600 * 1000
     groups = {}
     for bar in ohlcv_1d:
         ts = bar[0]
-        dt = datetime.fromtimestamp(ts / 1000, tz=timezone.utc)
         year_start_dt = datetime(dt.year, 1, 1, tzinfo=timezone.utc)
         year_epoch_ms = int(year_start_dt.timestamp() * 1000)
         
