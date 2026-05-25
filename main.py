@@ -1150,11 +1150,25 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
                 if idx_18d > 0:
                     prev_18d = df_18d_closed.iloc[idx_18d - 1]
                     if curr_18d['high'] >= prev_18d['high'] or curr_18d['low'] <= prev_18d['low']:
+                        # L1 邊界更新 → 強制清除所有下層狀態，防止舊訊號殘留
                         l1_valid = True
                         l1_valid_ts = t
                         l1_high = float(curr_18d['high'])
                         l1_low = float(curr_18d['low'])
                         l1_date_str = pd.to_datetime(curr_18d['ts'], unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d')
+                        l2_valid = False
+                        l2_valid_ts = 0
+                        l2_direction = ""
+                        l2_date_str = "未知"
+                        l2_locked_l1_date = "未知"
+                        c1_valid = False
+                        c1_date_str = "未知"
+                        c2_valid = False
+                        c2_date_str = "未知"
+                        entry_price = 0.0
+                        stop_loss = 0.0
+                        trigger_ts = 0
+                        history_3h = []
 
             # 2. 處理 3D (L2) 事件
             if t in dict_3d:
