@@ -1272,6 +1272,7 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
             'c2_date':            c2_date_str,
             'l1_date':            l2_locked_l1_date if l2_valid else l1_date_str,
             'l2_date':            l2_date_str,
+            'l2_direction':       l2_direction,
             'scan_state':         final_state,
         }
 
@@ -1295,9 +1296,15 @@ def send_grouped_message(item_list, title):
 
     date_groups = {}
     for item in filtered_items:
-        raw_date = item.get('l2_date')
-        if not raw_date or raw_date in ('未知', '未知日期', ''):
-            raw_date = item.get('c1_date', '')
+        if title == '🛑 <b>加密貨幣[未上車]</b>':
+            raw_date = item.get('c1_date')
+            if not raw_date or raw_date in ('未知', '未知日期', ''):
+                raw_date = item.get('l2_date', '')
+        else:
+            raw_date = item.get('l2_date')
+            if not raw_date or raw_date in ('未知', '未知日期', ''):
+                raw_date = item.get('c1_date', '')
+                
         # 只截取前 10 碼 YYYY-MM-DD，不要具體時間
         d = raw_date[:10] if len(raw_date) >= 10 else raw_date
         if d not in date_groups:
@@ -1309,10 +1316,14 @@ def send_grouped_message(item_list, title):
         coin_strs = []
         for item in date_groups[date_key]:
             base = get_base_coin(item['symbol'])
-            if item.get('missed'):
-                coin_strs.append(f"{base} (未上車)")
+            direction = item.get('l2_direction', '')
+            dir_str = " (多)" if direction == "LONG" else " (空)" if direction == "SHORT" else ""
+            
+            if item.get('missed') and title != '🛑 <b>加密貨幣[未上車]</b>':
+                coin_strs.append(f"{base} (未上車){dir_str}")
             else:
-                coin_strs.append(base)
+                coin_strs.append(f"{base}{dir_str}")
+                
         coins = " · ".join(coin_strs)
         lines.append(f"📅 {date_key}")
         lines.append(f"💎 {coins}\n")
@@ -1507,6 +1518,7 @@ async def run_scan():
         holding_items = []
         real_watching = []
         real_new_triggers = []
+        missed_items = []
 
         for sym, data in holding_map.items():
             holding_items.append(data)
@@ -1531,7 +1543,7 @@ async def run_scan():
                 trigger_ts = item.get('trigger_ts', 0)
                 if cached.get('last_trigger_ts') == trigger_ts and trigger_ts > 0:
                     item['missed'] = True
-                    real_watching.append(item)
+                    missed_items.append(item)
                 else:
                     real_new_triggers.append(item)
             else:
@@ -1553,7 +1565,7 @@ async def run_scan():
                         watchlist[sym]['last_trigger_ts'] = item.get('trigger_ts', 0)
                     save_watchlist(watchlist)
                     item['missed'] = True
-                    real_watching.append(item)
+                    missed_items.append(item)
                 elif order:
                     if sym in watchlist:
                         watchlist[sym]['last_trigger_ts'] = item.get('trigger_ts', 0)
@@ -1573,14 +1585,17 @@ async def run_scan():
             
         if real_watching:
             send_grouped_message(real_watching, "👀 <b>加密貨幣[關注中]</b>")
+            
+        if missed_items:
+            send_grouped_message(missed_items, "🛑 <b>加密貨幣[未上車]</b>")
 
         active_count = len(watchlist)
-        logger.info(f"✅ 掃描完成。新觸發: {len(real_new_triggers)} / 持倉: {len(holding_items)} / 持倉新訊號: {len(real_holding_new_triggers)} / 關注: {len(real_watching)} / 追蹤總數: {active_count}")
+        logger.info(f"✅ 掃描完成。新觸發: {len(real_new_triggers)} / 持倉: {len(holding_items)} / 持倉新訊號: {len(real_holding_new_triggers)} / 關注: {len(real_watching)} / 未上車: {len(missed_items)} / 追蹤總數: {active_count}")
 
-        if not real_new_triggers and not holding_items and not real_watching:
+        if not real_new_triggers and not holding_items and not real_watching and not missed_items:
             send_telegram_message(f"✅ <b>條件掃描完成</b>\n本次共掃描 {total_coins} 個幣種，無滿足條件標的。\n(當前清單追蹤中: {active_count} 個)")
 
-        if real_new_triggers or holding_items or real_watching or real_holding_new_triggers:
+        if real_new_triggers or holding_items or real_watching or real_holding_new_triggers or missed_items:
             send_system_settings_message(config)
     finally:
         await ex.close()
