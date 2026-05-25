@@ -19,7 +19,6 @@ from datetime import datetime
 from dotenv import load_dotenv
 import sys
 import io
-import tw_scanner
 
 # ============================================================================
 # 系統初始化 (日誌與環境變數)
@@ -123,7 +122,7 @@ def load_config():
             return config
         except Exception as e:
             logger.error(f"讀取設定檔失敗: {e}")
-    return {"default_loss_amount": 6, "default_tw_loss_amount": 300}
+    return {"default_loss_amount": 6}
 
 def save_config(data):
     try:
@@ -1345,19 +1344,16 @@ def send_triggered_message(item, default_loss):
 def send_system_settings_message(config):
     """獨立一則系統設定訊息"""
     loss = config.get("default_loss_amount", 6)
-    tw_loss = config.get("default_tw_loss_amount", 300)
 
     msg = (
         f"⚙️ <b>系統快速設定</b>\n\n"
-        f"💵 <b>加密貨幣預設虧損:</b> {loss} USDT\n"
-        f"💵 <b>台股預設虧損:</b> {int(tw_loss):,} TWD"
+        f"💵 <b>加密貨幣預設虧損:</b> {loss} USDT"
     )
 
     reply_markup = {
         "inline_keyboard": [
             [
-                {"text": "📝 修改加密貨幣虧損", "switch_inline_query_current_chat": "/set_loss "},
-                {"text": "📝 修改台股虧損", "switch_inline_query_current_chat": "/set_tw_loss "}
+                {"text": "📝 修改加密貨幣虧損", "switch_inline_query_current_chat": "/set_loss "}
             ]
         ]
     }
@@ -1421,26 +1417,7 @@ def poll_telegram_commands():
                 payload = {"chat_id": chat_id, "text": reply, "parse_mode": "HTML"}
                 requests.post(send_url, json=payload, timeout=10)
 
-            elif text.startswith("/set_tw_loss"):
-                parts = text.split()
-                if len(parts) >= 2:
-                    try:
-                        new_val = float(parts[1])
-                        if new_val <= 0:
-                            raise ValueError("金額必須大於 0")
-                        config = load_config()
-                        config["default_tw_loss_amount"] = new_val
-                        save_config(config)
-                        reply = f"✅ 台股預設虧損已更新為 <b>{int(new_val):,} TWD</b>"
-                        logger.info(f"⚙️ /set_tw_loss 指令: 台股虧損更新為 {new_val}")
-                    except ValueError:
-                        reply = "❌ 格式錯誤，請輸入大於零的數字。"
-                else:
-                    reply = "❌ 格式錯誤，未提供數字。"
 
-                send_url = f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendMessage"
-                payload = {"chat_id": chat_id, "text": reply, "parse_mode": "HTML"}
-                requests.post(send_url, json=payload, timeout=10)
 
     except Exception as e:
         logger.warning(f"Telegram 指令輪詢異常: {e}")
@@ -1604,26 +1581,13 @@ async def run_scan():
     finally:
         await ex.close()
 
-async def run_tw_scanner_background():
-    try:
-        logger.info("🚀 啟動背景台股掃描任務...")
-        await tw_scanner.main_loop()
-        config = load_config()
-        send_system_settings_message(config)
-        logger.info("✅ 背景台股掃描任務與設定發送完成。")
-    except Exception as e:
-        logger.error(f"💥 背景台股掃描任務異常: {e}")
-
 async def scheduler():
     last_hour = -1
-    last_tw_day = -1
     
     try:
         await run_scan()
     except Exception as e:
         logger.error(f"初始掃描異常: {e}")
-
-    asyncio.create_task(run_tw_scanner_background())
 
     while True:
         try:
@@ -1634,10 +1598,6 @@ async def scheduler():
                 except Exception as e:
                     logger.error(f"定時掃描異常: {e}")
                 last_hour = now.hour
-
-            if now.hour == 6 and now.minute >= 30 and now.minute <= 40 and now.day != last_tw_day:
-                asyncio.create_task(run_tw_scanner_background())
-                last_tw_day = now.day
 
             if BITGET_API_KEY:
                 ex = get_exchange()
