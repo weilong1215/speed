@@ -1293,11 +1293,18 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
         if final_state in ['l1_waiting', 'l2_waiting']:
             action = 'remove'
 
-        if action == 'remove':
+            expected_dir = ""
+            if l1_valid:
+                if l1_trend == 'BULLISH':
+                    expected_dir = 'LONG'
+                elif l1_trend == 'BEARISH':
+                    expected_dir = 'SHORT'
+                    
             return {
                 'symbol': symbol, 
                 'action': 'remove',
-                'l1_date': l1_date_str if l1_valid else '未知'
+                'l1_date': l1_date_str if l1_valid else '未知',
+                'l2_direction': expected_dir
             }
 
         return {
