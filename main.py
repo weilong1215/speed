@@ -950,30 +950,29 @@ async def monitor_positions(exchange):
                         # 訊號淘汰條件撤單：若尚未進場，且3D線收盤跌破 10MA 或最低點低於止損價，則作廢訊號撤單
                         if not is_runaway:
                             try:
-                                ohlcv_3d = compose_3d_bars(ohlcv_1d)
-                                if ohlcv_3d and len(ohlcv_3d) >= 15:
-                                    df_3d = pd.DataFrame(ohlcv_3d, columns=['ts', 'open', 'high', 'low', 'close', 'vol', 'close_ts'])
-                                    df_3d['ma_10'] = df_3d['close'].rolling(window=10).mean()
+                                df_1d_eval = pd.DataFrame(ohlcv_1d, columns=['ts', 'open', 'high', 'low', 'close', 'vol'])
+                                df_1d_eval['close_ts'] = df_1d_eval['ts'] + 86400000 - 1
+                                df_1d_eval['ma_10'] = df_1d_eval['close'].rolling(window=10).mean()
+                                
+                                now_utc_1d_fl = int(time.time() * 1000)
+                                closed_1d = df_1d_eval[df_1d_eval['close_ts'] <= now_utc_1d_fl]
+                                
+                                if len(closed_1d) > 0:
+                                    last_closed = closed_1d.iloc[-1]
+                                    last_close_time = int(last_closed['close_ts'])
                                     
-                                    now_utc_3d_fl = int(time.time() * 1000)
-                                    closed_3d = df_3d[df_3d['close_ts'] <= now_utc_3d_fl]
-                                    
-                                    if len(closed_3d) > 0:
-                                        last_closed = closed_3d.iloc[-1]
-                                        last_close_time = int(last_closed['close_ts'])
-                                        
-                                        if last_close_time > entry_ts:
-                                            # 多空分流判斷 3D 10MA 淘汰條件，避免 3D K 棒歷史極值誤觸止損
-                                            c_close = float(last_closed['close'])
-                                            c_ma10 = float(last_closed['ma_10'])
-                                            revoke_reason = None
-                                            if direction == 'LONG' and c_close < c_ma10:
-                                                # 多單：收盤跌破 10MA，趨勢轉弱，淘汰訊號
-                                                revoke_reason = f"3D線收盤 ({c_close:.4f}) 跌破 10MA ({c_ma10:.4f})"
-                                            elif direction == 'SHORT' and c_close > c_ma10:
-                                                # 空單：收盤漲破 10MA，趨勢轉強，淘汰訊號
-                                                revoke_reason = f"3D線收盤 ({c_close:.4f}) 漲破 10MA ({c_ma10:.4f})"
-                                            if revoke_reason:
+                                    if last_close_time > entry_ts:
+                                        # 多空分流判斷 1D 10MA 淘汰條件
+                                        c_close = float(last_closed['close'])
+                                        c_ma10 = float(last_closed['ma_10'])
+                                        revoke_reason = None
+                                        if direction == 'LONG' and c_close < c_ma10:
+                                            # 多單：收盤跌破 10MA，趨勢轉弱，淘汰訊號
+                                            revoke_reason = f"1D線收盤 ({c_close:.4f}) 跌破 10MA ({c_ma10:.4f})"
+                                        elif direction == 'SHORT' and c_close > c_ma10:
+                                            # 空單：收盤漲破 10MA，趨勢轉強，淘汰訊號
+                                            revoke_reason = f"1D線收盤 ({c_close:.4f}) 漲破 10MA ({c_ma10:.4f})"
+                                        if revoke_reason:
                                                 logger.info(f"🚫 淘汰條件已成立 [{revoke_reason}] ({symbol})，撤銷未成交單 {signal_id}")
                                                 entry_orders = [o for o in open_orders if str(o.get('clientOrderId') or o.get('info', {}).get('clientOid') or "") == str(signal_id)]
                                                 for eo in entry_orders:
@@ -1083,18 +1082,18 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
 
         # 合成各層級 K 棒
         ohlcv_18d = compose_18d_bars(ohlcv_1d)
-        ohlcv_3d = compose_3d_bars(ohlcv_1d)
         ohlcv_3h = compose_3h_bars(ohlcv_1h)
 
-        if not ohlcv_18d or not ohlcv_3d or not ohlcv_3h:
+        if not ohlcv_18d or not ohlcv_3h:
             return None
 
         df_18d = pd.DataFrame(ohlcv_18d, columns=['ts', 'open', 'high', 'low', 'close', 'vol', 'close_ts'])
         df_18d_closed = df_18d[df_18d['close_ts'] <= now_utc].reset_index(drop=True)
 
-        df_3d = pd.DataFrame(ohlcv_3d, columns=['ts', 'open', 'high', 'low', 'close', 'vol', 'close_ts'])
-        df_3d['ma_10'] = df_3d['close'].rolling(window=10).mean()
-        df_3d_closed = df_3d[df_3d['close_ts'] <= now_utc].reset_index(drop=True)
+        df_1d = pd.DataFrame(ohlcv_1d, columns=['ts', 'open', 'high', 'low', 'close', 'vol'])
+        df_1d['close_ts'] = df_1d['ts'] + 86400000 - 1
+        df_1d['ma_10'] = df_1d['close'].rolling(window=10).mean()
+        df_1d_closed = df_1d[df_1d['close_ts'] <= now_utc].reset_index(drop=True)
 
         df_3h = pd.DataFrame(ohlcv_3h, columns=['ts', 'open', 'high', 'low', 'close', 'vol', 'close_ts'])
         df_3h['ma_100'] = df_3h['close'].rolling(window=100).mean()
@@ -1109,7 +1108,7 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
         # =========================================================
         # 將資料轉為 Dict 方便依時間查詢
         dict_18d = {int(row['close_ts']): row for _, row in df_18d_closed.iterrows()}
-        dict_3d = {int(row['close_ts']): row for _, row in df_3d_closed.iterrows()}
+        dict_1d = {int(row['close_ts']): row for _, row in df_1d_closed.iterrows()}
 
         # 狀態變數
         l1_valid = False
@@ -1117,6 +1116,7 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
         l1_high = 0.0
         l1_low = 0.0
         l1_date_str = "未知"
+        l1_trend = ""
 
         l2_valid = False
         l2_valid_ts = 0
@@ -1156,6 +1156,16 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
                         l1_high = float(curr_18d['high'])
                         l1_low = float(curr_18d['low'])
                         l1_date_str = pd.to_datetime(curr_18d['ts'], unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d')
+                        l1_open = float(curr_18d['open'])
+                        l1_close = float(curr_18d['close'])
+                        
+                        if l1_close > l1_open:
+                            l1_trend = 'BULLISH'
+                        elif l1_close < l1_open:
+                            l1_trend = 'BEARISH'
+                        else:
+                            l1_trend = 'DOJI'
+                            
                         l2_valid = False
                         l2_valid_ts = 0
                         l2_direction = ""
@@ -1170,36 +1180,48 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
                         trigger_ts = 0
                         history_3h = []
 
-            # 2. 處理 3D (L2) 事件
-            if t in dict_3d:
-                b3d = dict_3d[t]
-                if pd.notna(b3d['ma_10']):
+            # 2. 處理 1D (L2) 事件
+            if t in dict_1d:
+                b1d = dict_1d[t]
+                if pd.notna(b1d['ma_10']):
                     if l2_valid:
-                        if l2_direction == 'LONG' and b3d['close'] < b3d['ma_10']:
+                        if l2_direction == 'LONG' and b1d['close'] < b1d['ma_10']:
                             l2_valid = False
                             c1_valid = False
                             c2_valid = False
-                        elif l2_direction == 'SHORT' and b3d['close'] > b3d['ma_10']:
+                        elif l2_direction == 'SHORT' and b1d['close'] > b1d['ma_10']:
                             l2_valid = False
                             c1_valid = False
                             c2_valid = False
-                    elif l1_valid:
-                        if b3d['ts'] >= l1_valid_ts:
-                            is_long = (b3d['high'] >= l1_high) and (b3d['close'] > b3d['ma_10'])
-                            is_short = (b3d['low'] <= l1_low) and (b3d['close'] < b3d['ma_10'])
                             
-                            if is_long and not is_short:
+                    if l1_valid and b1d['ts'] >= l1_valid_ts:
+                        is_long = (b1d['high'] >= l1_high) and (b1d['close'] > b1d['ma_10'])
+                        is_short = (b1d['low'] <= l1_low) and (b1d['close'] < b1d['ma_10'])
+                        
+                        # 過濾 L1 的陰陽燭方向
+                        if l1_trend == 'BULLISH':
+                            is_short = False
+                        elif l1_trend == 'BEARISH':
+                            is_long = False
+                            
+                        if is_long and not is_short:
+                            if not (l2_valid and l2_direction == 'LONG'):
                                 l2_valid = True
                                 l2_valid_ts = t
                                 l2_direction = 'LONG'
-                                l2_date_str = pd.to_datetime(b3d['ts'], unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d')
+                                l2_date_str = pd.to_datetime(b1d['ts'], unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d')
                                 l2_locked_l1_date = l1_date_str
-                            elif is_short and not is_long:
+                                c1_valid = False
+                                c2_valid = False
+                        elif is_short and not is_long:
+                            if not (l2_valid and l2_direction == 'SHORT'):
                                 l2_valid = True
                                 l2_valid_ts = t
                                 l2_direction = 'SHORT'
-                                l2_date_str = pd.to_datetime(b3d['ts'], unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d')
+                                l2_date_str = pd.to_datetime(b1d['ts'], unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d')
                                 l2_locked_l1_date = l1_date_str
+                                c1_valid = False
+                                c2_valid = False
 
             # 3. 處理 3H (L3) 事件
             if pd.isna(row['ma_100']) or pd.isna(row['bb_lower']):
