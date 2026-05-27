@@ -951,7 +951,7 @@ async def monitor_positions(exchange):
                         if not is_runaway:
                             try:
                                 df_1d_eval = pd.DataFrame(ohlcv_1d, columns=['ts', 'open', 'high', 'low', 'close', 'vol'])
-                                df_1d_eval['close_ts'] = df_1d_eval['ts'] + 86400000 - 1
+                                df_1d_eval['close_ts'] = df_1d_eval['ts'] + 86400000
                                 df_1d_eval['ma_10'] = df_1d_eval['close'].rolling(window=10).mean()
                                 
                                 now_utc_1d_fl = int(time.time() * 1000)
@@ -1091,7 +1091,7 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
         df_18d_closed = df_18d[df_18d['close_ts'] <= now_utc].reset_index(drop=True)
 
         df_1d = pd.DataFrame(ohlcv_1d, columns=['ts', 'open', 'high', 'low', 'close', 'vol'])
-        df_1d['close_ts'] = df_1d['ts'] + 86400000 - 1
+        df_1d['close_ts'] = df_1d['ts'] + 86400000
         df_1d['ma_10'] = df_1d['close'].rolling(window=10).mean()
         df_1d_closed = df_1d[df_1d['close_ts'] <= now_utc].reset_index(drop=True)
 
