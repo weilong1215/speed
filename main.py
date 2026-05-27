@@ -1527,7 +1527,6 @@ async def run_scan():
                 logger.warning(f"拉取持倉列表失敗 (下單防重複查詢): {e}")
 
         all_results = []
-        boundary_items = []
         total_coins = len(coins)
         for i in range(0, total_coins, 20):
             batch = coins[i:i+20]
@@ -1537,9 +1536,6 @@ async def run_scan():
             for res in results:
                 if res is None: continue
                 sym = res['symbol']
-                
-                if res.get('l1_date') and res.get('l1_date') != '未知':
-                    boundary_items.append(res)
                 
                 if res.get('is_watchlist_eligible'):
                     if res['action'] == 'update' or res['action'] == 'keep':
@@ -1647,9 +1643,6 @@ async def run_scan():
             
         if missed_items:
             send_grouped_message(missed_items, "🛑 <b>加密貨幣[未上車]</b>")
-            
-        if boundary_items:
-            send_grouped_message(boundary_items, "🗺️ <b>加密貨幣[邊界名單]</b>")
 
         active_count = len(watchlist)
         logger.info(f"✅ 掃描完成。新觸發: {len(real_new_triggers)} / 持倉: {len(holding_items)} / 持倉新訊號: {len(real_holding_new_triggers)} / 關注: {len(real_watching)} / 未上車: {len(missed_items)} / 追蹤總數: {active_count}")
