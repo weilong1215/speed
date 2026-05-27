@@ -1611,7 +1611,7 @@ async def run_scan():
             sym = item['symbol']
             if BITGET_API_KEY:
                 order = await place_order(
-                    ex, sym, 'LONG', item['entry_price'], item['stop_loss'],
+                    ex, sym, item.get('l2_direction', 'LONG'), item['entry_price'], item['stop_loss'],
                     item['precision'], default_loss, item.get('trigger_ts', 0)
                 )
                 if order == 'skipped':
