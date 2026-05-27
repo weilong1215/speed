@@ -1124,11 +1124,8 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
         l2_date_str = "未知"
         l2_locked_l1_date = "未知"
 
-        c1_valid = False
-        c1_date_str = "未知"
-        
-        c2_valid = False
-        c2_date_str = "未知"
+        l3_valid = False
+        l3_date_str = "未知"
         
         entry_price = 0.0
         stop_loss = 0.0
@@ -1171,10 +1168,8 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
                         l2_direction = ""
                         l2_date_str = "未知"
                         l2_locked_l1_date = "未知"
-                        c1_valid = False
-                        c1_date_str = "未知"
-                        c2_valid = False
-                        c2_date_str = "未知"
+                        l3_valid = False
+                        l3_date_str = "未知"
                         entry_price = 0.0
                         stop_loss = 0.0
                         trigger_ts = 0
@@ -1187,12 +1182,10 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
                     if l2_valid:
                         if l2_direction == 'LONG' and b1d['close'] < b1d['ma_10']:
                             l2_valid = False
-                            c1_valid = False
-                            c2_valid = False
+                            l3_valid = False
                         elif l2_direction == 'SHORT' and b1d['close'] > b1d['ma_10']:
                             l2_valid = False
-                            c1_valid = False
-                            c2_valid = False
+                            l3_valid = False
                             
                     if l1_valid and b1d['ts'] >= l1_valid_ts:
                         is_long = (b1d['high'] >= l1_high) and (b1d['close'] > b1d['ma_10'])
@@ -1211,8 +1204,7 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
                                 l2_direction = 'LONG'
                                 l2_date_str = pd.to_datetime(b1d['ts'], unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d')
                                 l2_locked_l1_date = l1_date_str
-                                c1_valid = False
-                                c2_valid = False
+                                l3_valid = False
                         elif is_short and not is_long:
                             if not (l2_valid and l2_direction == 'SHORT'):
                                 l2_valid = True
@@ -1220,23 +1212,20 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
                                 l2_direction = 'SHORT'
                                 l2_date_str = pd.to_datetime(b1d['ts'], unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d')
                                 l2_locked_l1_date = l1_date_str
-                                c1_valid = False
-                                c2_valid = False
+                                l3_valid = False
 
             # 3. 處理 3H (L3) 事件
             if pd.isna(row['ma_100']) or pd.isna(row['bb_lower']):
                 continue
                 
             if len(history_3h) == 3:
-                if c2_valid:
+                if l3_valid:
                     if l2_direction == 'LONG' and row['low'] <= stop_loss:
-                        c2_valid = False
-                        c1_valid = False
+                        l3_valid = False
                     elif l2_direction == 'SHORT' and row['high'] >= stop_loss:
-                        c2_valid = False
-                        c1_valid = False
+                        l3_valid = False
 
-                if not c2_valid and l2_valid:
+                if not l3_valid and l2_valid:
                     if row['ts'] >= l2_valid_ts:
                         k1, k2, k3 = history_3h[0], history_3h[1], history_3h[2]
                         
@@ -1251,13 +1240,11 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
                                 _sl = float(k2['low'])
                                 _dist = abs(_entry - _sl) / _entry * 100 if _entry > 0 else 999
                                 if _dist <= 10:
-                                    c2_valid = True
-                                    c2_date_str = pd.to_datetime(k3['ts'], unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d %H:%M:%S')
+                                    l3_valid = True
+                                    l3_date_str = pd.to_datetime(k3['ts'], unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d %H:%M:%S')
                                     entry_price = _entry
                                     stop_loss = _sl
                                     trigger_ts = int(k3['ts'])
-                                    c1_valid = True
-                                    c1_date_str = c2_date_str
                         
                         elif l2_direction == 'SHORT':
                             cond1 = (k1['high'] >= k1['bb_upper']) or (k2['high'] >= k2['bb_upper']) or (k3['high'] >= k3['bb_upper'])
@@ -1270,19 +1257,17 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
                                 _sl = float(k2['high'])
                                 _dist = abs(_sl - _entry) / _entry * 100 if _entry > 0 else 999
                                 if _dist <= 10:
-                                    c2_valid = True
-                                    c2_date_str = pd.to_datetime(k3['ts'], unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d %H:%M:%S')
+                                    l3_valid = True
+                                    l3_date_str = pd.to_datetime(k3['ts'], unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d %H:%M:%S')
                                     entry_price = _entry
                                     stop_loss = _sl
                                     trigger_ts = int(k3['ts'])
-                                    c1_valid = True
-                                    c1_date_str = c2_date_str
 
-        is_trigger_met = c2_valid
+        is_trigger_met = l3_valid
         if is_trigger_met:
             final_state = 'triggered'
         elif l2_valid:
-            final_state = 'l3_c1_waiting'
+            final_state = 'l3_waiting'
         elif l1_valid:
             final_state = 'l2_waiting'
         else:
@@ -1317,8 +1302,7 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
             'stop_loss':          stop_loss,
             'trigger_ts':         trigger_ts,
             'precision':          precision,
-            'c1_date':            c1_date_str,
-            'c2_date':            c2_date_str,
+            'l3_date':            l3_date_str,
             'l1_date':            l2_locked_l1_date if l2_valid else l1_date_str,
             'l2_date':            l2_date_str,
             'l2_direction':       l2_direction,
@@ -1339,10 +1323,7 @@ def send_grouped_message(item_list, title):
     if not item_list:
         return
 
-    if title == '🗺️ <b>加密貨幣[邊界名單]</b>':
-        filtered_items = [item for item in item_list if item.get('l1_date') not in (None, '未知', '未知日期', '')]
-    else:
-        filtered_items = [item for item in item_list if item.get('l2_date') not in (None, '未知', '未知日期', '') or item.get('c1_date') not in (None, '未知', '未知日期', '')]
+    filtered_items = [item for item in item_list if item.get('l2_date') not in (None, '未知', '未知日期', '') or item.get('l3_date') not in (None, '未知', '未知日期', '')]
         
     if not filtered_items:
         return
@@ -1350,15 +1331,13 @@ def send_grouped_message(item_list, title):
     date_groups = {}
     for item in filtered_items:
         if title == '🛑 <b>加密貨幣[未上車]</b>':
-            raw_date = item.get('c1_date')
+            raw_date = item.get('l3_date')
             if not raw_date or raw_date in ('未知', '未知日期', ''):
                 raw_date = item.get('l2_date', '')
-        elif title == '🗺️ <b>加密貨幣[邊界名單]</b>':
-            raw_date = item.get('l1_date', '')
         else:
             raw_date = item.get('l2_date')
             if not raw_date or raw_date in ('未知', '未知日期', ''):
-                raw_date = item.get('c1_date', '')
+                raw_date = item.get('l3_date', '')
                 
         # 只截取前 10 碼 YYYY-MM-DD，不要具體時間
         d = raw_date[:10] if len(raw_date) >= 10 else raw_date
@@ -1372,7 +1351,7 @@ def send_grouped_message(item_list, title):
         for item in date_groups[date_key]:
             base = get_base_coin(item['symbol'])
             direction = item.get('l2_direction', '')
-            dir_str = " (多)" if direction == "LONG" else " (空)" if direction == "SHORT" else ""
+            dir_str = " 🟢" if direction == "LONG" else " 🔴" if direction == "SHORT" else ""
             
             if item.get('missed') and title != '🛑 <b>加密貨幣[未上車]</b>':
                 coin_strs.append(f"{base} (未上車){dir_str}")
@@ -1393,18 +1372,18 @@ def send_triggered_message(item, default_loss):
     sl = item['stop_loss']
     l1_d = item.get('l1_date', '未知')
     l2_d = item.get('l2_date', '未知')
-    c1_d = item.get('c1_date', '未知')
-    c2_d = item.get('c2_date', '未知')
+    l3_d = item.get('l3_date', '未知')
+    direction = item.get('l2_direction', '')
+    dir_icon = "🟢" if direction == "LONG" else "🔴" if direction == "SHORT" else ""
 
     loss_pct = abs((entry - sl) / entry) if entry != 0 else 0
     position_value = default_loss / loss_pct if loss_pct > 0 else 0
 
     msg = (
-        f"💎 <b>交易對:</b> {display_symbol}\n\n"
+        f"{dir_icon} 💎 <b>交易對:</b> {display_symbol}\n\n"
         f"📅 <b>L1 (18日) 日期:</b> <code>{l1_d}</code>\n"
-        f"📅 <b>L2 (3日) 日期:</b> <code>{l2_d}</code>\n"
-        f"📅 <b>C1 (3H) 成立時間:</b> <code>{c1_d}</code>\n"
-        f"📅 <b>C2 (3H) 觸發時間:</b> <code>{c2_d}</code>\n"
+        f"📅 <b>L2 (1日) 日期:</b> <code>{l2_d}</code>\n"
+        f"📅 <b>L3 (3H) 觸發時間:</b> <code>{l3_d}</code>\n"
         f"📍 <b>進場價格:</b> <code>{entry:.{precision}f}</code>\n"
         f"🛡️ <b>止損價格:</b> <code>{sl:.{precision}f}</code>\n"
         f"💰 <b>倉位價值:</b> <code>{position_value:.2f} USDT</code>"
@@ -1562,13 +1541,12 @@ async def run_scan():
                     sym = s['symbol']
                     ts = s.get('timestamp', 0)
                     dt_str = pd.to_datetime(ts, unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d') if ts > 0 else '持續追蹤'
-                    holding_map[sym] = {'symbol': sym, 'c1_date': dt_str}
+                    holding_map[sym] = {'symbol': sym, 'l3_date': dt_str, 'l2_direction': s.get('direction', '')}
                     
         for p in existing_positions:
-            if p['side'].upper() == 'LONG':
-                sym = p['symbol']
-                if sym not in holding_map:
-                    holding_map[sym] = {'symbol': sym, 'c1_date': '外部建倉'}
+            sym = p['symbol']
+            if sym not in holding_map:
+                holding_map[sym] = {'symbol': sym, 'l3_date': '外部建倉', 'l2_direction': p['side'].upper()}
 
         holding_items = []
         real_watching = []
