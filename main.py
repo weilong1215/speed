@@ -122,7 +122,7 @@ def load_config():
             return config
         except Exception as e:
             logger.error(f"讀取設定檔失敗: {e}")
-    return {"total_capital": 300}
+    return {"total_capital": 300, "loss_pct": 2}
 
 def save_config(data):
     try:
@@ -1396,19 +1396,19 @@ def send_triggered_message(item, default_loss):
 def send_system_settings_message(config):
     """獨立一則系統設定訊息"""
     capital = config.get("total_capital", 300)
-    loss_pct = 2
-    loss = capital * loss_pct / 100
+    loss_pct = config.get("loss_pct", 2)
 
     msg = (
         f"⚙️ <b>系統快速設定</b>\n\n"
         f"💰 <b>預設總資金:</b> {capital} USDT\n"
-        f"📉 <b>每筆虧損:</b> {loss_pct}% = {loss:.2f} USDT"
+        f"📉 <b>每筆虧損:</b> {loss_pct}%"
     )
 
     reply_markup = {
         "inline_keyboard": [
             [
-                {"text": "📝 修改加密貨幣虧損", "switch_inline_query_current_chat": "/set_loss "}
+                {"text": "💰 修改總資金", "switch_inline_query_current_chat": "/set_capital "},
+                {"text": "📉 修改虧損比例", "switch_inline_query_current_chat": "/set_loss_pct "}
             ]
         ]
     }
@@ -1461,11 +1461,29 @@ def poll_telegram_commands():
                         config = load_config()
                         config["total_capital"] = new_val
                         save_config(config)
-                        loss = new_val * 2 / 100
-                        reply = f"✅ 總資金已更新為 <b>{new_val} USDT</b>，每筆虧損 2% = <b>{loss:.2f} USDT</b>"
-                        logger.info(f"⚙️ /set_capital 指令: 總資金更新為 {new_val}，虧損 {loss:.2f}")
+                        loss_pct = config.get("loss_pct", 2)
+                        reply = f"✅ 總資金已更新為 <b>{new_val} USDT</b>，每筆虧損 <b>{loss_pct}%</b>"
+                        logger.info(f"⚙️ /set_capital 指令: 總資金更新為 {new_val}")
                     except ValueError:
                         reply = "❌ 格式錯誤，請輸入大於零的數字。"
+                else:
+                    reply = "❌ 格式錯誤，未提供數字。"
+                    
+            elif text.startswith("/set_loss_pct"):
+                parts = text.split()
+                if len(parts) >= 2:
+                    try:
+                        new_val = float(parts[1])
+                        if new_val <= 0 or new_val > 100:
+                            raise ValueError("比例必須在 0 到 100 之間")
+                        config = load_config()
+                        config["loss_pct"] = new_val
+                        save_config(config)
+                        capital = config.get("total_capital", 300)
+                        reply = f"✅ 每筆虧損比例已更新為 <b>{new_val}%</b> (總資金: {capital} USDT)"
+                        logger.info(f"⚙️ /set_loss_pct 指令: 虧損比例更新為 {new_val}%")
+                    except ValueError:
+                        reply = "❌ 格式錯誤，請輸入大於 0 且小於等於 100 的數字。"
                 else:
                     reply = "❌ 格式錯誤，未提供數字。"
 
@@ -1487,7 +1505,7 @@ async def run_scan():
     ex = get_exchange()
     watchlist = load_watchlist()
     config = load_config()
-    default_loss = config.get("total_capital", 300) * 2 / 100
+    default_loss = config.get("total_capital", 300) * config.get("loss_pct", 2) / 100
 
     try:
         try:
