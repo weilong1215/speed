@@ -122,7 +122,7 @@ def load_config():
             return config
         except Exception as e:
             logger.error(f"讀取設定檔失敗: {e}")
-    return {"default_loss_amount": 6}
+    return {"total_capital": 300}
 
 def save_config(data):
     try:
@@ -1395,11 +1395,14 @@ def send_triggered_message(item, default_loss):
 
 def send_system_settings_message(config):
     """獨立一則系統設定訊息"""
-    loss = config.get("default_loss_amount", 6)
+    capital = config.get("total_capital", 300)
+    loss_pct = 2
+    loss = capital * loss_pct / 100
 
     msg = (
         f"⚙️ <b>系統快速設定</b>\n\n"
-        f"💵 <b>加密貨幣預設虧損:</b> {loss} USDT"
+        f"💰 <b>預設總資金:</b> {capital} USDT\n"
+        f"📉 <b>每筆虧損:</b> {loss_pct}% = {loss:.2f} USDT"
     )
 
     reply_markup = {
@@ -1448,7 +1451,7 @@ def poll_telegram_commands():
             text = re.sub(r'^@\w+\s*', '', text).strip()
 
             reply = ""
-            if text.startswith("/set_loss"):
+            if text.startswith("/set_capital"):
                 parts = text.split()
                 if len(parts) >= 2:
                     try:
@@ -1456,10 +1459,11 @@ def poll_telegram_commands():
                         if new_val <= 0:
                             raise ValueError("金額必須大於 0")
                         config = load_config()
-                        config["default_loss_amount"] = new_val
+                        config["total_capital"] = new_val
                         save_config(config)
-                        reply = f"✅ 加密貨幣預設虧損已更新為 <b>{new_val} USDT</b>"
-                        logger.info(f"⚙️ /set_loss 指令: 虧損金額更新為 {new_val}")
+                        loss = new_val * 2 / 100
+                        reply = f"✅ 總資金已更新為 <b>{new_val} USDT</b>，每筆虧損 2% = <b>{loss:.2f} USDT</b>"
+                        logger.info(f"⚙️ /set_capital 指令: 總資金更新為 {new_val}，虧損 {loss:.2f}")
                     except ValueError:
                         reply = "❌ 格式錯誤，請輸入大於零的數字。"
                 else:
@@ -1483,7 +1487,7 @@ async def run_scan():
     ex = get_exchange()
     watchlist = load_watchlist()
     config = load_config()
-    default_loss = config.get("default_loss_amount", 6)
+    default_loss = config.get("total_capital", 300) * 2 / 100
 
     try:
         try:
