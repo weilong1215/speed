@@ -696,6 +696,9 @@ async def ensure_next_tp(exchange, symbol, side, sig, size, saved_signals, open_
                     sig['tp_order_id'] = ''
                     next_tier = sig['tp_next_tier']
                     tp_coid = f"tp{next_tier + 1}_{signal_id}"
+                    # 重新計算下一階 TP 的 R 倍數與減倉比例
+                    current_r_mult = (next_tier + 1) * 5
+                    current_close_pct = 0.20
                     save_active_signals(saved_signals)
                     logger.info(f"🎯 TP{executed_tier} ({executed_r_mult}R) 確認成交 (成交量: {base_vol})，推進至 Tier {next_tier + 1}")
 
