@@ -864,7 +864,7 @@ async def monitor_positions(exchange):
                             for _b18 in _ohlcv_18d_mon:
                                 _b18_open_ts  = int(_b18[0])
                                 _b18_close_ts = int(_b18[6])
-                                # 只找 L1 棒之後第一根已完整收盤的 18D 棒
+                                # L1 棒之後所有已收盤的 18D 棒逐一檢查
                                 if _b18_open_ts > _l1_open_ts and _b18_close_ts <= _now_ms:
                                     _b18_o = float(_b18[1])
                                     _b18_c = float(_b18[4])
@@ -873,10 +873,10 @@ async def monitor_positions(exchange):
                                     _b18_dt = pd.to_datetime(_b18_open_ts, unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d')
                                     if _dir == 'LONG' and _b18_c < _b18_o:
                                         _exit = True
-                                        _exit_reason = f"進場後次棒 18D 棒 ({_b18_dt}) 收陰棒，趨勢轉向"
+                                        _exit_reason = f"18D 棒 ({_b18_dt}) 收陰棒，趨勢轉向"
                                     elif _dir == 'SHORT' and _b18_c > _b18_o:
                                         _exit = True
-                                        _exit_reason = f"進場後次棒 18D 棒 ({_b18_dt}) 收陽棒，趨勢轉向"
+                                        _exit_reason = f"18D 棒 ({_b18_dt}) 收陽棒，趨勢轉向"
                                     if _exit:
                                         logger.info(f"🚶 18D 方向淘汰 ({symbol}) {_exit_reason}，執行市價平倉")
                                         try:
@@ -890,7 +890,7 @@ async def monitor_positions(exchange):
                                             )
                                         except Exception as _ex18:
                                             logger.error(f"18D 方向淘汰平倉失敗 ({symbol}): {_ex18}")
-                                    break  # 只檢查進場後第一棒 18D
+                                        break  # 已出場，終止迴圈
                         except Exception as _e18:
                             logger.warning(f"18D 方向淘汰監控異常 ({symbol}): {_e18}")
 
@@ -986,16 +986,15 @@ async def monitor_positions(exchange):
                             for _c in ohlcv_1h:
                                 _c_ts = int(_c[0])
                                 if _c_ts >= l3_close_ts - 60000:
-                                    _c_lo = float(_c[3])
-                                    _c_hi = float(_c[2])
+                                    _c_close = float(_c[4])
                                     _dt_tw = pd.to_datetime(_c_ts, unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d %H:%M')
-                                    if direction == 'LONG' and _c_lo < _l1_l:
+                                    if direction == 'LONG' and _c_close < _l1_l:
                                         _bbroken = True
-                                        _breason = f"歷史 1H K棒 ({_dt_tw}) 最低 {_c_lo:.{_bprec}f} 已跌破 L1 邀界低點 {_l1_l:.{_bprec}f}"
+                                        _breason = f"歷史 1H K棒 ({_dt_tw}) 收盤價 {_c_close:.{_bprec}f} 已跌破 L1 邀界低點 {_l1_l:.{_bprec}f}"
                                         break
-                                    elif direction == 'SHORT' and _c_hi > _l1_h:
+                                    elif direction == 'SHORT' and _c_close > _l1_h:
                                         _bbroken = True
-                                        _breason = f"歷史 1H K棒 ({_dt_tw}) 最高 {_c_hi:.{_bprec}f} 已突破 L1 邀界高點 {_l1_h:.{_bprec}f}"
+                                        _breason = f"歷史 1H K棒 ({_dt_tw}) 收盤價 {_c_close:.{_bprec}f} 已突破 L1 邀界高點 {_l1_h:.{_bprec}f}"
                                         break
                             if not _bbroken:
                                 if direction == 'LONG' and current_price < _l1_l:
