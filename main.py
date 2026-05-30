@@ -1234,11 +1234,14 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
                         
                         if l2_direction == 'LONG':
                             cond1 = (k1['low'] <= k1['bb_lower']) or (k2['low'] <= k2['bb_lower']) or (k3['low'] <= k3['bb_lower'])
-                            cond2 = (k2['low'] < k1['low']) and (k2['low'] < k3['low'])
+                            cond2 = (k2['low'] < k1['low']) and (k2['low'] < k3['low']) and (k2['high'] < k1['high']) and (k2['high'] < k3['high'])
                             cond3 = k3['close'] > max(k2['open'], k2['close'])
-                            cond4 = (k1['close'] < k1['ma_20']) and (k2['close'] < k2['ma_20']) and (k3['close'] < k3['ma_20'])
+                            cond4 = (k1['close'] < k1['ma_20']) and (k1['open'] < k1['ma_20']) and \
+                                    (k2['close'] < k2['ma_20']) and (k2['open'] < k2['ma_20']) and \
+                                    (k3['close'] < k3['ma_20']) and (k3['open'] < k3['ma_20'])
+                            cond5 = (k2['close'] > k2['open']) and (k3['close'] > k3['open'])
                             
-                            if cond1 and cond2 and cond3 and cond4:
+                            if cond1 and cond2 and cond3 and cond4 and cond5:
                                 _entry = float(k3['close'])
                                 _sl = float(k2['low'])
                                 _dist = abs(_entry - _sl) / _entry * 100 if _entry > 0 else 999
@@ -1251,11 +1254,14 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
                         
                         elif l2_direction == 'SHORT':
                             cond1 = (k1['high'] >= k1['bb_upper']) or (k2['high'] >= k2['bb_upper']) or (k3['high'] >= k3['bb_upper'])
-                            cond2 = (k2['high'] > k1['high']) and (k2['high'] > k3['high'])
+                            cond2 = (k2['high'] > k1['high']) and (k2['high'] > k3['high']) and (k2['low'] > k1['low']) and (k2['low'] > k3['low'])
                             cond3 = k3['close'] < min(k2['open'], k2['close'])
-                            cond4 = (k1['close'] > k1['ma_20']) and (k2['close'] > k2['ma_20']) and (k3['close'] > k3['ma_20'])
+                            cond4 = (k1['close'] > k1['ma_20']) and (k1['open'] > k1['ma_20']) and \
+                                    (k2['close'] > k2['ma_20']) and (k2['open'] > k2['ma_20']) and \
+                                    (k3['close'] > k3['ma_20']) and (k3['open'] > k3['ma_20'])
+                            cond5 = (k2['close'] < k2['open']) and (k3['close'] < k3['open'])
                             
-                            if cond1 and cond2 and cond3 and cond4:
+                            if cond1 and cond2 and cond3 and cond4 and cond5:
                                 _entry = float(k3['close'])
                                 _sl = float(k2['high'])
                                 _dist = abs(_sl - _entry) / _entry * 100 if _entry > 0 else 999
@@ -1510,7 +1516,7 @@ async def run_scan():
     try:
         try:
             markets = await ex.load_markets()
-            exclude_bases = {"USDC", "FDUSD", "TUSD", "USDP", "BUSD", "EUR", "GBP", "DAI"}
+            exclude_bases = {"USDC", "FDUSD", "TUSD", "USDP", "BUSD", "EUR", "GBP", "DAI", "XAUT", "PAXG"}
             coins = []
             for s, m in markets.items():
                 if m.get('linear') and m.get('quote') == 'USDT':
