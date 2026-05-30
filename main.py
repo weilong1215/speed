@@ -310,7 +310,7 @@ def compose_3h_bars(ohlcv_1h):
 # 交易執行
 # ============================================================================
 
-async def place_order(exchange, symbol, direction, entry, sl, precision, fixed_loss_usdt, trigger_ts):
+async def place_order(exchange, symbol, direction, entry, sl, precision, fixed_loss_usdt, trigger_ts, l1_high=0.0, l1_low=0.0, l1_open_ts=0):
     """
     執行下單：Limit Order + 分層槓桿策略 (MAX → 20x → 10x)
 
@@ -547,6 +547,7 @@ async def place_order(exchange, symbol, direction, entry, sl, precision, fixed_l
                     'quantity': qty, 'entry_price': entry, 'sl_price': sl,
                     'original_sl_price': sl,
                     'status': 'active', 'precision': precision,
+                    'l1_high': l1_high, 'l1_low': l1_low, 'l1_open_ts': l1_open_ts,
                     'timestamp': trigger_ts if trigger_ts > 0 else int(time.time() * 1000)
                 })
                 save_active_signals(signals)
@@ -851,6 +852,48 @@ async def monitor_positions(exchange):
 
                     await ensure_next_tp(exchange, symbol, side, sig, size, saved_signals, open_orders)
 
+                    # 進場後下一根 18D 收盤棒方向淘汰：多單陰棒 / 空單陽棒 → 市價平倉
+                    _l1_open_ts = sig.get('l1_open_ts', 0)
+                    _dir = sig['direction']
+                    _prec = sig.get('precision', 4)
+                    if _l1_open_ts > 0:
+                        try:
+                            _ohlcv_1d_mon = await exchange.fetch_ohlcv(symbol, '1d', limit=200)
+                            _ohlcv_18d_mon = compose_18d_bars(_ohlcv_1d_mon)
+                            _now_ms = int(time.time() * 1000)
+                            for _b18 in _ohlcv_18d_mon:
+                                _b18_open_ts  = int(_b18[0])
+                                _b18_close_ts = int(_b18[6])
+                                # 只找 L1 棒之後第一根已完整收盤的 18D 棒
+                                if _b18_open_ts > _l1_open_ts and _b18_close_ts <= _now_ms:
+                                    _b18_o = float(_b18[1])
+                                    _b18_c = float(_b18[4])
+                                    _exit = False
+                                    _exit_reason = ""
+                                    _b18_dt = pd.to_datetime(_b18_open_ts, unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d')
+                                    if _dir == 'LONG' and _b18_c < _b18_o:
+                                        _exit = True
+                                        _exit_reason = f"進場後次棒 18D 棒 ({_b18_dt}) 收陰棒，趨勢轉向"
+                                    elif _dir == 'SHORT' and _b18_c > _b18_o:
+                                        _exit = True
+                                        _exit_reason = f"進場後次棒 18D 棒 ({_b18_dt}) 收陽棒，趨勢轉向"
+                                    if _exit:
+                                        logger.info(f"🚶 18D 方向淘汰 ({symbol}) {_exit_reason}，執行市價平倉")
+                                        try:
+                                            _cs = 'sell' if _dir == 'LONG' else 'buy'
+                                            _cp = {'reduceOnly': True, 'hedged': True, 'holdSide': 'long' if _dir == 'LONG' else 'short'}
+                                            await exchange.create_order(symbol, 'market', _cs, size, None, params=_cp)
+                                            send_telegram_message(
+                                                f"<b>\ud83d\udeb6 18D 方向淘汰 (市價平倉)</b>\n\n"
+                                                f"\ud83d\udc8e <b>交易對:</b> {get_base_coin(symbol)} [{_dir}]\n"
+                                                f"\ud83d\udcc9 <b>原因: {_exit_reason}，已市價平倉</b>"
+                                            )
+                                        except Exception as _ex18:
+                                            logger.error(f"18D 方向淘汰平倉失敗 ({symbol}): {_ex18}")
+                                    break  # 只檢查進場後第一棒 18D
+                        except Exception as _e18:
+                            logger.warning(f"18D 方向淘汰監控異常 ({symbol}): {_e18}")
+
             if not found_signal:
                 logger.warning(f"⚠️ 發現外部倉位: {symbol} ({side}) | 本地無掃描信號，系統不介入。")
 
@@ -931,6 +974,51 @@ async def monitor_positions(exchange):
                                         f"📉 <b>狀態: 已自動撤銷未成交之進場單</b>"
                                     )
                                     sig['status'] = 'closed'
+                                continue
+
+                        # L1 邀界破壞撤單：進場前若 L1 18D 棒高/低點被突破，訊號基礎失效
+                        _l1_h = float(sig.get('l1_high', 0))
+                        _l1_l = float(sig.get('l1_low', 0))
+                        if _l1_h > 0 and _l1_l > 0:
+                            _bprec = sig.get('precision', 4)
+                            _bbroken = False
+                            _breason = ""
+                            for _c in ohlcv_1h:
+                                _c_ts = int(_c[0])
+                                if _c_ts >= l3_close_ts - 60000:
+                                    _c_lo = float(_c[3])
+                                    _c_hi = float(_c[2])
+                                    _dt_tw = pd.to_datetime(_c_ts, unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d %H:%M')
+                                    if direction == 'LONG' and _c_lo < _l1_l:
+                                        _bbroken = True
+                                        _breason = f"歷史 1H K棒 ({_dt_tw}) 最低 {_c_lo:.{_bprec}f} 已跌破 L1 邀界低點 {_l1_l:.{_bprec}f}"
+                                        break
+                                    elif direction == 'SHORT' and _c_hi > _l1_h:
+                                        _bbroken = True
+                                        _breason = f"歷史 1H K棒 ({_dt_tw}) 最高 {_c_hi:.{_bprec}f} 已突破 L1 邀界高點 {_l1_h:.{_bprec}f}"
+                                        break
+                            if not _bbroken:
+                                if direction == 'LONG' and current_price < _l1_l:
+                                    _bbroken = True
+                                    _breason = f"市價 {current_price:.{_bprec}f} 已跌破 L1 邀界低點 {_l1_l:.{_bprec}f}"
+                                elif direction == 'SHORT' and current_price > _l1_h:
+                                    _bbroken = True
+                                    _breason = f"市價 {current_price:.{_bprec}f} 已突破 L1 邀界高點 {_l1_h:.{_bprec}f}"
+                            if _bbroken:
+                                logger.info(f"🚫 L1 邀界破壞 ({symbol}) {_breason}，撤銷未成交單 {signal_id}")
+                                _be_orders = [o for o in open_orders if str(o.get('clientOrderId') or o.get('info', {}).get('clientOid') or "") == str(signal_id)]
+                                for _beo in _be_orders:
+                                    try:
+                                        await exchange.cancel_order(_beo['id'], symbol)
+                                        open_orders = [o for o in open_orders if o['id'] != _beo['id']]
+                                    except Exception as _be:
+                                        logger.warning(f"撤銷未成交單失敗 {_beo['id']}: {_be}")
+                                send_telegram_message(
+                                    f"<b>\ud83d\udeab L1 邀界失效 (撤銷進場)</b>\n\n"
+                                    f"\ud83d\udc8e <b>交易對:</b> {get_base_coin(symbol)} [{direction}]\n"
+                                    f"\ud83d\udcc9 <b>狀態: {_breason}，已自動撤銷進場單</b>"
+                                )
+                                sig['status'] = 'closed'
                                 continue
 
                         # 訊號淘汰條件撤單：若尚未進場，且 1D 線收盤跌破/漲破 10MA，則作廢訊號撤單
@@ -1099,6 +1187,7 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
         # 狀態變數
         l1_valid = False
         l1_valid_ts = 0
+        l1_open_ts = 0
         l1_high = 0.0
         l1_low = 0.0
         l1_date_str = "未知"
@@ -1136,6 +1225,7 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
                         # L1 邊界更新 → 強制清除所有下層狀態，防止舊訊號殘留
                         l1_valid = True
                         l1_valid_ts = t
+                        l1_open_ts = int(curr_18d['ts'])  # L1 18D 棒的開盤時間，用於追蹤進場後次棒方向
                         l1_high = float(curr_18d['high'])
                         l1_low = float(curr_18d['low'])
                         l1_date_str = pd.to_datetime(curr_18d['ts'], unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d')
@@ -1299,6 +1389,9 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
             'l2_date':            l2_date_str,
             'l2_direction':       l2_direction,
             'scan_state':         final_state,
+            'l1_high':            l1_high,
+            'l1_low':             l1_low,
+            'l1_open_ts':         l1_open_ts,
         }
 
     except Exception as e:
@@ -1604,7 +1697,8 @@ async def run_scan():
             if BITGET_API_KEY:
                 order = await place_order(
                     ex, sym, item.get('l2_direction', 'LONG'), item['entry_price'], item['stop_loss'],
-                    item['precision'], default_loss, item.get('trigger_ts', 0)
+                    item['precision'], default_loss, item.get('trigger_ts', 0),
+                    l1_high=item.get('l1_high', 0.0), l1_low=item.get('l1_low', 0.0), l1_open_ts=item.get('l1_open_ts', 0)
                 )
                 if order == 'skipped':
                     # 標記為錯失並更新 last_trigger_ts，防止重複下單與警報
