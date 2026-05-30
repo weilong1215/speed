@@ -328,9 +328,9 @@ async def place_order(exchange, symbol, direction, entry, sl, precision, fixed_l
         try:
             tp1_price = entry + 5 * risk_per_unit if direction == 'LONG' else entry - 5 * risk_per_unit
             
-            # C2 是 3H 棒，收盤時間為 trigger_ts + 3 小時。我們只監測信號成立收盤後的 K 棒。
-            c2_close_ts = trigger_ts + 3 * 3600 * 1000 if trigger_ts > 0 else int(time.time() * 1000)
-            since_ts = c2_close_ts - 5 * 60 * 1000 # 留 5 分鐘緩衝
+            # L3 是 3H 棒，收盤時間為 trigger_ts + 3 小時。我們只監測信號成立收盤後的 K 棒。
+            l3_close_ts = trigger_ts + 3 * 3600 * 1000 if trigger_ts > 0 else int(time.time() * 1000)
+            since_ts = l3_close_ts - 5 * 60 * 1000 # 留 5 分鐘緩衝
             
             # 拉取 1H K 棒
             ohlcv_1h = await exchange.fetch_ohlcv(symbol, '1h', since=since_ts, limit=500)
@@ -345,8 +345,8 @@ async def place_order(exchange, symbol, direction, entry, sl, precision, fixed_l
                 c_high = float(candle[2])
                 c_low = float(candle[3])
                 
-                # 只檢查 C2 收盤時間之後的 K 棒
-                if c_ts >= c2_close_ts - 60000:
+                # 只檢查 L3 收盤時間之後的 K 棒
+                if c_ts >= l3_close_ts - 60000:
                     dt_taiwan = pd.to_datetime(c_ts, unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d %H:%M')
                     if direction == 'LONG':
                         if c_high >= tp1_price:
@@ -508,7 +508,7 @@ async def place_order(exchange, symbol, direction, entry, sl, precision, fixed_l
                     break
 
                 side = 'buy' if direction == 'LONG' else 'sell'
-                signal_id = f"3d_{uuid.uuid4().hex[:8]}"
+                signal_id = f"entry_{uuid.uuid4().hex[:8]}"
                 params = {
                     'hedged': True, 'holdSide': 'long' if direction == 'LONG' else 'short',
                     'clientOid': signal_id, 'stopLoss': {'triggerPrice': sl, 'type': 'market'}
@@ -1685,7 +1685,7 @@ async def scheduler():
 app = Flask(__name__)
 @app.route('/')
 @app.route('/health')
-def health(): return {"status": "ok", "service": "3D-Scanner-Auto"}, 200
+def health(): return {"status": "ok", "service": "Speed-Scanner-Auto"}, 200
 
 def run_flask():
     port = int(os.environ.get("PORT", 8080))
