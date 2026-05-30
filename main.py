@@ -50,9 +50,9 @@ BITGET_API_KEY = os.getenv("BITGET_API_KEY", "")
 BITGET_SECRET_KEY = os.getenv("BITGET_API_SECRET", "") or os.getenv("BITGET_SECRET_KEY", "")
 BITGET_PASSWORD = os.getenv("BITGET_API_PASSWORD", "") or os.getenv("BITGET_PASSWORD", "")
 
-# 無限階梯 TP：每 5R 平掉剩餘倉位的 20%
+# 預設 TP 參數 (5R 停利 100%)
 TP_STEP_R = 5
-TP_CLOSE_PCT = 0.20
+TP_CLOSE_PCT = 1.0
 
 logger.info(f"✅ 系統配置檢查: TG_TOKEN={'已設定' if TG_BOT_TOKEN else '未設定'}, TG_CHAT_ID={'已設定' if TG_CHAT_ID else '未設定'}")
 logger.info(f"✅ 交易所配置檢查: API_KEY={'已設定' if BITGET_API_KEY else '未設定'}")
@@ -633,9 +633,7 @@ async def _query_plan_order_status(exchange, symbol, client_oid):
 
 async def ensure_next_tp(exchange, symbol, side, sig, size, saved_signals, open_orders):
     """
-    無限階梯 TP：
-    - TP1 (1R) 平掉剩餘倉位的 50%
-    - TP2 開始為 5R, 10R, 15R... 依序平掉剩餘倉位的 20%
+    固定 TP: 5R 平倉 100%
     """
     try:
         signal_id = sig.get('signal_id', str(sig.get('timestamp')))
@@ -647,12 +645,11 @@ async def ensure_next_tp(exchange, symbol, side, sig, size, saved_signals, open_
         direction = sig['direction']
         precision = sig.get('precision', 4)
 
-        next_tier = sig.get('tp_next_tier', 0)
-        tp_coid = f"tp{next_tier + 1}_{signal_id}"
+        tp_coid = f"tp1_{signal_id}"
         stored_tp_order_id = sig.get('tp_order_id', '')
 
-        current_r_mult = 5 if next_tier == 0 else (next_tier + 1) * 5
-        current_close_pct = 0.40 if next_tier == 0 else 0.20
+        current_r_mult = 5
+        current_close_pct = 1.0
 
         # === 情況 1: tp_order_id 有值 → 檢查該筆訂單是否還在掛單簿 ===
         if stored_tp_order_id:
@@ -672,7 +669,7 @@ async def ensure_next_tp(exchange, symbol, side, sig, size, saved_signals, open_
                         if ideal_qty * chk_tp_price < 6 and full_qty > 0 and abs(existing_qty - full_qty) / full_qty <= 0.02:
                             return
 
-                        logger.info(f"🔄 TP{next_tier + 1} 數量不一致 ({symbol}): 掛單={existing_qty} vs 理想={ideal_qty}，撤舊掛新")
+                        logger.info(f"🔄 TP1 數量不一致 ({symbol}): 掛單={existing_qty} vs 理想={ideal_qty}，撤舊掛新")
                         try:
                             await exchange.cancel_order(tp_order_obj['id'], symbol, params={'stop': True})
                         except Exception as e:
@@ -683,50 +680,36 @@ async def ensure_next_tp(exchange, symbol, side, sig, size, saved_signals, open_
                         save_active_signals(saved_signals)
                     else:
                         return 
-
             else:
                 plan_status, base_vol = await _query_plan_order_status(exchange, symbol, tp_coid)
 
                 if plan_status == 'executed':
-                    executed_tier = next_tier + 1
-                    executed_r_mult = 5 if next_tier == 0 else (next_tier + 1) * 5
-                    executed_close_pct = 40 if next_tier == 0 else 20
-
-                    sig['tp_next_tier'] = next_tier + 1
                     sig['tp_order_id'] = ''
-                    next_tier = sig['tp_next_tier']
-                    tp_coid = f"tp{next_tier + 1}_{signal_id}"
-                    # 重新計算下一階 TP 的 R 倍數與減倉比例
-                    current_r_mult = (next_tier + 1) * 5
-                    current_close_pct = 0.20
                     save_active_signals(saved_signals)
-                    logger.info(f"🎯 TP{executed_tier} ({executed_r_mult}R) 確認成交 (成交量: {base_vol})，推進至 Tier {next_tier + 1}")
+                    logger.info(f"🎯 TP1 (5R) 確認成交 (成交量: {base_vol})，已完全平倉")
 
                     send_telegram_message(
-                        f"<b>🎯 TP{executed_tier} ({executed_r_mult}R) 成交</b>\n\n"
+                        f"<b>🎯 TP1 (5R) 止盈成交</b>\n\n"
                         f"💎 {get_base_coin(symbol)} [{direction}]\n"
-                        f"📊 <b>減倉比例:</b> {executed_close_pct}%\n"
-                        f"📊 <b>剩餘倉位:</b> {size:.{precision}f}"
+                        f"📊 <b>平倉比例:</b> 100%\n"
+                        f"🎉 <b>此筆交易已完結</b>"
                     )
-
                 elif plan_status == 'canceled':
-                    logger.info(f"⚠️ TP{next_tier + 1} 被撤銷 ({symbol})，將自動補掛同一階")
+                    logger.info(f"⚠️ TP1 被撤銷 ({symbol})，將自動補掛")
                     sig['tp_order_id'] = ''
                     save_active_signals(saved_signals)
-
                 elif plan_status == 'error':
-                    logger.warning(f"  TP{next_tier + 1} 歷史查詢 API 錯誤，保留追蹤等下輪重試")
+                    logger.warning(f"  TP1 歷史查詢 API 錯誤，保留追蹤等下輪重試")
                     return
-
                 else:
-                    logger.info(f"  TP{next_tier + 1} 歷史查無此單 ({symbol})，清空追蹤準備補掛")
+                    logger.info(f"  TP1 歷史查無此單 ({symbol})，清空追蹤準備補掛")
                     sig['tp_order_id'] = ''
                     save_active_signals(saved_signals)
 
         # === 情況 2: tp_order_id 無值 → 掛出當階 TP 單 ===
         existing_tp_in_orders = any(tp_coid in get_coid(o) for o in open_orders)
         if existing_tp_in_orders:
-            logger.info(f"  TP{next_tier + 1} 已在掛單簿中 ({tp_coid})，跳過重複掛單")
+            logger.info(f"  TP1 已在掛單簿中 ({tp_coid})，跳過重複掛單")
             tp_obj = next((o for o in open_orders if tp_coid in get_coid(o)), None)
             if tp_obj:
                 sig['tp_order_id'] = str(tp_obj.get('id', tp_coid))
@@ -741,9 +724,9 @@ async def ensure_next_tp(exchange, symbol, side, sig, size, saved_signals, open_
             full_qty = float(exchange.amount_to_precision(symbol, size))
             if full_qty > 0 and full_qty * tp_price >= 6:
                 tp_qty = full_qty
-                logger.info(f"  TP{next_tier + 1} {int(current_close_pct * 100)}% 份額不足 6U，改為全倉平倉: {tp_qty}")
+                logger.info(f"  TP1 份額不足 6U，改為全倉平倉: {tp_qty}")
             else:
-                logger.debug(f"  TP{next_tier + 1} 全倉價值仍不足 6U，停止掛單 (粉塵由 SL 保護)")
+                logger.debug(f"  TP1 全倉價值仍不足 6U，停止掛單 (粉塵由 SL 保護)")
                 return
 
         order_side = 'sell' if direction == 'LONG' else 'buy'
@@ -753,7 +736,7 @@ async def ensure_next_tp(exchange, symbol, side, sig, size, saved_signals, open_
             'clientOid': tp_coid
         }
 
-        logger.info(f"🚀 掛出 TP{next_tier + 1} ({current_r_mult}R): {symbol} @ {tp_price:.{precision}f} | qty: {tp_qty} | ID: {tp_coid}")
+        logger.info(f"🚀 掛出 TP1 ({current_r_mult}R): {symbol} @ {tp_price:.{precision}f} | qty: {tp_qty} | ID: {tp_coid}")
         try:
             result = await exchange.create_order(symbol, 'market', order_side, tp_qty, None, params=tp_params)
             sig['tp_order_id'] = str(result.get('id', ''))
