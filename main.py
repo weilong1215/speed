@@ -546,7 +546,7 @@ async def place_order(exchange, symbol, direction, entry, sl, precision, fixed_l
                     'signal_id': signal_id, 'symbol': symbol, 'side': side, 'direction': direction,
                     'quantity': qty, 'entry_price': entry, 'sl_price': sl,
                     'original_sl_price': sl,
-                    'tp_next_tier': 0, 'status': 'active', 'precision': precision,
+                    'status': 'active', 'precision': precision,
                     'timestamp': trigger_ts if trigger_ts > 0 else int(time.time() * 1000)
                 })
                 save_active_signals(signals)
@@ -872,11 +872,11 @@ async def monitor_positions(exchange):
                     try:
                         entry_ts = int(sig.get('timestamp', 0))
                         
-                        # 3H 棒的收盤時間是 entry_ts + 3小時，我們只監測信號成立收盤後的 1H K 棒
-                        c2_close_ts = entry_ts + 3 * 3600 * 1000
+                        # L3 (3H棒) 的收盤時間是 entry_ts + 3小時，只監測此時間點之後的 1H K 棒
+                        l3_close_ts = entry_ts + 3 * 3600 * 1000
                         ohlcv_1h = []
                         try:
-                            ohlcv_1h = await exchange.fetch_ohlcv(symbol, '1h', since=c2_close_ts - 5 * 60 * 1000, limit=500)
+                            ohlcv_1h = await exchange.fetch_ohlcv(symbol, '1h', since=l3_close_ts - 5 * 60 * 1000, limit=500)
                         except Exception as e:
                             logger.warning(f"  監控拉取 1H K 棒異常 ({symbol}): {e}")
 
@@ -894,11 +894,11 @@ async def monitor_positions(exchange):
                             elif direction == 'SHORT' and current_price <= entry_price - TP_STEP_R * risk:
                                 is_runaway = True
 
-                            # 使用 1h K 棒做高低點精細比對 (只檢查 C2 收盤後的 K 棒)
+                            # 使用 1H K 棒做高低點精細比對 (只檢查 L3 收盤後的 K 棒)
                             if not is_runaway and len(ohlcv_1h) > 0:
                                 for candle in ohlcv_1h:
                                     candle_ts = int(candle[0])
-                                    if candle_ts >= c2_close_ts - 60000:
+                                    if candle_ts >= l3_close_ts - 60000:
                                         c_high = float(candle[2])
                                         c_low = float(candle[3])
                                         if direction == 'LONG' and c_high >= entry_price + 5 * risk:
@@ -933,7 +933,7 @@ async def monitor_positions(exchange):
                                     sig['status'] = 'closed'
                                 continue
 
-                        # 訊號淘汰條件撤單：若尚未進場，且3D線收盤跌破 10MA 或最低點低於止損價，則作廢訊號撤單
+                        # 訊號淘汰條件撤單：若尚未進場，且 1D 線收盤跌破/漲破 10MA，則作廢訊號撤單
                         if not is_runaway:
                             try:
                                 df_1d_eval = pd.DataFrame(ohlcv_1d, columns=['ts', 'open', 'high', 'low', 'close', 'vol'])
@@ -1010,14 +1010,14 @@ async def monitor_positions(exchange):
                 del saved_signals[sig_key]
 
         # 3. 盲目孤兒單清理 (訂單找名單)
-        # Entry 格式: 3d_{signal_id}, TP 格式: tp{n}_{signal_id}, SL 格式: sl_{signal_id}
+        # Entry 格式: entry_{signal_id}, TP 格式: tp1_{signal_id}, SL 格式: sl_{signal_id}
         tp_prefix_pattern = re.compile(r'^tp\d+_')
         all_active_ids = [str(s['signal_id']) for slist in saved_signals.values() for s in slist]
         for oo in open_orders:
             co_id = str(oo.get('clientOrderId') or oo.get('info', {}).get('clientOid') or "")
             is_sl = co_id.startswith("sl_")
             is_tp = bool(tp_prefix_pattern.match(co_id))
-            is_entry = co_id.startswith("3d_")
+            is_entry = co_id.startswith("entry_")
             if is_sl or is_tp or is_entry:
                 if is_sl:
                     raw_sig_id = co_id[3:]
