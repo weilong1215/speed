@@ -976,50 +976,6 @@ async def monitor_positions(exchange):
                                     sig['status'] = 'closed'
                                 continue
 
-                        # L1 邀界破壞撤單：進場前若 L1 18D 棒高/低點被突破，訊號基礎失效
-                        _l1_h = float(sig.get('l1_high', 0))
-                        _l1_l = float(sig.get('l1_low', 0))
-                        if _l1_h > 0 and _l1_l > 0:
-                            _bprec = sig.get('precision', 4)
-                            _bbroken = False
-                            _breason = ""
-                            for _c in ohlcv_1h:
-                                _c_ts = int(_c[0])
-                                if _c_ts >= l3_close_ts - 60000:
-                                    _c_close = float(_c[4])
-                                    _dt_tw = pd.to_datetime(_c_ts, unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d %H:%M')
-                                    if direction == 'LONG' and _c_close < _l1_l:
-                                        _bbroken = True
-                                        _breason = f"歷史 1H K棒 ({_dt_tw}) 收盤價 {_c_close:.{_bprec}f} 已跌破 L1 邀界低點 {_l1_l:.{_bprec}f}"
-                                        break
-                                    elif direction == 'SHORT' and _c_close > _l1_h:
-                                        _bbroken = True
-                                        _breason = f"歷史 1H K棒 ({_dt_tw}) 收盤價 {_c_close:.{_bprec}f} 已突破 L1 邀界高點 {_l1_h:.{_bprec}f}"
-                                        break
-                            if not _bbroken:
-                                if direction == 'LONG' and current_price < _l1_l:
-                                    _bbroken = True
-                                    _breason = f"市價 {current_price:.{_bprec}f} 已跌破 L1 邀界低點 {_l1_l:.{_bprec}f}"
-                                elif direction == 'SHORT' and current_price > _l1_h:
-                                    _bbroken = True
-                                    _breason = f"市價 {current_price:.{_bprec}f} 已突破 L1 邀界高點 {_l1_h:.{_bprec}f}"
-                            if _bbroken:
-                                logger.info(f"🚫 L1 邀界破壞 ({symbol}) {_breason}，撤銷未成交單 {signal_id}")
-                                _be_orders = [o for o in open_orders if str(o.get('clientOrderId') or o.get('info', {}).get('clientOid') or "") == str(signal_id)]
-                                for _beo in _be_orders:
-                                    try:
-                                        await exchange.cancel_order(_beo['id'], symbol)
-                                        open_orders = [o for o in open_orders if o['id'] != _beo['id']]
-                                    except Exception as _be:
-                                        logger.warning(f"撤銷未成交單失敗 {_beo['id']}: {_be}")
-                                send_telegram_message(
-                                    f"<b>\ud83d\udeab L1 邀界失效 (撤銷進場)</b>\n\n"
-                                    f"\ud83d\udc8e <b>交易對:</b> {get_base_coin(symbol)} [{direction}]\n"
-                                    f"\ud83d\udcc9 <b>狀態: {_breason}，已自動撤銷進場單</b>"
-                                )
-                                sig['status'] = 'closed'
-                                continue
-
                         # 訊號淘汰條件撤單：若尚未進場，且 1D 線收盤跌破/漲破 10MA，則作廢訊號撤單
                         if not is_runaway:
                             try:
