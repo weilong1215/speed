@@ -1263,8 +1263,8 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
                             l3_valid = False
                             
                     if l1_valid and b1d['ts'] >= l1_valid_ts:
-                        is_long = (b1d['high'] >= l1_high) and (b1d['close'] > b1d['ma_10'])
-                        is_short = (b1d['low'] <= l1_low) and (b1d['close'] < b1d['ma_10'])
+                        is_long = (b1d['close'] > l1_high) and (b1d['close'] > b1d['ma_10'])
+                        is_short = (b1d['close'] < l1_low) and (b1d['close'] < b1d['ma_10'])
                         
                         # 過濾 L1 的陰陽燭方向
                         if l1_trend == 'BULLISH':
