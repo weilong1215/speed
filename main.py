@@ -1305,7 +1305,7 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
                         k1, k2, k3 = history_3h[0], history_3h[1], history_3h[2]
                         
                         if l2_direction == 'LONG':
-                            cond1 = (k1['low'] <= k1['bb_lower']) or (k2['low'] <= k2['bb_lower']) or (k3['low'] <= k3['bb_lower'])
+                            cond1 = (k1['low'] <= k1['bb_lower']) and (k2['low'] <= k2['bb_lower'])
                             cond2 = (k2['low'] < k1['low']) and (k2['low'] < k3['low']) and (k2['high'] < k1['high']) and (k2['high'] < k3['high'])
                             cond3 = k3['close'] > max(k2['open'], k2['close'])
                             cond4 = (k1['close'] < k1['ma_20']) and (k1['open'] < k1['ma_20']) and \
@@ -1325,7 +1325,7 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
                                     trigger_ts = int(k3['ts'])
                         
                         elif l2_direction == 'SHORT':
-                            cond1 = (k1['high'] >= k1['bb_upper']) or (k2['high'] >= k2['bb_upper']) or (k3['high'] >= k3['bb_upper'])
+                            cond1 = (k1['high'] >= k1['bb_upper']) and (k2['high'] >= k2['bb_upper'])
                             cond2 = (k2['high'] > k1['high']) and (k2['high'] > k3['high']) and (k2['low'] > k1['low']) and (k2['low'] > k3['low'])
                             cond3 = k3['close'] < min(k2['open'], k2['close'])
                             cond4 = (k1['close'] > k1['ma_20']) and (k1['open'] > k1['ma_20']) and \
