@@ -1308,8 +1308,9 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
                                     (k2['close'] < k2['ma_20']) and (k2['open'] < k2['ma_20']) and \
                                     (k3['close'] < k3['ma_20']) and (k3['open'] < k3['ma_20'])
                             cond5 = (k2['close'] > k2['open']) and (k3['close'] > k3['open'])
+                            cond6 = k3['bb_lower'] >= l1_low
                             
-                            if cond1 and cond2 and cond3 and cond4 and cond5:
+                            if cond1 and cond2 and cond3 and cond4 and cond5 and cond6:
                                 _entry = float(k3['close'])
                                 _sl = float(k2['low'])
                                 _dist = abs(_entry - _sl) / _entry * 100 if _entry > 0 else 999
@@ -1328,8 +1329,9 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
                                     (k2['close'] > k2['ma_20']) and (k2['open'] > k2['ma_20']) and \
                                     (k3['close'] > k3['ma_20']) and (k3['open'] > k3['ma_20'])
                             cond5 = (k2['close'] < k2['open']) and (k3['close'] < k3['open'])
+                            cond6 = k3['bb_upper'] <= l1_high
                             
-                            if cond1 and cond2 and cond3 and cond4 and cond5:
+                            if cond1 and cond2 and cond3 and cond4 and cond5 and cond6:
                                 _entry = float(k3['close'])
                                 _sl = float(k2['high'])
                                 _dist = abs(_sl - _entry) / _entry * 100 if _entry > 0 else 999
