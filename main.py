@@ -1268,7 +1268,7 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
                             
                             if cond1 and cond2 and cond3 and cond4 and cond5 and cond6:
                                 _entry = float(k3['close'])
-                                _sl = float(k2['low'])
+                                _sl = float(k3['low'])
                                 _dist = abs(_entry - _sl) / _entry * 100 if _entry > 0 else 999
                                 if _dist <= 10:
                                     l3_valid = True
@@ -1289,7 +1289,7 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
                             
                             if cond1 and cond2 and cond3 and cond4 and cond5 and cond6:
                                 _entry = float(k3['close'])
-                                _sl = float(k2['high'])
+                                _sl = float(k3['high'])
                                 _dist = abs(_sl - _entry) / _entry * 100 if _entry > 0 else 999
                                 if _dist <= 10:
                                     l3_valid = True
