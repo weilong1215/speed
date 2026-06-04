@@ -119,10 +119,12 @@ def load_config():
         try:
             with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
                 config = json.load(f)
+            if "blacklist" not in config:
+                config["blacklist"] = ["XAUT", "PAXG", "TQQQ", "SQQQ"]
             return config
         except Exception as e:
             logger.error(f"讀取設定檔失敗: {e}")
-    return {"total_capital": 300, "loss_pct": 2}
+    return {"total_capital": 300, "loss_pct": 2, "blacklist": ["XAUT", "PAXG", "TQQQ", "SQQQ"]}
 
 def save_config(data):
     try:
@@ -1567,11 +1569,14 @@ def send_system_settings_message(config):
     """獨立一則系統設定訊息"""
     capital = config.get("total_capital", 300)
     loss_pct = config.get("loss_pct", 2)
+    blacklist = config.get("blacklist", ["XAUT", "PAXG", "TQQQ", "SQQQ"])
+    bl_str = ", ".join(blacklist) if blacklist else "無"
 
     msg = (
         f"⚙️ <b>系統快速設定</b>\n\n"
         f"💰 <b>預設總資金:</b> {capital} USDT\n"
-        f"📉 <b>每筆虧損:</b> {loss_pct}%"
+        f"📉 <b>每筆虧損:</b> {loss_pct}%\n"
+        f"🚫 <b>黑名單:</b> {bl_str}"
     )
 
     reply_markup = {
@@ -1579,6 +1584,10 @@ def send_system_settings_message(config):
             [
                 {"text": "💰 修改總資金", "switch_inline_query_current_chat": "/set_capital "},
                 {"text": "📉 修改虧損比例", "switch_inline_query_current_chat": "/set_loss_pct "}
+            ],
+            [
+                {"text": "➕ 增加黑名單", "switch_inline_query_current_chat": "/add_blacklist "},
+                {"text": "➖ 移除黑名單", "switch_inline_query_current_chat": "/remove_blacklist "}
             ]
         ]
     }
@@ -1657,6 +1666,40 @@ def poll_telegram_commands():
                 else:
                     reply = "❌ 格式錯誤，未提供數字。"
 
+            elif text.startswith("/add_blacklist"):
+                parts = text.split(maxsplit=1)
+                if len(parts) >= 2:
+                    coin = parts[1].strip().upper()
+                    config = load_config()
+                    blacklist = config.get("blacklist", ["XAUT", "PAXG", "TQQQ", "SQQQ"])
+                    if coin not in blacklist:
+                        blacklist.append(coin)
+                        config["blacklist"] = blacklist
+                        save_config(config)
+                        reply = f"✅ 已將 <b>{coin}</b> 加入黑名單"
+                        logger.info(f"⚙️ /add_blacklist 指令: 新增 {coin}")
+                    else:
+                        reply = f"⚠️ <b>{coin}</b> 已經在黑名單中"
+                else:
+                    reply = "❌ 格式錯誤，未提供幣種名稱。"
+
+            elif text.startswith("/remove_blacklist"):
+                parts = text.split(maxsplit=1)
+                if len(parts) >= 2:
+                    coin = parts[1].strip().upper()
+                    config = load_config()
+                    blacklist = config.get("blacklist", ["XAUT", "PAXG", "TQQQ", "SQQQ"])
+                    if coin in blacklist:
+                        blacklist.remove(coin)
+                        config["blacklist"] = blacklist
+                        save_config(config)
+                        reply = f"✅ 已將 <b>{coin}</b> 從黑名單移除"
+                        logger.info(f"⚙️ /remove_blacklist 指令: 移除 {coin}")
+                    else:
+                        reply = f"⚠️ <b>{coin}</b> 不在黑名單中"
+                else:
+                    reply = "❌ 格式錯誤，未提供幣種名稱。"
+
                 send_url = f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendMessage"
                 payload = {"chat_id": chat_id, "text": reply, "parse_mode": "HTML"}
                 requests.post(send_url, json=payload, timeout=10)
@@ -1680,7 +1723,9 @@ async def run_scan():
     try:
         try:
             markets = await ex.load_markets()
-            exclude_bases = {"USDC", "FDUSD", "TUSD", "USDP", "BUSD", "EUR", "GBP", "DAI", "XAUT", "PAXG", "TQQQ", "SQQQ"}
+            custom_blacklist = config.get("blacklist", ["XAUT", "PAXG", "TQQQ", "SQQQ"])
+            exclude_bases = {"USDC", "FDUSD", "TUSD", "USDP", "BUSD", "EUR", "GBP", "DAI"}
+            exclude_bases.update(custom_blacklist)
             coins = []
             for s, m in markets.items():
                 if m.get('linear') and m.get('quote') == 'USDT':
