@@ -911,12 +911,33 @@ async def monitor_positions(exchange):
 
                                 # 用日K的開盤時間比對，確保只檢查 C2 觸發「隔天」之後的日K
                                 if _last_1d_open_time > _entry_ts and not pd.isna(_last_1d['ma_10']):
+                                    _1d_open = float(_last_1d['open'])
                                     _1d_close = float(_last_1d['close'])
                                     _1d_ma10 = float(_last_1d['ma_10'])
                                     _1d_exit = False
                                     _1d_exit_reason = ""
                                     _1d_dt = pd.to_datetime(int(_last_1d['ts']), unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d')
+                                    _entry_price_sig = float(sig['entry_price'])
 
+                                    # 日線收盤反向K棒：做多遇陰棒 / 做空遇陽棒 → 止損移至開倉價 (保本)
+                                    _move_sl_to_be = False
+                                    if _dir == 'LONG' and _1d_close < _1d_open:
+                                        _move_sl_to_be = True
+                                    elif _dir == 'SHORT' and _1d_close > _1d_open:
+                                        _move_sl_to_be = True
+
+                                    if _move_sl_to_be and float(sig['sl_price']) != _entry_price_sig:
+                                        logger.info(f"🔄 1D 反向K棒 ({symbol} {_1d_dt})，止損移至開倉價 {_entry_price_sig}")
+                                        sig['sl_price'] = _entry_price_sig
+                                        save_active_signals(saved_signals)
+                                        send_telegram_message(
+                                            f"<b>🔄 止損移至保本 (1D 反向K棒)</b>\n\n"
+                                            f"💎 <b>交易對:</b> {get_base_coin(symbol)} [{_dir}]\n"
+                                            f"📅 <b>日期:</b> {_1d_dt}\n"
+                                            f"🛡️ <b>新止損價:</b> <code>{_entry_price_sig:.{_prec}f}</code> (= 開倉價)"
+                                        )
+
+                                    # 日線 10MA 淘汰：做多跌破 / 做空漲破 → 市價平倉
                                     if _dir == 'LONG' and _1d_close < _1d_ma10:
                                         _1d_exit = True
                                         _1d_exit_reason = f"1D 收盤 ({_1d_dt}) {_1d_close:.4f} 跌破 10MA ({_1d_ma10:.4f})"
