@@ -1425,7 +1425,7 @@ def send_grouped_message(item_list, title):
 
     date_groups = {}
     for item in filtered_items:
-        if title in ('🛑 <b>加密貨幣[未上車]</b>', '✅ <b>加密貨幣[持倉中]</b>'):
+        if title in ('🛑 <b>加密貨幣[未上車]</b>', '💼 <b>加密貨幣[持倉中]</b>'):
             raw_date = item.get('c2_date')
             if not raw_date or raw_date in ('未知', '未知日期', ''):
                 raw_date = item.get('c1_date', '')
