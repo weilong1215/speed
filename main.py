@@ -1680,7 +1680,7 @@ async def run_scan():
     try:
         try:
             markets = await ex.load_markets()
-            exclude_bases = {"USDC", "FDUSD", "TUSD", "USDP", "BUSD", "EUR", "GBP", "DAI", "XAUT", "PAXG"}
+            exclude_bases = {"USDC", "FDUSD", "TUSD", "USDP", "BUSD", "EUR", "GBP", "DAI", "XAUT", "PAXG", "TQQQ", "SQQQ"}
             coins = []
             for s, m in markets.items():
                 if m.get('linear') and m.get('quote') == 'USDT':
