@@ -1162,12 +1162,17 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
         trigger_ts = 0
         
         history_3h = []
+        c1_value = None
+        c1_ts = 0
+        c2_value = None
+        c2_ts = 0
+        simulated_pos = False
 
         # 主迴圈：以 3H (最高解析度) 推進
         for _, row in df_3h_closed.iterrows():
             t = int(row['close_ts'])
             history_3h.append(row)
-            if len(history_3h) > 3:
+            if len(history_3h) > 4:
                 history_3h.pop(0)
             
             # 1. 處理 18D (L1) 事件
@@ -1201,6 +1206,11 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
                 stop_loss = 0.0
                 trigger_ts = 0
                 history_3h = []
+                c1_value = None
+                c1_ts = 0
+                c2_value = None
+                c2_ts = 0
+                simulated_pos = False
 
             # 2. 處理 1D (L2) 事件
             if t in dict_1d:
@@ -1210,9 +1220,15 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
                         if l2_direction == 'LONG' and b1d['close'] < b1d['ma_10']:
                             l2_valid = False
                             l3_valid = False
+                            c1_value = None
+                            c2_value = None
+                            simulated_pos = False
                         elif l2_direction == 'SHORT' and b1d['close'] > b1d['ma_10']:
                             l2_valid = False
                             l3_valid = False
+                            c1_value = None
+                            c2_value = None
+                            simulated_pos = False
                             
                     if l1_valid and b1d['ts'] >= l1_valid_ts:
                         is_long = (b1d['close'] > l1_high) and (b1d['close'] > b1d['ma_10'])
@@ -1241,62 +1257,87 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
                                 l2_locked_l1_date = l1_date_str
                                 l3_valid = False
 
-            # 3. 處理 3H (L3) 事件
-            if pd.isna(row['ma_100']) or pd.isna(row['bb_lower']):
-                continue
-                
-            if len(history_3h) == 3:
-                if l3_valid:
+            # 3. 處理 3H (C1/C2) 事件
+            if len(history_3h) == 4:
+                # 處理止損與狀態持續
+                if l3_valid and simulated_pos:
                     if l2_direction == 'LONG' and row['low'] <= stop_loss:
+                        simulated_pos = False
                         l3_valid = False
+                        c1_value = c2_value  # 止損後 C2 變 C1
+                        c1_ts = c2_ts
+                        l3_date_str = pd.to_datetime(c1_ts, unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d %H:%M:%S')
                     elif l2_direction == 'SHORT' and row['high'] >= stop_loss:
+                        simulated_pos = False
                         l3_valid = False
+                        c1_value = c2_value  # 止損後 C2 變 C1
+                        c1_ts = c2_ts
+                        l3_date_str = pd.to_datetime(c1_ts, unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d %H:%M:%S')
 
-                if not l3_valid and l2_valid:
+                if not simulated_pos and l2_valid:
                     if row['ts'] >= l2_valid_ts:
-                        k1, k2, k3 = history_3h[0], history_3h[1], history_3h[2]
+                        k1, k2, k3, k4 = history_3h[0], history_3h[1], history_3h[2], history_3h[3]
+                        
+                        is_pattern_matched = False
+                        k3_extreme = 0
+                        k3_ts = int(k3['ts'])
                         
                         if l2_direction == 'LONG':
-                            cond1 = (k1['low'] <= k1['bb_lower']) and (k2['low'] <= k2['bb_lower'])
-                            cond2 = (k2['low'] < k1['low']) and (k2['low'] < k3['low']) and (k2['high'] < k1['high']) and (k2['high'] < k3['high'])
-                            cond3 = k3['close'] > max(k2['open'], k2['close'])
-                            cond4 = (k1['close'] < k1['ma_20']) and (k1['open'] < k1['ma_20']) and \
-                                    (k2['close'] < k2['ma_20']) and (k2['open'] < k2['ma_20']) and \
-                                    (k3['close'] < k3['ma_20']) and (k3['open'] < k3['ma_20'])
-                            cond5 = (k2['close'] > k2['open']) and (k3['close'] > k3['open'])
-                            cond6 = k3['bb_lower'] >= l1_high
+                            cond1 = (k1['close'] < k1['open']) and (k2['close'] < k2['open'])
+                            cond2 = (k3['close'] > k3['open']) and (k4['close'] > k4['open'])
+                            cond3 = k2['close'] < k1['close']
+                            cond4 = k4['close'] > k3['close']
                             
-                            if cond1 and cond2 and cond3 and cond4 and cond5 and cond6:
-                                _entry = float(k3['close'])
-                                _sl = float(k3['low'])
-                                _dist = abs(_entry - _sl) / _entry * 100 if _entry > 0 else 999
-                                if _dist <= 10:
-                                    l3_valid = True
-                                    l3_date_str = pd.to_datetime(k3['ts'], unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d %H:%M:%S')
-                                    entry_price = _entry
-                                    stop_loss = _sl
-                                    trigger_ts = int(k3['ts'])
-                        
+                            if cond1 and cond2 and cond3 and cond4:
+                                is_pattern_matched = True
+                                k3_extreme = float(k3['low'])
+                                
                         elif l2_direction == 'SHORT':
-                            cond1 = (k1['high'] >= k1['bb_upper']) and (k2['high'] >= k2['bb_upper'])
-                            cond2 = (k2['high'] > k1['high']) and (k2['high'] > k3['high']) and (k2['low'] > k1['low']) and (k2['low'] > k3['low'])
-                            cond3 = k3['close'] < min(k2['open'], k2['close'])
-                            cond4 = (k1['close'] > k1['ma_20']) and (k1['open'] > k1['ma_20']) and \
-                                    (k2['close'] > k2['ma_20']) and (k2['open'] > k2['ma_20']) and \
-                                    (k3['close'] > k3['ma_20']) and (k3['open'] > k3['ma_20'])
-                            cond5 = (k2['close'] < k2['open']) and (k3['close'] < k3['open'])
-                            cond6 = k3['bb_upper'] <= l1_low
+                            cond1 = (k1['close'] > k1['open']) and (k2['close'] > k2['open'])
+                            cond2 = (k3['close'] < k3['open']) and (k4['close'] < k4['open'])
+                            cond3 = k2['close'] > k1['close']
+                            cond4 = k4['close'] < k3['close']
                             
-                            if cond1 and cond2 and cond3 and cond4 and cond5 and cond6:
-                                _entry = float(k3['close'])
-                                _sl = float(k3['high'])
-                                _dist = abs(_sl - _entry) / _entry * 100 if _entry > 0 else 999
-                                if _dist <= 10:
-                                    l3_valid = True
-                                    l3_date_str = pd.to_datetime(k3['ts'], unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d %H:%M:%S')
-                                    entry_price = _entry
-                                    stop_loss = _sl
-                                    trigger_ts = int(k3['ts'])
+                            if cond1 and cond2 and cond3 and cond4:
+                                is_pattern_matched = True
+                                k3_extreme = float(k3['high'])
+                                
+                        if is_pattern_matched:
+                            if c1_value is None:
+                                c1_value = k3_extreme
+                                c1_ts = k3_ts
+                                l3_date_str = pd.to_datetime(c1_ts, unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d %H:%M:%S')
+                            else:
+                                c2_value = k3_extreme
+                                c2_ts = k3_ts
+                                
+                                is_valid_c2 = False
+                                if l2_direction == 'LONG':
+                                    if c2_value >= c1_value:
+                                        is_valid_c2 = True
+                                    else:
+                                        c1_value = c2_value
+                                        c1_ts = c2_ts
+                                        l3_date_str = pd.to_datetime(c1_ts, unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d %H:%M:%S')
+                                elif l2_direction == 'SHORT':
+                                    if c2_value <= c1_value:
+                                        is_valid_c2 = True
+                                    else:
+                                        c1_value = c2_value
+                                        c1_ts = c2_ts
+                                        l3_date_str = pd.to_datetime(c1_ts, unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d %H:%M:%S')
+                                        
+                                if is_valid_c2:
+                                    _entry = float(k4['close'])
+                                    _sl = float(k4['low']) if l2_direction == 'LONG' else float(k4['high'])
+                                    
+                                    _dist = abs(_entry - _sl) / _entry * 100 if _entry > 0 else 999
+                                    if _dist <= 10:
+                                        l3_valid = True
+                                        simulated_pos = True
+                                        entry_price = _entry
+                                        stop_loss = _sl
+                                        trigger_ts = int(k4['ts'])
 
         is_trigger_met = l3_valid
         if is_trigger_met:
