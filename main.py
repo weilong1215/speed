@@ -1398,30 +1398,26 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
                                 c2_ts = k3_ts
                                 
                                 is_valid_c2 = False
-                                if l2_direction == 'LONG':
-                                    if c2_value >= c1_value:
+                                distance_pct = abs(c1_value - c2_value) / c1_value * 100 if c1_value > 0 else 0
+                                
+                                if distance_pct <= 10:
+                                    if l2_direction == 'LONG' and c2_value >= c1_value:
                                         is_valid_c2 = True
-                                    else:
-                                        c1_value = c2_value
-                                        c1_ts = c2_ts
-                                        c1_date_str = pd.to_datetime(c1_ts, unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d %H:%M:%S')
-                                        c2_value = None
-                                        c2_ts = 0
-                                        c2_date_str = "未知"
-                                elif l2_direction == 'SHORT':
-                                    if c2_value <= c1_value:
+                                    elif l2_direction == 'SHORT' and c2_value <= c1_value:
                                         is_valid_c2 = True
-                                    else:
-                                        c1_value = c2_value
-                                        c1_ts = c2_ts
-                                        c1_date_str = pd.to_datetime(c1_ts, unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d %H:%M:%S')
-                                        c2_value = None
-                                        c2_ts = 0
-                                        c2_date_str = "未知"
+
+                                if not is_valid_c2:
+                                    c1_value = c2_value
+                                    c1_ts = c2_ts
+                                    c1_date_str = pd.to_datetime(c1_ts, unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d %H:%M:%S')
+                                    c2_value = None
+                                    c2_ts = 0
+                                    c2_date_str = "未知"
                                         
                                 if is_valid_c2:
-                                    _entry = float(k4['close'])
-                                    _sl = float(k4['low']) if l2_direction == 'LONG' else float(k4['high'])
+                                    # 進場用第三根(k3)的收盤價格，止損用第三根的最低/高點(即 c2_value)
+                                    _entry = float(k3['close'])
+                                    _sl = float(c2_value)
                                     
                                     _dist = abs(_entry - _sl) / _entry * 100 if _entry > 0 else 999
                                     if _dist <= 10:
