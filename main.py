@@ -894,6 +894,51 @@ async def monitor_positions(exchange):
                         except Exception as _e18:
                             logger.warning(f"18D 方向淘汰監控異常 ({symbol}): {_e18}")
 
+                    # 進場後 1D 收盤跌破/漲破 10MA → 市價平倉
+                    _entry_ts = int(sig.get('timestamp', 0))
+                    if _entry_ts > 0:
+                        try:
+                            _ohlcv_1d_pos = await exchange.fetch_ohlcv(symbol, '1d', limit=200)
+                            _df_1d_pos = pd.DataFrame(_ohlcv_1d_pos, columns=['ts', 'open', 'high', 'low', 'close', 'vol'])
+                            _df_1d_pos['close_ts'] = _df_1d_pos['ts'] + 86400000
+                            _df_1d_pos['ma_10'] = _df_1d_pos['close'].rolling(window=10).mean()
+                            _now_ms_1d = int(time.time() * 1000)
+                            _closed_1d_pos = _df_1d_pos[_df_1d_pos['close_ts'] <= _now_ms_1d]
+
+                            if len(_closed_1d_pos) > 0:
+                                _last_1d = _closed_1d_pos.iloc[-1]
+                                _last_1d_close_time = int(_last_1d['close_ts'])
+
+                                if _last_1d_close_time > _entry_ts and not pd.isna(_last_1d['ma_10']):
+                                    _1d_close = float(_last_1d['close'])
+                                    _1d_ma10 = float(_last_1d['ma_10'])
+                                    _1d_exit = False
+                                    _1d_exit_reason = ""
+                                    _1d_dt = pd.to_datetime(int(_last_1d['ts']), unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d')
+
+                                    if _dir == 'LONG' and _1d_close < _1d_ma10:
+                                        _1d_exit = True
+                                        _1d_exit_reason = f"1D 收盤 ({_1d_dt}) {_1d_close:.4f} 跌破 10MA ({_1d_ma10:.4f})"
+                                    elif _dir == 'SHORT' and _1d_close > _1d_ma10:
+                                        _1d_exit = True
+                                        _1d_exit_reason = f"1D 收盤 ({_1d_dt}) {_1d_close:.4f} 漲破 10MA ({_1d_ma10:.4f})"
+
+                                    if _1d_exit:
+                                        logger.info(f"📉 1D 10MA 淘汰 ({symbol}) {_1d_exit_reason}，執行市價平倉")
+                                        try:
+                                            _cs_1d = 'sell' if _dir == 'LONG' else 'buy'
+                                            _cp_1d = {'reduceOnly': True, 'hedged': True, 'holdSide': 'long' if _dir == 'LONG' else 'short'}
+                                            await exchange.create_order(symbol, 'market', _cs_1d, size, None, params=_cp_1d)
+                                            send_telegram_message(
+                                                f"<b>📉 1D 10MA 淘汰 (市價平倉)</b>\n\n"
+                                                f"💎 <b>交易對:</b> {get_base_coin(symbol)} [{_dir}]\n"
+                                                f"📉 <b>原因: {_1d_exit_reason}，已市價平倉</b>"
+                                            )
+                                        except Exception as _ex1d:
+                                            logger.error(f"1D 10MA 淘汰平倉失敗 ({symbol}): {_ex1d}")
+                        except Exception as _e1d:
+                            logger.warning(f"1D 10MA 淘汰監控異常 ({symbol}): {_e1d}")
+
             if not found_signal:
                 logger.warning(f"⚠️ 發現外部倉位: {symbol} ({side}) | 本地無掃描信號，系統不介入。")
 
@@ -976,7 +1021,7 @@ async def monitor_positions(exchange):
                                     sig['status'] = 'closed'
                                 continue
 
-                        # 訊號淘汰條件撤單：若尚未進場，且 1D 線收盤跌破/漲破 10MA，則作廢訊號撤單
+                        # 訊號淘汰條件撤單：若尚未進場，且 1D 線收盤出現反向 K 棒或跌破/漲破 10MA，則作廢訊號撤單
                         if not is_runaway:
                             try:
                                 df_1d_eval = pd.DataFrame(ohlcv_1d, columns=['ts', 'open', 'high', 'low', 'close', 'vol'])
@@ -991,16 +1036,24 @@ async def monitor_positions(exchange):
                                     last_close_time = int(last_closed['close_ts'])
                                     
                                     if last_close_time > entry_ts:
-                                        # 多空分流判斷 1D 10MA 淘汰條件
+                                        c_open = float(last_closed['open'])
                                         c_close = float(last_closed['close'])
                                         c_ma10 = float(last_closed['ma_10'])
                                         revoke_reason = None
-                                        if direction == 'LONG' and c_close < c_ma10:
-                                            # 多單：收盤跌破 10MA，趨勢轉弱，淘汰訊號
-                                            revoke_reason = f"1D線收盤 ({c_close:.4f}) 跌破 10MA ({c_ma10:.4f})"
-                                        elif direction == 'SHORT' and c_close > c_ma10:
-                                            # 空單：收盤漲破 10MA，趨勢轉強，淘汰訊號
-                                            revoke_reason = f"1D線收盤 ({c_close:.4f}) 漲破 10MA ({c_ma10:.4f})"
+
+                                        # 日線收盤陰陽棒判斷：做多遇陰棒 / 做空遇陽棒 → 撤單
+                                        if direction == 'LONG' and c_close < c_open:
+                                            revoke_reason = f"1D線收盤陰棒 (O:{c_open:.4f} C:{c_close:.4f})，動能轉弱"
+                                        elif direction == 'SHORT' and c_close > c_open:
+                                            revoke_reason = f"1D線收盤陽棒 (O:{c_open:.4f} C:{c_close:.4f})，動能轉強"
+
+                                        # 日線 10MA 淘汰：做多跌破 / 做空漲破 → 撤單
+                                        if not revoke_reason:
+                                            if direction == 'LONG' and c_close < c_ma10:
+                                                revoke_reason = f"1D線收盤 ({c_close:.4f}) 跌破 10MA ({c_ma10:.4f})"
+                                            elif direction == 'SHORT' and c_close > c_ma10:
+                                                revoke_reason = f"1D線收盤 ({c_close:.4f}) 漲破 10MA ({c_ma10:.4f})"
+
                                         if revoke_reason:
                                                 logger.info(f"🚫 淘汰條件已成立 [{revoke_reason}] ({symbol})，撤銷未成交單 {signal_id}")
                                                 entry_orders = [o for o in open_orders if str(o.get('clientOrderId') or o.get('info', {}).get('clientOid') or "") == str(signal_id)]
