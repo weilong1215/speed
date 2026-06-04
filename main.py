@@ -907,9 +907,10 @@ async def monitor_positions(exchange):
 
                             if len(_closed_1d_pos) > 0:
                                 _last_1d = _closed_1d_pos.iloc[-1]
-                                _last_1d_close_time = int(_last_1d['close_ts'])
+                                _last_1d_open_time = int(_last_1d['ts'])
 
-                                if _last_1d_close_time > _entry_ts and not pd.isna(_last_1d['ma_10']):
+                                # 用日K的開盤時間比對，確保只檢查 C2 觸發「隔天」之後的日K
+                                if _last_1d_open_time > _entry_ts and not pd.isna(_last_1d['ma_10']):
                                     _1d_close = float(_last_1d['close'])
                                     _1d_ma10 = float(_last_1d['ma_10'])
                                     _1d_exit = False
@@ -1033,9 +1034,10 @@ async def monitor_positions(exchange):
                                 
                                 if len(closed_1d) > 0:
                                     last_closed = closed_1d.iloc[-1]
-                                    last_close_time = int(last_closed['close_ts'])
+                                    last_open_time = int(last_closed['ts'])
                                     
-                                    if last_close_time > entry_ts:
+                                    # 用日K的開盤時間比對，確保只檢查 C2 觸發「隔天」之後的日K
+                                    if last_open_time > entry_ts:
                                         c_open = float(last_closed['open'])
                                         c_close = float(last_closed['close'])
                                         c_ma10 = float(last_closed['ma_10'])
