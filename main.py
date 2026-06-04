@@ -1418,14 +1418,14 @@ def send_grouped_message(item_list, title):
     if not item_list:
         return
 
-    filtered_items = [item for item in item_list if item.get('l2_date') not in (None, '未知', '未知日期', '') or item.get('c1_date') not in (None, '未知', '未知日期', '')]
+    filtered_items = [item for item in item_list if item.get('l2_date') not in (None, '未知', '未知日期', '') or item.get('c1_date') not in (None, '未知', '未知日期', '') or item.get('c2_date') not in (None, '未知', '未知日期', '')]
         
     if not filtered_items:
         return
 
     date_groups = {}
     for item in filtered_items:
-        if title == '🛑 <b>加密貨幣[未上車]</b>':
+        if title in ('🛑 <b>加密貨幣[未上車]</b>', '✅ <b>加密貨幣[持倉中]</b>'):
             raw_date = item.get('c2_date')
             if not raw_date or raw_date in ('未知', '未知日期', ''):
                 raw_date = item.get('c1_date', '')
