@@ -1155,7 +1155,8 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
         l2_locked_l1_date = "未知"
 
         l3_valid = False
-        l3_date_str = "未知"
+        c1_date_str = "未知"
+        c2_date_str = "未知"
         
         entry_price = 0.0
         stop_loss = 0.0
@@ -1201,7 +1202,8 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
                 l2_date_str = "未知"
                 l2_locked_l1_date = "未知"
                 l3_valid = False
-                l3_date_str = "未知"
+                c1_date_str = "未知"
+                c2_date_str = "未知"
                 entry_price = 0.0
                 stop_loss = 0.0
                 trigger_ts = 0
@@ -1266,13 +1268,19 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
                         l3_valid = False
                         c1_value = c2_value  # 止損後 C2 變 C1
                         c1_ts = c2_ts
-                        l3_date_str = pd.to_datetime(c1_ts, unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d %H:%M:%S')
+                        c1_date_str = pd.to_datetime(c1_ts, unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d %H:%M:%S') if c1_ts > 0 else "未知"
+                        c2_value = None
+                        c2_ts = 0
+                        c2_date_str = "未知"
                     elif l2_direction == 'SHORT' and row['high'] >= stop_loss:
                         simulated_pos = False
                         l3_valid = False
                         c1_value = c2_value  # 止損後 C2 變 C1
                         c1_ts = c2_ts
-                        l3_date_str = pd.to_datetime(c1_ts, unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d %H:%M:%S')
+                        c1_date_str = pd.to_datetime(c1_ts, unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d %H:%M:%S') if c1_ts > 0 else "未知"
+                        c2_value = None
+                        c2_ts = 0
+                        c2_date_str = "未知"
 
                 if not simulated_pos and l2_valid:
                     if row['ts'] >= l2_valid_ts:
@@ -1306,7 +1314,7 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
                             if c1_value is None:
                                 c1_value = k3_extreme
                                 c1_ts = k3_ts
-                                l3_date_str = pd.to_datetime(c1_ts, unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d %H:%M:%S')
+                                c1_date_str = pd.to_datetime(c1_ts, unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d %H:%M:%S')
                             else:
                                 c2_value = k3_extreme
                                 c2_ts = k3_ts
@@ -1318,14 +1326,20 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
                                     else:
                                         c1_value = c2_value
                                         c1_ts = c2_ts
-                                        l3_date_str = pd.to_datetime(c1_ts, unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d %H:%M:%S')
+                                        c1_date_str = pd.to_datetime(c1_ts, unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d %H:%M:%S')
+                                        c2_value = None
+                                        c2_ts = 0
+                                        c2_date_str = "未知"
                                 elif l2_direction == 'SHORT':
                                     if c2_value <= c1_value:
                                         is_valid_c2 = True
                                     else:
                                         c1_value = c2_value
                                         c1_ts = c2_ts
-                                        l3_date_str = pd.to_datetime(c1_ts, unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d %H:%M:%S')
+                                        c1_date_str = pd.to_datetime(c1_ts, unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d %H:%M:%S')
+                                        c2_value = None
+                                        c2_ts = 0
+                                        c2_date_str = "未知"
                                         
                                 if is_valid_c2:
                                     _entry = float(k4['close'])
@@ -1335,6 +1349,7 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
                                     if _dist <= 10:
                                         l3_valid = True
                                         simulated_pos = True
+                                        c2_date_str = pd.to_datetime(c2_ts, unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d %H:%M:%S')
                                         entry_price = _entry
                                         stop_loss = _sl
                                         trigger_ts = int(k4['ts'])
@@ -1378,7 +1393,8 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
             'stop_loss':          stop_loss,
             'trigger_ts':         trigger_ts,
             'precision':          precision,
-            'l3_date':            l3_date_str,
+            'c1_date':            c1_date_str,
+            'c2_date':            c2_date_str,
             'l1_date':            l2_locked_l1_date if l2_valid else l1_date_str,
             'l2_date':            l2_date_str,
             'l2_direction':       l2_direction,
@@ -1402,7 +1418,7 @@ def send_grouped_message(item_list, title):
     if not item_list:
         return
 
-    filtered_items = [item for item in item_list if item.get('l2_date') not in (None, '未知', '未知日期', '') or item.get('l3_date') not in (None, '未知', '未知日期', '')]
+    filtered_items = [item for item in item_list if item.get('l2_date') not in (None, '未知', '未知日期', '') or item.get('c1_date') not in (None, '未知', '未知日期', '')]
         
     if not filtered_items:
         return
@@ -1410,13 +1426,13 @@ def send_grouped_message(item_list, title):
     date_groups = {}
     for item in filtered_items:
         if title == '🛑 <b>加密貨幣[未上車]</b>':
-            raw_date = item.get('l3_date')
+            raw_date = item.get('c2_date')
+            if not raw_date or raw_date in ('未知', '未知日期', ''):
+                raw_date = item.get('c1_date', '')
+        else:
+            raw_date = item.get('c1_date')
             if not raw_date or raw_date in ('未知', '未知日期', ''):
                 raw_date = item.get('l2_date', '')
-        else:
-            raw_date = item.get('l2_date')
-            if not raw_date or raw_date in ('未知', '未知日期', ''):
-                raw_date = item.get('l3_date', '')
                 
         # 只截取前 10 碼 YYYY-MM-DD，不要具體時間
         d = raw_date[:10] if len(raw_date) >= 10 else raw_date
@@ -1451,7 +1467,8 @@ def send_triggered_message(item, default_loss):
     sl = item['stop_loss']
     l1_d = item.get('l1_date', '未知')
     l2_d = item.get('l2_date', '未知')
-    l3_d = item.get('l3_date', '未知')
+    l3_d = item.get('c2_date', '未知')
+    c1_d = item.get('c1_date', '未知')
     direction = item.get('l2_direction', '')
     dir_icon = "🟢" if direction == "LONG" else "🔴" if direction == "SHORT" else ""
 
@@ -1462,7 +1479,8 @@ def send_triggered_message(item, default_loss):
         f"{dir_icon} 💎 <b>交易對:</b> {display_symbol}\n\n"
         f"📅 <b>L1 (18日) 日期:</b> <code>{l1_d}</code>\n"
         f"📅 <b>L2 (1日) 日期:</b> <code>{l2_d}</code>\n"
-        f"📅 <b>L3 (3H) 觸發時間:</b> <code>{l3_d}</code>\n"
+        f"📅 <b>C1 成立時間:</b> <code>{c1_d}</code>\n"
+        f"📅 <b>C2 觸發時間:</b> <code>{l3_d}</code>\n"
         f"📍 <b>進場價格:</b> <code>{entry:.{precision}f}</code>\n"
         f"🛡️ <b>止損價格:</b> <code>{sl:.{precision}f}</code>\n"
         f"💰 <b>倉位價值:</b> <code>{position_value:.2f} USDT</code>"
@@ -1642,12 +1660,12 @@ async def run_scan():
                     sym = s['symbol']
                     ts = s.get('timestamp', 0)
                     dt_str = pd.to_datetime(ts, unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d') if ts > 0 else '持續追蹤'
-                    holding_map[sym] = {'symbol': sym, 'l3_date': dt_str, 'l2_direction': s.get('direction', '')}
+                    holding_map[sym] = {'symbol': sym, 'c2_date': dt_str, 'l2_direction': s.get('direction', '')}
                     
         for p in existing_positions:
             sym = p['symbol']
             if sym not in holding_map:
-                holding_map[sym] = {'symbol': sym, 'l3_date': '外部建倉', 'l2_direction': p['side'].upper()}
+                holding_map[sym] = {'symbol': sym, 'c2_date': '外部建倉', 'l2_direction': p['side'].upper()}
 
         holding_items = []
         real_watching = []
