@@ -1382,25 +1382,6 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
 
             # 3. 處理 3H (C1/C2) 事件
             if len(history_3h) >= 3:
-                # C1 失效判斷：價格碰觸到 C1 的極值就失效
-                if c1_value is not None and not simulated_pos:
-                    if l2_direction == 'LONG' and row['low'] <= c1_value:
-                        c1_value = None
-                        c1_ts = 0
-                        c1_date_str = "未知"
-                        c2_value = None
-                        c2_ts = 0
-                        c2_date_str = "未知"
-                        l3_valid = False
-                    elif l2_direction == 'SHORT' and row['high'] >= c1_value:
-                        c1_value = None
-                        c1_ts = 0
-                        c1_date_str = "未知"
-                        c2_value = None
-                        c2_ts = 0
-                        c2_date_str = "未知"
-                        l3_valid = False
-
                 # 處理止損：止損後只重置 C2，保留 C1 繼續尋找新 C2
                 if l3_valid and simulated_pos:
                     if l2_direction == 'LONG' and row['low'] <= stop_loss:
@@ -1415,6 +1396,27 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
                         c2_value = None
                         c2_ts = 0
                         c2_date_str = "未知"
+
+                # C1 失效判斷：價格碰觸到 C1 的極值就失效 (不論是否在尋找 C2，只要碰到 C1 防線就廢除)
+                if c1_value is not None:
+                    if l2_direction == 'LONG' and row['low'] <= c1_value:
+                        c1_value = None
+                        c1_ts = 0
+                        c1_date_str = "未知"
+                        c2_value = None
+                        c2_ts = 0
+                        c2_date_str = "未知"
+                        l3_valid = False
+                        simulated_pos = False
+                    elif l2_direction == 'SHORT' and row['high'] >= c1_value:
+                        c1_value = None
+                        c1_ts = 0
+                        c1_date_str = "未知"
+                        c2_value = None
+                        c2_ts = 0
+                        c2_date_str = "未知"
+                        l3_valid = False
+                        simulated_pos = False
 
                 if not simulated_pos and l2_valid:
                     if row['ts'] >= l2_valid_ts:
