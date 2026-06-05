@@ -372,8 +372,51 @@ async def place_order(exchange, symbol, direction, entry, sl, precision, fixed_l
                             alert_type = "SL"
                             skip_reason = f"歷史 1H K 棒 ({dt_taiwan}) 最高價 {c_high:.{precision}f} 已達到/突破止損點 ({sl:.{precision}f})"
                             break
+                            break
                             
-            # 2. 檢查最新 Ticker 價格
+            # 2. 檢查 1D 淘汰條件 (收盤反向或跌/漲破 10MA)
+            if not skip_order:
+                try:
+                    ohlcv_1d = await exchange.fetch_ohlcv(symbol, '1d', limit=200)
+                    df_1d_eval = pd.DataFrame(ohlcv_1d, columns=['ts', 'open', 'high', 'low', 'close', 'vol'])
+                    df_1d_eval['close_ts'] = df_1d_eval['ts'] + 86400000
+                    df_1d_eval['ma_10'] = df_1d_eval['close'].rolling(window=10).mean()
+                    now_utc_1d_fl = int(time.time() * 1000)
+                    closed_1d = df_1d_eval[df_1d_eval['close_ts'] <= now_utc_1d_fl]
+                    
+                    if len(closed_1d) > 0:
+                        valid_closed = closed_1d[closed_1d['ts'] > trigger_ts]
+                        for _, c1d in valid_closed.iterrows():
+                            c_open = float(c1d['open'])
+                            c_close = float(c1d['close'])
+                            c_ma10 = float(c1d['ma_10'])
+                            dt_str = pd.to_datetime(c1d['ts'], unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d')
+                            
+                            if direction == 'LONG' and c_close < c_open:
+                                skip_order = True
+                                alert_type = "淘汰"
+                                skip_reason = f"歷史 1D線 ({dt_str}) 收盤陰棒 (O:{c_open:.4f} C:{c_close:.4f})，動能轉弱"
+                                break
+                            elif direction == 'SHORT' and c_close > c_open:
+                                skip_order = True
+                                alert_type = "淘汰"
+                                skip_reason = f"歷史 1D線 ({dt_str}) 收盤陽棒 (O:{c_open:.4f} C:{c_close:.4f})，動能轉強"
+                                break
+                                
+                            if direction == 'LONG' and c_close < c_ma10:
+                                skip_order = True
+                                alert_type = "淘汰"
+                                skip_reason = f"歷史 1D線 ({dt_str}) 收盤 ({c_close:.4f}) 跌破 10MA ({c_ma10:.4f})"
+                                break
+                            elif direction == 'SHORT' and c_close > c_ma10:
+                                skip_order = True
+                                alert_type = "淘汰"
+                                skip_reason = f"歷史 1D線 ({dt_str}) 收盤 ({c_close:.4f}) 漲破 10MA ({c_ma10:.4f})"
+                                break
+                except Exception as e:
+                    logger.warning(f"下單前檢查 1D 條件異常 ({symbol}): {e}")
+
+            # 3. 檢查最新 Ticker 價格
             if not skip_order:
                 ticker = await exchange.fetch_ticker(symbol)
                 current_price = float(ticker['last'])
@@ -1056,28 +1099,28 @@ async def monitor_positions(exchange):
                                 closed_1d = df_1d_eval[df_1d_eval['close_ts'] <= now_utc_1d_fl]
                                 
                                 if len(closed_1d) > 0:
-                                    last_closed = closed_1d.iloc[-1]
-                                    last_open_time = int(last_closed['ts'])
+                                    valid_closed = closed_1d[closed_1d['ts'] > entry_ts]
+                                    revoke_reason = None
                                     
-                                    # 用日K的開盤時間比對，確保只檢查 C2 觸發「隔天」之後的日K
-                                    if last_open_time > entry_ts:
-                                        c_open = float(last_closed['open'])
-                                        c_close = float(last_closed['close'])
-                                        c_ma10 = float(last_closed['ma_10'])
-                                        revoke_reason = None
-
-                                        # 日線收盤陰陽棒判斷：做多遇陰棒 / 做空遇陽棒 → 撤單
+                                    for _, c1d in valid_closed.iterrows():
+                                        c_open = float(c1d['open'])
+                                        c_close = float(c1d['close'])
+                                        c_ma10 = float(c1d['ma_10'])
+                                        dt_str = pd.to_datetime(c1d['ts'], unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d')
+                                        
                                         if direction == 'LONG' and c_close < c_open:
-                                            revoke_reason = f"1D線收盤陰棒 (O:{c_open:.4f} C:{c_close:.4f})，動能轉弱"
+                                            revoke_reason = f"歷史 1D線 ({dt_str}) 收盤陰棒 (O:{c_open:.4f} C:{c_close:.4f})，動能轉弱"
+                                            break
                                         elif direction == 'SHORT' and c_close > c_open:
-                                            revoke_reason = f"1D線收盤陽棒 (O:{c_open:.4f} C:{c_close:.4f})，動能轉強"
-
-                                        # 日線 10MA 淘汰：做多跌破 / 做空漲破 → 撤單
-                                        if not revoke_reason:
-                                            if direction == 'LONG' and c_close < c_ma10:
-                                                revoke_reason = f"1D線收盤 ({c_close:.4f}) 跌破 10MA ({c_ma10:.4f})"
-                                            elif direction == 'SHORT' and c_close > c_ma10:
-                                                revoke_reason = f"1D線收盤 ({c_close:.4f}) 漲破 10MA ({c_ma10:.4f})"
+                                            revoke_reason = f"歷史 1D線 ({dt_str}) 收盤陽棒 (O:{c_open:.4f} C:{c_close:.4f})，動能轉強"
+                                            break
+                                            
+                                        if direction == 'LONG' and c_close < c_ma10:
+                                            revoke_reason = f"歷史 1D線 ({dt_str}) 收盤 ({c_close:.4f}) 跌破 10MA ({c_ma10:.4f})"
+                                            break
+                                        elif direction == 'SHORT' and c_close > c_ma10:
+                                            revoke_reason = f"歷史 1D線 ({dt_str}) 收盤 ({c_close:.4f}) 漲破 10MA ({c_ma10:.4f})"
+                                            break
 
                                         if revoke_reason:
                                                 logger.info(f"🚫 淘汰條件已成立 [{revoke_reason}] ({symbol})，撤銷未成交單 {signal_id}")
@@ -1406,13 +1449,11 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
                                 c2_ts = k3_ts
                                 
                                 is_valid_c2 = False
-                                distance_pct = abs(c1_value - c2_value) / c1_value * 100 if c1_value > 0 else 0
                                 
-                                if distance_pct <= 10:
-                                    if l2_direction == 'LONG' and c2_value >= c1_value:
-                                        is_valid_c2 = True
-                                    elif l2_direction == 'SHORT' and c2_value <= c1_value:
-                                        is_valid_c2 = True
+                                if l2_direction == 'LONG' and c2_value >= c1_value:
+                                    is_valid_c2 = True
+                                elif l2_direction == 'SHORT' and c2_value <= c1_value:
+                                    is_valid_c2 = True
 
                                 if not is_valid_c2:
                                     c1_value = c2_value
