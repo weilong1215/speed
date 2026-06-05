@@ -1408,8 +1408,8 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
                         k1, k2, k3, k4 = history_3h[0], history_3h[1], history_3h[2], history_3h[3]
                         
                         is_pattern_matched = False
-                        k3_extreme = 0
-                        k3_ts = int(k3['ts'])
+                        k4_extreme = 0
+                        k4_ts = int(k4['ts'])
                         
                         if l2_direction == 'LONG':
                             cond1 = (k1['close'] < k1['open']) and (k2['close'] < k2['open'])
@@ -1423,7 +1423,7 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
                             
                             if cond1 and cond2 and cond3 and cond4 and cond5:
                                 is_pattern_matched = True
-                                k3_extreme = float(k3['low'])
+                                k4_extreme = float(k4['low'])
                                 
                         elif l2_direction == 'SHORT':
                             cond1 = (k1['close'] > k1['open']) and (k2['close'] > k2['open'])
@@ -1437,16 +1437,16 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
                             
                             if cond1 and cond2 and cond3 and cond4 and cond5:
                                 is_pattern_matched = True
-                                k3_extreme = float(k3['high'])
+                                k4_extreme = float(k4['high'])
                                 
                         if is_pattern_matched:
                             if c1_value is None:
-                                c1_value = k3_extreme
-                                c1_ts = k3_ts
+                                c1_value = k4_extreme
+                                c1_ts = k4_ts
                                 c1_date_str = pd.to_datetime(c1_ts, unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d %H:%M:%S')
                             else:
-                                c2_value = k3_extreme
-                                c2_ts = k3_ts
+                                c2_value = k4_extreme
+                                c2_ts = k4_ts
                                 
                                 is_valid_c2 = False
                                 
@@ -1464,8 +1464,8 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
                                     c2_date_str = "未知"
                                         
                                 if is_valid_c2:
-                                    # 進場用第三根(k3)的收盤價格，止損用第三根的最低/高點(即 c2_value)
-                                    _entry = float(k3['close'])
+                                    # 進場用第四根(k4)的收盤價格，止損用第四根的最低/高點(即 c2_value)
+                                    _entry = float(k4['close'])
                                     _sl = float(c2_value)
                                     
                                     _dist = abs(_entry - _sl) / _entry * 100 if _entry > 0 else 999
