@@ -1434,7 +1434,13 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
                                 if cond1 and cond2 and cond3 and cond4 and cond5:
                                     is_c1_pattern = True
                                     # C1 做多：四根裡面最低點
-                                    c1_value = min(float(k1['low']), float(k2['low']), float(k3['low']), float(k4['low']))
+                                    c1_value = float('inf')
+                                    c1_ts = 0
+                                    for k in [k1, k2, k3, k4]:
+                                        k_low = float(k['low'])
+                                        if k_low < c1_value:
+                                            c1_value = k_low
+                                            c1_ts = int(k['ts'])
                                     
                             elif l2_direction == 'SHORT':
                                 cond1 = (k1['close'] > k1['open']) and (k2['close'] > k2['open'])
@@ -1446,10 +1452,15 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
                                 if cond1 and cond2 and cond3 and cond4 and cond5:
                                     is_c1_pattern = True
                                     # C1 做空：四根裡面最高點
-                                    c1_value = max(float(k1['high']), float(k2['high']), float(k3['high']), float(k4['high']))
+                                    c1_value = float('-inf')
+                                    c1_ts = 0
+                                    for k in [k1, k2, k3, k4]:
+                                        k_high = float(k['high'])
+                                        if k_high > c1_value:
+                                            c1_value = k_high
+                                            c1_ts = int(k['ts'])
                             
                             if is_c1_pattern:
-                                c1_ts = int(k4['ts'])
                                 c1_date_str = pd.to_datetime(c1_ts, unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d %H:%M:%S')
 
                         # === C2 偵測：需要 3 根 K 棒，且 C1 已成立 ===
@@ -1459,10 +1470,10 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
                             is_c2_pattern = False
                             
                             if l2_direction == 'LONG':
-                                cond1 = (k1_c2['close'] < k1_c2['open'])
-                                cond2 = (k2_c2['close'] > k2_c2['open']) and (k3_c2['close'] > k3_c2['open'])
-                                # 第二根吞噬第一根的實體高點
-                                cond3 = k2_c2['close'] > max(k1_c2['open'], k1_c2['close'])
+                                cond1 = (k1_c2['close'] < k1_c2['open']) and (k2_c2['close'] < k2_c2['open'])
+                                cond2 = (k3_c2['close'] > k3_c2['open'])
+                                # 第二根吞噬第一根的實體低點
+                                cond3 = k2_c2['close'] < min(k1_c2['open'], k1_c2['close'])
                                 # 第三根吞噬第二根的實體高點
                                 cond4 = k3_c2['close'] > max(k2_c2['open'], k2_c2['close'])
                                 
@@ -1471,10 +1482,10 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
                                     c2_value = float(k3_c2['low'])
                                     
                             elif l2_direction == 'SHORT':
-                                cond1 = (k1_c2['close'] > k1_c2['open'])
-                                cond2 = (k2_c2['close'] < k2_c2['open']) and (k3_c2['close'] < k3_c2['open'])
-                                # 第二根吞噬第一根的實體低點
-                                cond3 = k2_c2['close'] < min(k1_c2['open'], k1_c2['close'])
+                                cond1 = (k1_c2['close'] > k1_c2['open']) and (k2_c2['close'] > k2_c2['open'])
+                                cond2 = (k3_c2['close'] < k3_c2['open'])
+                                # 第二根吞噬第一根的實體高點
+                                cond3 = k2_c2['close'] > max(k1_c2['open'], k1_c2['close'])
                                 # 第三根吞噬第二根的實體低點
                                 cond4 = k3_c2['close'] < min(k2_c2['open'], k2_c2['close'])
                                 
