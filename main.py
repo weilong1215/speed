@@ -1371,20 +1371,28 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
                         if l2_direction == 'LONG':
                             cond1 = (k1['close'] < k1['open']) and (k2['close'] < k2['open'])
                             cond2 = (k3['close'] > k3['open']) and (k4['close'] > k4['open'])
-                            cond3 = k2['close'] < k1['close']
-                            cond4 = k4['close'] > k3['close']
+                            # 第二根吞噬第一根的實體低點
+                            cond3 = k2['close'] < min(k1['open'], k1['close'])
+                            # 第三根吞噬第二根的實體高點
+                            cond4 = k3['close'] > max(k2['open'], k2['close'])
+                            # 第四根吞噬第三根的實體高點
+                            cond5 = k4['close'] > max(k3['open'], k3['close'])
                             
-                            if cond1 and cond2 and cond3 and cond4:
+                            if cond1 and cond2 and cond3 and cond4 and cond5:
                                 is_pattern_matched = True
                                 k3_extreme = float(k3['low'])
                                 
                         elif l2_direction == 'SHORT':
                             cond1 = (k1['close'] > k1['open']) and (k2['close'] > k2['open'])
                             cond2 = (k3['close'] < k3['open']) and (k4['close'] < k4['open'])
-                            cond3 = k2['close'] > k1['close']
-                            cond4 = k4['close'] < k3['close']
+                            # 第二根吞噬第一根的實體高點
+                            cond3 = k2['close'] > max(k1['open'], k1['close'])
+                            # 第三根吞噬第二根的實體低點
+                            cond4 = k3['close'] < min(k2['open'], k2['close'])
+                            # 第四根吞噬第三根的實體低點
+                            cond5 = k4['close'] < min(k3['open'], k3['close'])
                             
-                            if cond1 and cond2 and cond3 and cond4:
+                            if cond1 and cond2 and cond3 and cond4 and cond5:
                                 is_pattern_matched = True
                                 k3_extreme = float(k3['high'])
                                 
