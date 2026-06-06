@@ -1926,24 +1926,28 @@ async def run_scan():
         real_new_triggers = real_new_triggers_final
 
         history_signals = load_history_signals()
+        # real_new_triggers, holding_items, missed_items 全部存入歷史
         for item in real_new_triggers + missed_items + holding_items:
-            sym = get_base_coin(item['symbol'])
-            if sym not in history_signals:
-                history_signals[sym] = []
-            
-            # 過濾只保留最新 18D 的訊號
+            # 使用完整 symbol 作為 key，與 watchlist 保持一致
+            sym_key = item['symbol']
+            if sym_key not in history_signals:
+                history_signals[sym_key] = []
+
+            # 過濾只保留最新 18D 的訊號，切換 18D 後自動清空舊紀錄
             l1_ts = item.get('l1_open_ts', 0)
             if l1_ts > 0:
-                history_signals[sym] = [s for s in history_signals[sym] if s.get('l1_open_ts', 0) >= l1_ts]
-            
-            sig_id = item.get('signal_id')
-            if sig_id and not any(s.get('signal_id') == sig_id for s in history_signals[sym]):
+                history_signals[sym_key] = [s for s in history_signals[sym_key] if s.get('l1_open_ts', 0) >= l1_ts]
+
+            # signal_id 不存在的 (missed_items) 以 trigger_ts + symbol 作為唯一鍵
+            sig_id = item.get('signal_id') or f"{item.get('trigger_ts', 0)}_{sym_key}"
+            if not any(s.get('_hist_id') == sig_id for s in history_signals[sym_key]):
                 item_copy = item.copy()
+                item_copy['_hist_id'] = sig_id
                 if item in real_new_triggers or item in holding_items:
                     item_copy['status'] = 'active'
                 else:
                     item_copy['status'] = 'missed'
-                history_signals[sym].append(item_copy)
+                history_signals[sym_key].append(item_copy)
         save_history_signals(history_signals)
 
         signals = load_active_signals()
