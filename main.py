@@ -2360,12 +2360,23 @@ def health():
 def api_data():
     watchlist = load_watchlist()
     history = load_history_signals()
-    # 側欄統一用 base coin 顯示，避免 VET / VET/USDT:USDT 重複
+    
+    # 清理並合併舊的 history key (避免 ADA 與 ADA/USDT:USDT 同時出現)
+    cleaned_history = {}
+    for k, v in history.items():
+        base = get_base_coin(k)
+        if base not in cleaned_history:
+            cleaned_history[base] = []
+        for sig in v:
+            if not any(s.get('_hist_id') == sig.get('_hist_id') for s in cleaned_history[base]):
+                cleaned_history[base].append(sig)
+                
+    # 側欄統一用 base coin 顯示
     watchlist_coins = sorted(set(
         [get_base_coin(k) for k in watchlist.keys()] +
-        list(history.keys())
+        list(cleaned_history.keys())
     ))
-    return jsonify({"watchlist": watchlist_coins, "history": history})
+    return jsonify({"watchlist": watchlist_coins, "history": cleaned_history})
 
 def run_flask():
     port = int(os.environ.get("PORT", 8080))
