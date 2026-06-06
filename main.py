@@ -1299,7 +1299,6 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
         l1_high = 0.0
         l1_low = 0.0
         l1_date_str = "未知"
-        l1_trend = ""
 
         l2_valid = False
         l2_valid_ts = 0
@@ -1342,13 +1341,6 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
                 l1_date_str = pd.to_datetime(curr_18d['ts'], unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d')
                 l1_open = float(curr_18d['open'])
                 l1_close = float(curr_18d['close'])
-                
-                if l1_close > l1_open:
-                    l1_trend = 'BULLISH'
-                elif l1_close < l1_open:
-                    l1_trend = 'BEARISH'
-                else:
-                    l1_trend = 'DOJI'
                     
                 l2_valid = False
                 l2_valid_ts = 0
@@ -1373,33 +1365,29 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
                 b1d = dict_1d[t]
                 if pd.notna(b1d['ma_10']):
                     if l2_valid:
-                        if l2_direction == 'LONG' and b1d['close'] < b1d['ma_10']:
-                            if l3_valid and simulated_pos and all_historical_c2s and all_historical_c2s[-1]['status'] == 'active':
-                                all_historical_c2s[-1]['status'] = 'closed'
-                            l2_valid = False
-                            l3_valid = False
-                            c1_value = None
-                            c2_value = None
-                            simulated_pos = False
-                        elif l2_direction == 'SHORT' and b1d['close'] > b1d['ma_10']:
-                            if l3_valid and simulated_pos and all_historical_c2s and all_historical_c2s[-1]['status'] == 'active':
-                                all_historical_c2s[-1]['status'] = 'closed'
-                            l2_valid = False
-                            l3_valid = False
-                            c1_value = None
-                            c2_value = None
-                            simulated_pos = False
+                        if l2_direction == 'LONG':
+                            if b1d['close'] < b1d['ma_10'] or b1d['close'] <= stop_loss:
+                                if l3_valid and simulated_pos and all_historical_c2s and all_historical_c2s[-1]['status'] == 'active':
+                                    all_historical_c2s[-1]['status'] = 'closed'
+                                l2_valid = False
+                                l3_valid = False
+                                c1_value = None
+                                c2_value = None
+                                simulated_pos = False
+                        elif l2_direction == 'SHORT':
+                            if b1d['close'] > b1d['ma_10'] or b1d['close'] >= stop_loss:
+                                if l3_valid and simulated_pos and all_historical_c2s and all_historical_c2s[-1]['status'] == 'active':
+                                    all_historical_c2s[-1]['status'] = 'closed'
+                                l2_valid = False
+                                l3_valid = False
+                                c1_value = None
+                                c2_value = None
+                                simulated_pos = False
                             
                     if l1_valid and b1d['ts'] >= l1_valid_ts:
                         is_long = (b1d['close'] > l1_high) and (b1d['close'] > b1d['ma_10'])
                         is_short = (b1d['close'] < l1_low) and (b1d['close'] < b1d['ma_10'])
                         
-                        # 過濾 L1 的陰陽燭方向
-                        if l1_trend == 'BULLISH':
-                            is_short = False
-                        elif l1_trend == 'BEARISH':
-                            is_long = False
-                            
                         if is_long and not is_short:
                             if not (l2_valid and l2_direction == 'LONG'):
                                 l2_valid = True
