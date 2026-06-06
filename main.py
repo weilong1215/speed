@@ -2197,7 +2197,7 @@ HTML_TEMPLATE = """
   }
   .status-badge.active { background: rgba(63,185,80,0.1); color: #3fb950; border: 1px solid rgba(63,185,80,0.25); }
   .status-badge.closed { background: rgba(248,81,73,0.1); color: #f85149; border: 1px solid rgba(248,81,73,0.25); }
-  .status-badge.missed { background: rgba(210,153,34,0.1); color: #d2991c; border: 1px solid rgba(210,153,34,0.25); }
+  .status-badge.missed { background: rgba(63,185,80,0.1); color: #3fb950; border: 1px solid rgba(63,185,80,0.25); }
   .status-badge.triggered { background: rgba(88,166,255,0.1); color: #58a6ff; border: 1px solid rgba(88,166,255,0.25); }
   .card-time { font-size: 0.75rem; color: #6e7681; }
 
@@ -2253,6 +2253,7 @@ HTML_TEMPLATE = """
   <div class="main">
     <div class="main-header">
       <h2 id="header-title">請從左側選擇幣種</h2>
+      <div id="global-stats" style="margin-top: 10px; font-size: 0.85rem; color: #8b949e; display: flex; gap: 15px;"></div>
       <div class="meta"><span class="refresh-dot"></span>每 10 秒自動更新</div>
     </div>
     <div class="signal-container" id="signal-container">
@@ -2274,6 +2275,20 @@ HTML_TEMPLATE = """
       const json = await res.json();
       allData = json.history || {};
       allSymbols = json.watchlist || [];
+      
+      let totalSigs = 0;
+      let closedSigs = 0;
+      Object.values(allData).forEach(sigs => {
+          totalSigs += sigs.length;
+          closedSigs += sigs.filter(s => s.status === 'closed').length;
+      });
+      const winRate = totalSigs > 0 ? ((totalSigs - closedSigs) / totalSigs * 100).toFixed(1) : 0;
+      document.getElementById('global-stats').innerHTML = `
+        <span>📊 總訊號數量：<strong style="color:#c9d1d9">${totalSigs}</strong></span>
+        <span>❌ 止損/失效：<strong style="color:#f85149">${closedSigs}</strong></span>
+        <span>🏆 勝率 (未止損)：<strong style="color:#3fb950">${winRate}%</strong></span>
+      `;
+      
       renderSidebar(document.getElementById('search-input').value);
       if (currentSymbol) renderMain(currentSymbol);
     } catch (e) {
@@ -2289,9 +2304,11 @@ HTML_TEMPLATE = """
     const list = document.getElementById('symbol-list');
     const q = filter.trim().toUpperCase();
 
-    // 合併 watchlist + history key，排序
+    // 合併 watchlist + history key，排序 (只保留有歷史訊號的幣種)
     const histKeys = Object.keys(allData);
-    const allSet = [...new Set([...allSymbols, ...histKeys])].sort();
+    const allSet = [...new Set([...allSymbols, ...histKeys])]
+        .filter(sym => allData[sym] && allData[sym].length > 0)
+        .sort();
     const filtered = q ? allSet.filter(s => s.includes(q)) : allSet;
 
     let html = '';
@@ -2337,7 +2354,7 @@ HTML_TEMPLATE = """
       const dir = sig.l2_direction || 'LONG';
       const status = sig.status || 'unknown';
       const dirText = dir === 'LONG' ? '▲ LONG' : '▼ SHORT';
-      const statusMap = { active: '有效/持倉中', closed: '已失效/止損', missed: '未上車', triggered: '歷史紀錄' };
+      const statusMap = { active: '有效/未止損', closed: '已失效/止損', missed: '有效/未止損', triggered: '歷史紀錄' };
       const statusText = statusMap[status] || status;
       const prec = sig.precision || 4;
 
@@ -2352,10 +2369,6 @@ HTML_TEMPLATE = """
           <div class="card-time">C2 觸發：${fmt(sig.c2_date)}</div>
         </div>
         <div class="card-grid">
-          <div class="detail-block">
-            <div class="detail-label">L1 (18D) 成立時間</div>
-            <div class="detail-value">${fmt(sig.l1_date)}</div>
-          </div>
           <div class="detail-block">
             <div class="detail-label">L2 (1D) 成立時間</div>
             <div class="detail-value">${fmt(sig.l2_date)}</div>
