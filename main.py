@@ -2008,120 +2008,337 @@ async def scheduler():
 
 HTML_TEMPLATE = """
 <!DOCTYPE html>
-<html lang="en">
+<html lang="zh-TW">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Speed Scanner Dashboard</title>
+<title>極速掃描器 — 訊號歷史紀錄</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
 <style>
-  body { background-color: #121212; color: #e0e0e0; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; margin: 0; display: flex; height: 100vh; overflow: hidden; }
-  .sidebar { width: 250px; background-color: #1e1e1e; border-right: 1px solid #333; overflow-y: auto; padding: 20px 0; }
-  .sidebar h2 { padding: 0 20px; color: #fff; font-size: 1.2rem; margin-bottom: 20px; }
-  .symbol-item { padding: 12px 20px; cursor: pointer; transition: background 0.2s; border-left: 3px solid transparent; }
-  .symbol-item:hover { background-color: #2c2c2c; }
-  .symbol-item.active { background-color: #2c2c2c; border-left-color: #4CAF50; color: #fff; }
-  .main { flex: 1; padding: 30px; overflow-y: auto; }
-  .signal-card { background: #1e1e1e; border-radius: 8px; padding: 20px; margin-bottom: 20px; box-shadow: 0 4px 6px rgba(0,0,0,0.3); border-left: 4px solid #555; }
-  .signal-card.LONG { border-left-color: #4CAF50; }
-  .signal-card.SHORT { border-left-color: #F44336; }
-  .badge { display: inline-block; padding: 4px 8px; border-radius: 4px; font-size: 0.8rem; font-weight: bold; margin-left: 10px; }
-  .badge.active { background: rgba(76, 175, 80, 0.2); color: #4CAF50; border: 1px solid #4CAF50; }
-  .badge.closed { background: rgba(244, 67, 54, 0.2); color: #F44336; border: 1px solid #F44336; }
-  .badge.missed { background: rgba(255, 152, 0, 0.2); color: #FF9800; border: 1px solid #FF9800; }
-  .signal-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px; }
-  .signal-title { font-size: 1.2rem; font-weight: bold; color: #fff; }
-  .signal-details { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 15px; }
-  .detail-item { font-size: 0.9rem; }
-  .detail-label { color: #888; margin-bottom: 4px; display: block; }
-  .detail-value { color: #ddd; font-weight: 500; font-family: monospace; font-size: 1rem; }
-  .empty-state { text-align: center; color: #888; margin-top: 50px; font-size: 1.1rem; }
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: #0a0a0f;
+    color: #c9d1d9;
+    font-family: 'Inter', 'Segoe UI', sans-serif;
+    display: flex;
+    height: 100vh;
+    overflow: hidden;
+  }
+
+  /* === Sidebar === */
+  .sidebar {
+    width: 240px;
+    flex-shrink: 0;
+    background: #0d1117;
+    border-right: 1px solid #21262d;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+  .sidebar-header {
+    padding: 20px 16px 12px;
+    border-bottom: 1px solid #21262d;
+  }
+  .sidebar-header h1 { font-size: 0.95rem; font-weight: 600; color: #f0f6fc; letter-spacing: 0.03em; }
+  .sidebar-header p { font-size: 0.72rem; color: #6e7681; margin-top: 4px; }
+  .sidebar-search {
+    padding: 10px 12px;
+    border-bottom: 1px solid #21262d;
+  }
+  .sidebar-search input {
+    width: 100%;
+    background: #161b22;
+    border: 1px solid #30363d;
+    border-radius: 6px;
+    color: #c9d1d9;
+    font-size: 0.8rem;
+    padding: 6px 10px;
+    outline: none;
+    transition: border-color 0.2s;
+  }
+  .sidebar-search input:focus { border-color: #58a6ff; }
+  .symbol-list { flex: 1; overflow-y: auto; padding: 6px 0; }
+  .symbol-item {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 9px 16px;
+    cursor: pointer;
+    font-size: 0.82rem;
+    font-weight: 500;
+    color: #8b949e;
+    transition: background 0.15s, color 0.15s;
+    border-left: 3px solid transparent;
+  }
+  .symbol-item:hover { background: #161b22; color: #c9d1d9; }
+  .symbol-item.active { background: #161b22; color: #f0f6fc; border-left-color: #58a6ff; }
+  .symbol-item .count {
+    font-size: 0.7rem;
+    background: #21262d;
+    border-radius: 10px;
+    padding: 2px 7px;
+    color: #6e7681;
+  }
+  .symbol-item.has-signals .count { background: #1f3d21; color: #3fb950; }
+
+  /* === Main === */
+  .main { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
+  .main-header {
+    padding: 18px 28px;
+    border-bottom: 1px solid #21262d;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    background: #0d1117;
+    flex-shrink: 0;
+  }
+  .main-header h2 { font-size: 1rem; font-weight: 600; color: #f0f6fc; }
+  .main-header .meta { font-size: 0.78rem; color: #6e7681; }
+  .main-header .refresh-dot {
+    width: 8px; height: 8px;
+    border-radius: 50%;
+    background: #3fb950;
+    display: inline-block;
+    margin-right: 6px;
+    animation: pulse 2s infinite;
+  }
+  @keyframes pulse { 0%,100%{opacity:1;} 50%{opacity:0.3;} }
+
+  .signal-container { flex: 1; overflow-y: auto; padding: 24px 28px; }
+
+  /* === Signal Cards === */
+  .signal-card {
+    background: #0d1117;
+    border: 1px solid #21262d;
+    border-radius: 10px;
+    padding: 18px 20px;
+    margin-bottom: 16px;
+    border-left: 4px solid #30363d;
+    transition: border-color 0.2s, box-shadow 0.2s;
+    animation: fadeIn 0.3s ease;
+  }
+  @keyframes fadeIn { from{opacity:0;transform:translateY(4px);} to{opacity:1;transform:translateY(0);} }
+  .signal-card:hover { box-shadow: 0 0 0 1px #30363d; }
+  .signal-card.LONG { border-left-color: #3fb950; }
+  .signal-card.SHORT { border-left-color: #f85149; }
+  .signal-card.active { border-color: #1f3d21; }
+  .signal-card.closed { border-color: #3d1f1f; }
+
+  .card-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 14px;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+  .card-title { display: flex; align-items: center; gap: 10px; }
+  .dir-badge {
+    font-size: 0.8rem;
+    font-weight: 700;
+    padding: 3px 9px;
+    border-radius: 5px;
+    letter-spacing: 0.05em;
+  }
+  .dir-badge.LONG { background: rgba(63,185,80,0.15); color: #3fb950; border: 1px solid rgba(63,185,80,0.3); }
+  .dir-badge.SHORT { background: rgba(248,81,73,0.15); color: #f85149; border: 1px solid rgba(248,81,73,0.3); }
+  .status-badge {
+    font-size: 0.72rem;
+    font-weight: 600;
+    padding: 3px 8px;
+    border-radius: 4px;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+  }
+  .status-badge.active { background: rgba(63,185,80,0.1); color: #3fb950; border: 1px solid rgba(63,185,80,0.25); }
+  .status-badge.closed { background: rgba(248,81,73,0.1); color: #f85149; border: 1px solid rgba(248,81,73,0.25); }
+  .status-badge.missed { background: rgba(210,153,34,0.1); color: #d2991c; border: 1px solid rgba(210,153,34,0.25); }
+  .card-time { font-size: 0.75rem; color: #6e7681; }
+
+  .card-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
+    gap: 12px;
+  }
+  .detail-block { }
+  .detail-label {
+    font-size: 0.7rem;
+    color: #6e7681;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    margin-bottom: 4px;
+  }
+  .detail-value {
+    font-size: 0.88rem;
+    color: #e6edf3;
+    font-family: 'SFMono-Regular', Consolas, monospace;
+    font-weight: 500;
+  }
+  .detail-value.price { color: #58a6ff; }
+  .detail-value.sl { color: #f85149; }
+
+  .empty-state {
+    text-align: center;
+    padding: 80px 20px;
+    color: #6e7681;
+  }
+  .empty-state .icon { font-size: 3rem; margin-bottom: 16px; }
+  .empty-state p { font-size: 0.9rem; }
+
+  /* Scrollbar */
+  ::-webkit-scrollbar { width: 6px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: #30363d; border-radius: 3px; }
+  ::-webkit-scrollbar-thumb:hover { background: #484f58; }
 </style>
 </head>
 <body>
   <div class="sidebar">
-    <h2>🎯 監控幣種清單</h2>
-    <div id="symbol-list"></div>
+    <div class="sidebar-header">
+      <h1>⚡ 極速掃描器</h1>
+      <p>訊號歷史紀錄</p>
+    </div>
+    <div class="sidebar-search">
+      <input type="text" id="search-input" placeholder="搜尋幣種..." oninput="filterSymbols()" />
+    </div>
+    <div class="symbol-list" id="symbol-list"></div>
   </div>
+
   <div class="main">
-    <h2 id="current-symbol">請選擇左側幣種</h2>
-    <div id="signal-container">
-      <div class="empty-state">等待選擇...</div>
+    <div class="main-header">
+      <h2 id="header-title">請從左側選擇幣種</h2>
+      <div class="meta"><span class="refresh-dot"></span>每 10 秒自動更新</div>
+    </div>
+    <div class="signal-container" id="signal-container">
+      <div class="empty-state">
+        <div class="icon">📡</div>
+        <p>選擇左側幣種以顯示所有歷史訊號紀錄</p>
+      </div>
     </div>
   </div>
 
 <script>
   let currentSymbol = null;
   let allData = {};
+  let allSymbols = [];
 
   async function fetchData() {
-      try {
-          const res = await fetch('/api/data');
-          allData = await res.json();
-          renderSidebar();
-          if(currentSymbol) renderMain(currentSymbol);
-      } catch (err) {
-          console.error('Fetch error:', err);
-      }
+    try {
+      const res = await fetch('/api/data');
+      const json = await res.json();
+      allData = json.history || {};
+      allSymbols = json.watchlist || [];
+      renderSidebar(document.getElementById('search-input').value);
+      if (currentSymbol) renderMain(currentSymbol);
+    } catch (e) {
+      console.error('Fetch error:', e);
+    }
   }
 
-  function renderSidebar() {
-      const list = document.getElementById('symbol-list');
-      const symbols = Object.keys(allData).sort();
-      let html = '';
-      symbols.forEach(sym => {
-          const activeClass = sym === currentSymbol ? 'active' : '';
-          const count = allData[sym].length;
-          html += `<div class="symbol-item ${activeClass}" onclick="selectSymbol('${sym}')">${sym} <span style="float:right; color:#888; font-size:0.8rem;">${count}</span></div>`;
-      });
-      list.innerHTML = html;
+  function filterSymbols() {
+    renderSidebar(document.getElementById('search-input').value);
+  }
+
+  function renderSidebar(filter = '') {
+    const list = document.getElementById('symbol-list');
+    const q = filter.trim().toUpperCase();
+
+    // 合併 watchlist + history key，排序
+    const histKeys = Object.keys(allData);
+    const allSet = [...new Set([...allSymbols, ...histKeys])].sort();
+    const filtered = q ? allSet.filter(s => s.includes(q)) : allSet;
+
+    let html = '';
+    filtered.forEach(sym => {
+      const sigs = allData[sym] || [];
+      const activeClass = sym === currentSymbol ? 'active' : '';
+      const hasClass = sigs.length > 0 ? 'has-signals' : '';
+      html += `<div class="symbol-item ${activeClass} ${hasClass}" onclick="selectSymbol('${sym}')">
+        <span>${sym}</span>
+        <span class="count">${sigs.length}</span>
+      </div>`;
+    });
+    list.innerHTML = html || '<div style="padding:12px 16px;color:#6e7681;font-size:0.8rem;">無符合結果</div>';
   }
 
   function selectSymbol(sym) {
-      currentSymbol = sym;
-      renderSidebar();
-      renderMain(sym);
+    currentSymbol = sym;
+    renderSidebar(document.getElementById('search-input').value);
+    renderMain(sym);
+  }
+
+  function fmt(val, decimals) {
+    if (val == null || val === '' || val === undefined) return '—';
+    if (decimals != null) return parseFloat(val).toFixed(decimals);
+    return val;
   }
 
   function renderMain(sym) {
-      document.getElementById('current-symbol').textContent = `💎 ${sym} - 最新 18D 區間所有訊號`;
-      const container = document.getElementById('signal-container');
-      const signals = allData[sym] || [];
-      
-      if(signals.length === 0) {
-          container.innerHTML = `<div class="empty-state">目前最新 18D 區間內沒有任何觸發紀錄</div>`;
-          return;
-      }
-      
-      signals.sort((a,b) => (b.trigger_ts || 0) - (a.trigger_ts || 0));
-      
-      let html = '';
-      signals.forEach(sig => {
-          const dir = sig.l2_direction || 'LONG';
-          const status = sig.status || 'unknown';
-          const badgeClass = status;
-          const statusText = status === 'active' ? '持倉中/掛單中' : status === 'closed' ? '已平倉/止損' : status === 'missed' ? '未上車' : status;
-          const dirIcon = dir === 'LONG' ? '🟢 做多 (LONG)' : '🔴 做空 (SHORT)';
-          
-          html += `
-          <div class="signal-card ${dir}">
-              <div class="signal-header">
-                  <span class="signal-title">${dirIcon} <span class="badge ${badgeClass}">${statusText}</span></span>
-                  <span style="color:#888; font-size:0.9rem;">觸發時間: ${sig.c2_date || '未知'}</span>
-              </div>
-              <div class="signal-details">
-                  <div class="detail-item"><span class="detail-label">進場價格</span><span class="detail-value">${sig.entry_price || '-'}</span></div>
-                  <div class="detail-item"><span class="detail-label">止損防線</span><span class="detail-value">${sig.stop_loss || '-'}</span></div>
-                  <div class="detail-item"><span class="detail-label">L1 (18D) 成立</span><span class="detail-value">${sig.l1_date || '未知'}</span></div>
-                  <div class="detail-item"><span class="detail-label">C1 觸碰時間</span><span class="detail-value">${sig.c1_date || '未知'}</span></div>
-              </div>
+    document.getElementById('header-title').textContent = `💎 ${sym}　訊號歷史紀錄 (最新 18D 區間)`;
+    const container = document.getElementById('signal-container');
+    const signals = allData[sym] || [];
+
+    if (signals.length === 0) {
+      container.innerHTML = `<div class="empty-state"><div class="icon">🔍</div><p>此幣種在最新 18D 區間內尚無觸發訊號紀錄</p></div>`;
+      return;
+    }
+
+    // 從舊到新排列
+    const sorted = [...signals].sort((a, b) => (a.trigger_ts || 0) - (b.trigger_ts || 0));
+
+    let html = '';
+    sorted.forEach((sig, idx) => {
+      const dir = sig.l2_direction || 'LONG';
+      const status = sig.status || 'unknown';
+      const dirText = dir === 'LONG' ? '▲ LONG' : '▼ SHORT';
+      const statusMap = { active: '持倉中', closed: '已平倉/止損', missed: '未上車' };
+      const statusText = statusMap[status] || status;
+      const prec = sig.precision || 4;
+
+      html += `
+      <div class="signal-card ${dir} ${status}">
+        <div class="card-header">
+          <div class="card-title">
+            <span style="color:#6e7681;font-size:0.75rem;">#${idx + 1}</span>
+            <span class="dir-badge ${dir}">${dirText}</span>
+            <span class="status-badge ${status}">${statusText}</span>
           </div>
-          `;
-      });
-      container.innerHTML = html;
+          <div class="card-time">C2 觸發：${fmt(sig.c2_date)}</div>
+        </div>
+        <div class="card-grid">
+          <div class="detail-block">
+            <div class="detail-label">L1 (18D) 成立時間</div>
+            <div class="detail-value">${fmt(sig.l1_date)}</div>
+          </div>
+          <div class="detail-block">
+            <div class="detail-label">L2 (1D) 成立時間</div>
+            <div class="detail-value">${fmt(sig.l2_date)}</div>
+          </div>
+          <div class="detail-block">
+            <div class="detail-label">C1 布林觸碰時間</div>
+            <div class="detail-value">${fmt(sig.c1_date)}</div>
+          </div>
+          <div class="detail-block">
+            <div class="detail-label">C2 進場觸發時間</div>
+            <div class="detail-value">${fmt(sig.c2_date)}</div>
+          </div>
+          <div class="detail-block">
+            <div class="detail-label">進場價格</div>
+            <div class="detail-value price">${fmt(sig.entry_price, prec)}</div>
+          </div>
+          <div class="detail-block">
+            <div class="detail-label">止損價格</div>
+            <div class="detail-value sl">${fmt(sig.stop_loss, prec)}</div>
+          </div>
+        </div>
+      </div>`;
+    });
+    container.innerHTML = html;
   }
 
   fetchData();
-  setInterval(fetchData, 5000);
+  setInterval(fetchData, 10000);
 </script>
 </body>
 </html>
@@ -2139,7 +2356,11 @@ def health():
 
 @app.route('/api/data')
 def api_data():
-    return jsonify(load_history_signals())
+    # 左側選單：watchlist 所有幣種 + 有歷史紀錄的幣種，合併去重
+    watchlist = load_watchlist()
+    history = load_history_signals()
+    watchlist_coins = sorted(set(list(watchlist.keys()) + list(history.keys())))
+    return jsonify({"watchlist": watchlist_coins, "history": history})
 
 def run_flask():
     port = int(os.environ.get("PORT", 8080))
