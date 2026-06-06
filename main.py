@@ -14,7 +14,7 @@ import threading
 import uuid
 import re
 import json
-from flask import Flask
+from flask import Flask, jsonify, render_template_string
 from datetime import datetime
 from dotenv import load_dotenv
 import sys
@@ -64,6 +64,7 @@ logger.info(f"✅ 交易所配置檢查: API_KEY={'已設定' if BITGET_API_KEY 
 DATA_DIR = "/app/data"
 WATCHLIST_FILE = os.path.join(DATA_DIR, "watchlist.json")
 ACTIVE_SIGNALS_FILE = os.path.join(DATA_DIR, "active_signals.json")
+HISTORY_SIGNALS_FILE = os.path.join(DATA_DIR, "history_signals.json")
 
 def ensure_data_dir():
     if not os.path.exists(DATA_DIR):
@@ -73,6 +74,9 @@ def ensure_data_dir():
             json.dump({}, f)
     if not os.path.exists(ACTIVE_SIGNALS_FILE):
         with open(ACTIVE_SIGNALS_FILE, 'w') as f:
+            json.dump({}, f)
+    if not os.path.exists(HISTORY_SIGNALS_FILE):
+        with open(HISTORY_SIGNALS_FILE, 'w') as f:
             json.dump({}, f)
 
 def load_watchlist():
@@ -107,6 +111,22 @@ def save_active_signals(data):
             json.dump(data, f, indent=2)
     except Exception as e:
         logger.error(f"儲存訊號失敗: {e}")
+
+def load_history_signals():
+    ensure_data_dir()
+    try:
+        with open(HISTORY_SIGNALS_FILE, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+def save_history_signals(data):
+    ensure_data_dir()
+    try:
+        with open(HISTORY_SIGNALS_FILE, 'w', encoding='utf-8') as f:
+            json.dump(data, f, indent=2)
+    except Exception as e:
+        logger.error(f"儲存歷史訊號失敗: {e}")
 
 # ============================================================================
 # 系統設定持久化
@@ -1169,6 +1189,18 @@ async def monitor_positions(exchange):
 
                     sig['status'] = 'closed'
 
+            # 更新歷史紀錄
+            closed_sigs = [s for s in sig_list if s['status'] == 'closed']
+            if closed_sigs:
+                history_signals = load_history_signals()
+                if sig_key not in history_signals:
+                    history_signals[sig_key] = []
+                for closed_sig in closed_sigs:
+                    for h_sig in history_signals[sig_key]:
+                        if h_sig.get('signal_id') == closed_sig.get('signal_id'):
+                            h_sig['status'] = 'closed'
+                save_history_signals(history_signals)
+
             saved_signals[sig_key] = [s for s in sig_list if s['status'] == 'active']
             if not saved_signals[sig_key]:
                 del saved_signals[sig_key]
@@ -1893,6 +1925,27 @@ async def run_scan():
                 real_new_triggers_final.append(item)
         real_new_triggers = real_new_triggers_final
 
+        history_signals = load_history_signals()
+        for item in real_new_triggers + missed_items + holding_items:
+            sym = get_base_coin(item['symbol'])
+            if sym not in history_signals:
+                history_signals[sym] = []
+            
+            # 過濾只保留最新 18D 的訊號
+            l1_ts = item.get('l1_open_ts', 0)
+            if l1_ts > 0:
+                history_signals[sym] = [s for s in history_signals[sym] if s.get('l1_open_ts', 0) >= l1_ts]
+            
+            sig_id = item.get('signal_id')
+            if sig_id and not any(s.get('signal_id') == sig_id for s in history_signals[sym]):
+                item_copy = item.copy()
+                if item in real_new_triggers or item in holding_items:
+                    item_copy['status'] = 'active'
+                else:
+                    item_copy['status'] = 'missed'
+                history_signals[sym].append(item_copy)
+        save_history_signals(history_signals)
+
         signals = load_active_signals()
         
         for item in real_new_triggers:
@@ -1950,17 +2003,147 @@ async def scheduler():
         await asyncio.sleep(60)
 
 # ============================================================================
-# Minimal Flask for Zeabur Health Check
+# Flask Web UI Dashboard
 # ============================================================================
 
+HTML_TEMPLATE = """
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Speed Scanner Dashboard</title>
+<style>
+  body { background-color: #121212; color: #e0e0e0; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; margin: 0; display: flex; height: 100vh; overflow: hidden; }
+  .sidebar { width: 250px; background-color: #1e1e1e; border-right: 1px solid #333; overflow-y: auto; padding: 20px 0; }
+  .sidebar h2 { padding: 0 20px; color: #fff; font-size: 1.2rem; margin-bottom: 20px; }
+  .symbol-item { padding: 12px 20px; cursor: pointer; transition: background 0.2s; border-left: 3px solid transparent; }
+  .symbol-item:hover { background-color: #2c2c2c; }
+  .symbol-item.active { background-color: #2c2c2c; border-left-color: #4CAF50; color: #fff; }
+  .main { flex: 1; padding: 30px; overflow-y: auto; }
+  .signal-card { background: #1e1e1e; border-radius: 8px; padding: 20px; margin-bottom: 20px; box-shadow: 0 4px 6px rgba(0,0,0,0.3); border-left: 4px solid #555; }
+  .signal-card.LONG { border-left-color: #4CAF50; }
+  .signal-card.SHORT { border-left-color: #F44336; }
+  .badge { display: inline-block; padding: 4px 8px; border-radius: 4px; font-size: 0.8rem; font-weight: bold; margin-left: 10px; }
+  .badge.active { background: rgba(76, 175, 80, 0.2); color: #4CAF50; border: 1px solid #4CAF50; }
+  .badge.closed { background: rgba(244, 67, 54, 0.2); color: #F44336; border: 1px solid #F44336; }
+  .badge.missed { background: rgba(255, 152, 0, 0.2); color: #FF9800; border: 1px solid #FF9800; }
+  .signal-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px; }
+  .signal-title { font-size: 1.2rem; font-weight: bold; color: #fff; }
+  .signal-details { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 15px; }
+  .detail-item { font-size: 0.9rem; }
+  .detail-label { color: #888; margin-bottom: 4px; display: block; }
+  .detail-value { color: #ddd; font-weight: 500; font-family: monospace; font-size: 1rem; }
+  .empty-state { text-align: center; color: #888; margin-top: 50px; font-size: 1.1rem; }
+</style>
+</head>
+<body>
+  <div class="sidebar">
+    <h2>🎯 監控幣種清單</h2>
+    <div id="symbol-list"></div>
+  </div>
+  <div class="main">
+    <h2 id="current-symbol">請選擇左側幣種</h2>
+    <div id="signal-container">
+      <div class="empty-state">等待選擇...</div>
+    </div>
+  </div>
+
+<script>
+  let currentSymbol = null;
+  let allData = {};
+
+  async function fetchData() {
+      try {
+          const res = await fetch('/api/data');
+          allData = await res.json();
+          renderSidebar();
+          if(currentSymbol) renderMain(currentSymbol);
+      } catch (err) {
+          console.error('Fetch error:', err);
+      }
+  }
+
+  function renderSidebar() {
+      const list = document.getElementById('symbol-list');
+      const symbols = Object.keys(allData).sort();
+      let html = '';
+      symbols.forEach(sym => {
+          const activeClass = sym === currentSymbol ? 'active' : '';
+          const count = allData[sym].length;
+          html += `<div class="symbol-item ${activeClass}" onclick="selectSymbol('${sym}')">${sym} <span style="float:right; color:#888; font-size:0.8rem;">${count}</span></div>`;
+      });
+      list.innerHTML = html;
+  }
+
+  function selectSymbol(sym) {
+      currentSymbol = sym;
+      renderSidebar();
+      renderMain(sym);
+  }
+
+  function renderMain(sym) {
+      document.getElementById('current-symbol').textContent = `💎 ${sym} - 最新 18D 區間所有訊號`;
+      const container = document.getElementById('signal-container');
+      const signals = allData[sym] || [];
+      
+      if(signals.length === 0) {
+          container.innerHTML = `<div class="empty-state">目前最新 18D 區間內沒有任何觸發紀錄</div>`;
+          return;
+      }
+      
+      signals.sort((a,b) => (b.trigger_ts || 0) - (a.trigger_ts || 0));
+      
+      let html = '';
+      signals.forEach(sig => {
+          const dir = sig.l2_direction || 'LONG';
+          const status = sig.status || 'unknown';
+          const badgeClass = status;
+          const statusText = status === 'active' ? '持倉中/掛單中' : status === 'closed' ? '已平倉/止損' : status === 'missed' ? '未上車' : status;
+          const dirIcon = dir === 'LONG' ? '🟢 做多 (LONG)' : '🔴 做空 (SHORT)';
+          
+          html += `
+          <div class="signal-card ${dir}">
+              <div class="signal-header">
+                  <span class="signal-title">${dirIcon} <span class="badge ${badgeClass}">${statusText}</span></span>
+                  <span style="color:#888; font-size:0.9rem;">觸發時間: ${sig.c2_date || '未知'}</span>
+              </div>
+              <div class="signal-details">
+                  <div class="detail-item"><span class="detail-label">進場價格</span><span class="detail-value">${sig.entry_price || '-'}</span></div>
+                  <div class="detail-item"><span class="detail-label">止損防線</span><span class="detail-value">${sig.stop_loss || '-'}</span></div>
+                  <div class="detail-item"><span class="detail-label">L1 (18D) 成立</span><span class="detail-value">${sig.l1_date || '未知'}</span></div>
+                  <div class="detail-item"><span class="detail-label">C1 觸碰時間</span><span class="detail-value">${sig.c1_date || '未知'}</span></div>
+              </div>
+          </div>
+          `;
+      });
+      container.innerHTML = html;
+  }
+
+  fetchData();
+  setInterval(fetchData, 5000);
+</script>
+</body>
+</html>
+"""
+
 app = Flask(__name__)
+
 @app.route('/')
+def index():
+    return render_template_string(HTML_TEMPLATE)
+
 @app.route('/health')
-def health(): return {"status": "ok", "service": "Speed-Scanner-Auto"}, 200
+def health():
+    return {"status": "ok", "service": "Speed-Scanner-Auto"}, 200
+
+@app.route('/api/data')
+def api_data():
+    return jsonify(load_history_signals())
 
 def run_flask():
     port = int(os.environ.get("PORT", 8080))
-    app.run(host="0.0.0.0", port=port)
+    app.run(host="0.0.0.0", port=port, use_reloader=False)
 
 # = [啟動模組] ===============================================================
 
