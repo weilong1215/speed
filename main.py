@@ -1847,6 +1847,7 @@ async def run_scan():
                 logger.warning(f"拉取持倉列表失敗 (下單防重複查詢): {e}")
 
         all_results = []
+        all_past_events = []
         total_coins = len(coins)
         for i in range(0, total_coins, 20):
             batch = coins[i:i+20]
@@ -1856,6 +1857,9 @@ async def run_scan():
             for res in results:
                 if res is None: continue
                 sym = res['symbol']
+                
+                if 'historical_c2s' in res:
+                    all_past_events.extend(res['historical_c2s'])
                 
                 if res.get('is_watchlist_eligible'):
                     if res['action'] == 'update' or res['action'] == 'keep':
@@ -1951,12 +1955,6 @@ async def run_scan():
         real_new_triggers = real_new_triggers_final
 
         history_signals = load_history_signals()
-        
-        # 收集所有模擬期間發生的 C2 歷史訊號 (包含失效、止損、已過期的)
-        all_past_events = []
-        for res in all_results:
-            if 'historical_c2s' in res:
-                all_past_events.extend(res['historical_c2s'])
 
         # 所有 C2 觸發的訊號（新觸發 + 已過期 + 持倉中 + 歷史模擬捕捉到的）統一以 base_coin 為 key 存入歷史
         all_triggered = real_new_triggers + missed_items + holding_items + all_past_events
@@ -1985,9 +1983,11 @@ async def run_scan():
                 item_copy['status'] = new_status
                 history_signals[base].append(item_copy)
             else:
-                # 若歷史紀錄狀態有變更（如 active 變為 closed），則更新
-                if existing.get('status') == 'active' and new_status == 'closed':
+                # 同步狀態：若是 closed 則必定覆蓋；若是 active 則覆蓋舊版的 triggered/missed
+                if new_status == 'closed':
                     existing['status'] = 'closed'
+                elif new_status == 'active' and existing.get('status') in ['triggered', 'missed']:
+                    existing['status'] = 'active'
         save_history_signals(history_signals)
 
         signals = load_active_signals()
