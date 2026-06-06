@@ -1530,6 +1530,9 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
                                             'l1_open_ts': l1_open_ts,
                                             'status': 'active'
                                         })
+        current_price = float(df_1d['close'].iloc[-1]) if not df_1d.empty else 0.0
+        for c2 in all_historical_c2s:
+            c2['current_price'] = current_price
 
         is_trigger_met = l3_valid
         if is_trigger_met:
@@ -2278,15 +2281,33 @@ HTML_TEMPLATE = """
       
       let totalSigs = 0;
       let closedSigs = 0;
+      let totalRR = 0;
       Object.values(allData).forEach(sigs => {
           totalSigs += sigs.length;
           closedSigs += sigs.filter(s => s.status === 'closed').length;
+          
+          sigs.filter(s => s.status === 'active' || s.status === 'missed').forEach(s => {
+              const entry = parseFloat(s.entry_price);
+              const sl = parseFloat(s.stop_loss);
+              const cp = parseFloat(s.current_price || entry);
+              if (entry > 0 && sl > 0 && Math.abs(entry - sl) > 0) {
+                  const risk = Math.abs(entry - sl);
+                  let rr = 0;
+                  if (s.l2_direction === 'LONG') rr = (cp - entry) / risk;
+                  if (s.l2_direction === 'SHORT') rr = (entry - cp) / risk;
+                  totalRR += rr;
+              }
+          });
       });
       const winRate = totalSigs > 0 ? ((totalSigs - closedSigs) / totalSigs * 100).toFixed(1) : 0;
+      const rrText = totalRR >= 0 ? `+${totalRR.toFixed(2)}` : `${totalRR.toFixed(2)}`;
+      const rrColor = totalRR >= 0 ? '#3fb950' : '#f85149';
+      
       document.getElementById('global-stats').innerHTML = `
         <span>📊 總訊號數量：<strong style="color:#c9d1d9">${totalSigs}</strong></span>
         <span>❌ 止損/失效：<strong style="color:#f85149">${closedSigs}</strong></span>
         <span>🏆 勝率 (未止損)：<strong style="color:#3fb950">${winRate}%</strong></span>
+        <span>💰 目前有效總 RR 獲利：<strong style="color:${rrColor}">${rrText}</strong></span>
       `;
       
       renderSidebar(document.getElementById('search-input').value);
