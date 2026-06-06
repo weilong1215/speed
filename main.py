@@ -1321,6 +1321,7 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
         c2_value = None
         c2_ts = 0
         simulated_pos = False
+        all_historical_c2s = []
 
         # 主迴圈：以 3H (最高解析度) 推進
         for _, row in df_3h_closed.iterrows():
@@ -1507,6 +1508,20 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
                                         entry_price = _entry
                                         stop_loss = _sl
                                         trigger_ts = int(k3_c2['ts'])
+                                        all_historical_c2s.append({
+                                            'symbol': symbol,
+                                            'l1_date': l2_locked_l1_date if l2_valid else l1_date_str,
+                                            'l2_date': l2_date_str,
+                                            'c1_date': c1_date_str,
+                                            'c2_date': c2_date_str,
+                                            'entry_price': entry_price,
+                                            'stop_loss': stop_loss,
+                                            'trigger_ts': trigger_ts,
+                                            'l2_direction': l2_direction,
+                                            'precision': precision,
+                                            'l1_open_ts': l1_open_ts,
+                                            'status': 'triggered'
+                                        })
 
         is_trigger_met = l3_valid
         if is_trigger_met:
@@ -1534,7 +1549,8 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
                 'symbol': symbol, 
                 'action': 'remove',
                 'l1_date': l1_date_str if l1_valid else '未知',
-                'l2_direction': expected_dir
+                'l2_direction': expected_dir,
+                'historical_c2s': all_historical_c2s
             }
 
         return {
@@ -1556,6 +1572,7 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
             'l1_high':            l1_high,
             'l1_low':             l1_low,
             'l1_open_ts':         l1_open_ts,
+            'historical_c2s':     all_historical_c2s,
         }
 
     except Exception as e:
@@ -1926,8 +1943,15 @@ async def run_scan():
         real_new_triggers = real_new_triggers_final
 
         history_signals = load_history_signals()
-        # 所有 C2 觸發的訊號（新觸發 + 已過期 + 持倉中）統一以 base_coin 為 key 存入歷史
-        all_triggered = real_new_triggers + missed_items + holding_items
+        
+        # 收集所有模擬期間發生的 C2 歷史訊號 (包含失效、止損、已過期的)
+        all_past_events = []
+        for res in all_results:
+            if 'historical_c2s' in res:
+                all_past_events.extend(res['historical_c2s'])
+
+        # 所有 C2 觸發的訊號（新觸發 + 已過期 + 持倉中 + 歷史模擬捕捉到的）統一以 base_coin 為 key 存入歷史
+        all_triggered = real_new_triggers + missed_items + holding_items + all_past_events
         for item in all_triggered:
             base = get_base_coin(item['symbol'])
             if base not in history_signals:
