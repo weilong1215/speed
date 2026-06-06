@@ -1381,135 +1381,100 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
                                 l3_valid = False
 
             # 3. 處理 3H (C1/C2) 事件
-            if len(history_3h) >= 3:
-                # 處理止損：止損後只重置 C2，保留 C1 繼續尋找新 C2
+            if len(history_3h) >= 4:
+                # 處理止損：止損後重置 C1 與 C2，重新等待布林觸碰
                 if l3_valid and simulated_pos:
                     if l2_direction == 'LONG' and row['low'] <= stop_loss:
                         simulated_pos = False
                         l3_valid = False
+                        c1_value = None
+                        c1_ts = 0
+                        c1_date_str = "未知"
                         c2_value = None
                         c2_ts = 0
                         c2_date_str = "未知"
                     elif l2_direction == 'SHORT' and row['high'] >= stop_loss:
                         simulated_pos = False
                         l3_valid = False
-                        c2_value = None
-                        c2_ts = 0
-                        c2_date_str = "未知"
-
-                # C1 失效判斷：價格碰觸到 C1 的極值就失效 (不論是否在尋找 C2，只要碰到 C1 防線就廢除)
-                if c1_value is not None:
-                    if l2_direction == 'LONG' and row['low'] <= c1_value:
                         c1_value = None
                         c1_ts = 0
                         c1_date_str = "未知"
                         c2_value = None
                         c2_ts = 0
                         c2_date_str = "未知"
-                        l3_valid = False
-                        simulated_pos = False
-                    elif l2_direction == 'SHORT' and row['high'] >= c1_value:
-                        c1_value = None
-                        c1_ts = 0
-                        c1_date_str = "未知"
-                        c2_value = None
-                        c2_ts = 0
-                        c2_date_str = "未知"
-                        l3_valid = False
-                        simulated_pos = False
 
                 if not simulated_pos and l2_valid:
                     if row['ts'] >= l2_valid_ts:
-                        # === C1 偵測：需要 4 根 K 棒 ===
-                        if c1_value is None and len(history_3h) == 4:
-                            k1, k2, k3, k4 = history_3h[0], history_3h[1], history_3h[2], history_3h[3]
+                        # === C1 偵測：布林觸碰 ===
+                        if c1_value is None:
+                            bb_upper = float(row.get('bb_upper', float('inf')))
+                            bb_lower = float(row.get('bb_lower', float('-inf')))
                             
                             is_c1_pattern = False
-                            
                             if l2_direction == 'LONG':
-                                cond1 = (k1['close'] < k1['open']) and (k2['close'] < k2['open'])
-                                cond2 = (k3['close'] > k3['open']) and (k4['close'] > k4['open'])
-                                cond3 = k2['close'] < min(k1['open'], k1['close'])
-                                cond4 = k3['close'] > max(k2['open'], k2['close'])
-                                cond5 = k4['close'] > max(k3['open'], k3['close'])
-                                
-                                if cond1 and cond2 and cond3 and cond4 and cond5:
+                                if row['low'] <= bb_lower:
                                     is_c1_pattern = True
-                                    # C1 做多：四根裡面最低點
-                                    c1_value = float('inf')
-                                    c1_ts = 0
-                                    for k in [k1, k2, k3, k4]:
-                                        k_low = float(k['low'])
-                                        if k_low < c1_value:
-                                            c1_value = k_low
-                                            c1_ts = int(k['ts'])
-                                    
+                                    c1_value = float(row['low'])
                             elif l2_direction == 'SHORT':
-                                cond1 = (k1['close'] > k1['open']) and (k2['close'] > k2['open'])
-                                cond2 = (k3['close'] < k3['open']) and (k4['close'] < k4['open'])
-                                cond3 = k2['close'] > max(k1['open'], k1['close'])
-                                cond4 = k3['close'] < min(k2['open'], k2['close'])
-                                cond5 = k4['close'] < min(k3['open'], k3['close'])
-                                
-                                if cond1 and cond2 and cond3 and cond4 and cond5:
+                                if row['high'] >= bb_upper:
                                     is_c1_pattern = True
-                                    # C1 做空：四根裡面最高點
-                                    c1_value = float('-inf')
-                                    c1_ts = 0
-                                    for k in [k1, k2, k3, k4]:
-                                        k_high = float(k['high'])
-                                        if k_high > c1_value:
-                                            c1_value = k_high
-                                            c1_ts = int(k['ts'])
-                            
+                                    c1_value = float(row['high'])
+                                    
                             if is_c1_pattern:
+                                c1_ts = int(row['ts'])
                                 c1_date_str = pd.to_datetime(c1_ts, unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d %H:%M:%S')
 
                         # === C2 偵測：需要 3 根 K 棒，且 C1 已成立 ===
-                        elif c1_value is not None and c2_value is None:
-                            k1_c2, k2_c2, k3_c2 = history_3h[-3], history_3h[-2], history_3h[-1]
+                        if c1_value is not None and c2_value is None:
+                            k0_c2, k1_c2, k2_c2, k3_c2 = history_3h[-4], history_3h[-3], history_3h[-2], history_3h[-1]
                             
-                            is_c2_pattern = False
-                            
-                            if l2_direction == 'LONG':
-                                cond1 = (k1_c2['close'] < k1_c2['open']) and (k2_c2['close'] < k2_c2['open'])
-                                cond2 = (k3_c2['close'] > k3_c2['open'])
-                                # 第二根吞噬第一根的實體低點
-                                cond3 = k2_c2['close'] < min(k1_c2['open'], k1_c2['close'])
-                                # 第三根吞噬第二根的實體高點
-                                cond4 = k3_c2['close'] > max(k2_c2['open'], k2_c2['close'])
+                            # 確保 C2 的第一根 (k1_c2) 發生在 C1 成立當下或之後
+                            if k1_c2['ts'] >= c1_ts:
+                                is_c2_pattern = False
                                 
-                                if cond1 and cond2 and cond3 and cond4:
-                                    is_c2_pattern = True
-                                    c2_value = float(k3_c2['low'])
+                                if l2_direction == 'LONG':
+                                    cond1 = (k1_c2['close'] < k1_c2['open']) and (k2_c2['close'] < k2_c2['open'])
+                                    cond2 = (k3_c2['close'] > k3_c2['open'])
+                                    # 第一根吞噬前一根實體低點
+                                    cond3 = k1_c2['close'] < min(k0_c2['open'], k0_c2['close'])
+                                    # 第二根吞噬第一根的實體低點
+                                    cond4 = k2_c2['close'] < k1_c2['close']
+                                    # 第三根吞噬第二根的實體高點
+                                    cond5 = k3_c2['close'] > k2_c2['open']
                                     
-                            elif l2_direction == 'SHORT':
-                                cond1 = (k1_c2['close'] > k1_c2['open']) and (k2_c2['close'] > k2_c2['open'])
-                                cond2 = (k3_c2['close'] < k3_c2['open'])
-                                # 第二根吞噬第一根的實體高點
-                                cond3 = k2_c2['close'] > max(k1_c2['open'], k1_c2['close'])
-                                # 第三根吞噬第二根的實體低點
-                                cond4 = k3_c2['close'] < min(k2_c2['open'], k2_c2['close'])
+                                    if cond1 and cond2 and cond3 and cond4 and cond5:
+                                        is_c2_pattern = True
+                                        c2_value = float(k3_c2['low'])
+                                        
+                                elif l2_direction == 'SHORT':
+                                    cond1 = (k1_c2['close'] > k1_c2['open']) and (k2_c2['close'] > k2_c2['open'])
+                                    cond2 = (k3_c2['close'] < k3_c2['open'])
+                                    # 第一根吞噬前一根實體高點
+                                    cond3 = k1_c2['close'] > max(k0_c2['open'], k0_c2['close'])
+                                    # 第二根吞噬第一根的實體高點
+                                    cond4 = k2_c2['close'] > k1_c2['close']
+                                    # 第三根吞噬第二根的實體低點
+                                    cond5 = k3_c2['close'] < k2_c2['open']
+                                    
+                                    if cond1 and cond2 and cond3 and cond4 and cond5:
+                                        is_c2_pattern = True
+                                        c2_value = float(k3_c2['high'])
                                 
-                                if cond1 and cond2 and cond3 and cond4:
-                                    is_c2_pattern = True
-                                    c2_value = float(k3_c2['high'])
-                            
-                            if is_c2_pattern:
-                                c2_ts = int(k3_c2['ts'])
-                                
-                                # 進場用第三根的收盤價格，止損用第三根的最低/高點(即 c2_value)
-                                _entry = float(k3_c2['close'])
-                                _sl = float(c2_value)
-                                
-                                _dist = abs(_entry - _sl) / _entry * 100 if _entry > 0 else 999
-                                if _dist <= 10:
-                                    l3_valid = True
-                                    simulated_pos = True
-                                    c2_date_str = pd.to_datetime(c2_ts, unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d %H:%M:%S')
-                                    entry_price = _entry
-                                    stop_loss = _sl
-                                    trigger_ts = int(k3_c2['ts'])
+                                if is_c2_pattern:
+                                    c2_ts = int(k3_c2['ts'])
+                                    
+                                    # 進場用第三根的收盤價格，止損用第三根的最低/高點(即 c2_value)
+                                    _entry = float(k3_c2['close'])
+                                    _sl = float(c2_value)
+                                    
+                                    _dist = abs(_entry - _sl) / _entry * 100 if _entry > 0 else 999
+                                    if _dist <= 10:
+                                        l3_valid = True
+                                        simulated_pos = True
+                                        c2_date_str = pd.to_datetime(c2_ts, unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d %H:%M:%S')
+                                        entry_price = _entry
+                                        stop_loss = _sl
+                                        trigger_ts = int(k3_c2['ts'])
 
         is_trigger_met = l3_valid
         if is_trigger_met:
