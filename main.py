@@ -2263,14 +2263,14 @@ HTML_TEMPLATE = """
 
   <div class="main">
     <div class="main-header">
-      <h2 id="header-title">請從左側選擇幣種</h2>
-      <div id="global-stats" style="margin-top: 10px; font-size: 0.85rem; color: #8b949e; display: flex; gap: 15px;"></div>
+      <h2 id="header-title">📡 目前有效訊號總覽</h2>
+      <div id="global-stats" style="margin-top: 10px; font-size: 0.85rem; color: #8b949e; display: flex; gap: 15px; flex-wrap: wrap;"></div>
       <div class="meta"><span class="refresh-dot"></span>每 10 秒自動更新</div>
     </div>
     <div class="signal-container" id="signal-container">
       <div class="empty-state">
         <div class="icon">📡</div>
-        <p>選擇左側幣種以顯示所有歷史訊號紀錄</p>
+        <p>資料載入中...</p>
       </div>
     </div>
   </div>
@@ -2279,6 +2279,7 @@ HTML_TEMPLATE = """
   let currentSymbol = null;
   let allData = {};
   let allSymbols = [];
+  let priceMap = {};  // base -> current_price
 
   async function fetchData() {
     try {
@@ -2286,6 +2287,13 @@ HTML_TEMPLATE = """
       const json = await res.json();
       allData = json.history || {};
       allSymbols = json.watchlist || [];
+      priceMap = json.price_map || {};
+
+      // 把 current_price 補回歷史紀錄
+      Object.entries(allData).forEach(([base, sigs]) => {
+        const cp = priceMap[base];
+        if (cp) sigs.forEach(s => { if (!s.current_price) s.current_price = cp; });
+      });
       
       let totalSigs = 0;
       let closedSigs = 0;
@@ -2320,6 +2328,7 @@ HTML_TEMPLATE = """
       
       renderSidebar(document.getElementById('search-input').value);
       if (currentSymbol) renderMain(currentSymbol);
+      else renderHome();
     } catch (e) {
       console.error('Fetch error:', e);
     }
@@ -2333,14 +2342,13 @@ HTML_TEMPLATE = """
     const list = document.getElementById('symbol-list');
     const q = filter.trim().toUpperCase();
 
-    // 合併 watchlist + history key，排序 (只保留有歷史訊號的幣種)
     const histKeys = Object.keys(allData);
     const allSet = [...new Set([...allSymbols, ...histKeys])]
         .filter(sym => allData[sym] && allData[sym].length > 0)
         .sort();
     const filtered = q ? allSet.filter(s => s.includes(q)) : allSet;
 
-    let html = '';
+    let html = '<div class="symbol-item ' + (currentSymbol === null ? 'active' : '') + '" onclick="goHome()"><span>🏠 有效訊號總覽</span></div>';
     filtered.forEach(sym => {
       const sigs = allData[sym] || [];
       const activeClass = sym === currentSymbol ? 'active' : '';
@@ -2351,6 +2359,89 @@ HTML_TEMPLATE = """
       </div>`;
     });
     list.innerHTML = html || '<div style="padding:12px 16px;color:#6e7681;font-size:0.8rem;">無符合結果</div>';
+  }
+
+  function goHome() {
+    currentSymbol = null;
+    renderSidebar(document.getElementById('search-input').value);
+    renderHome();
+  }
+
+  function renderHome() {
+    document.getElementById('header-title').textContent = '📡 目前有效訊號總覽';
+    const container = document.getElementById('signal-container');
+
+    // 收集所有 active 的訊號，每筆帶上幣種名
+    const activeSigs = [];
+    Object.entries(allData).forEach(([base, sigs]) => {
+      sigs.filter(s => s.status === 'active' || s.status === 'missed').forEach(s => {
+        activeSigs.push({...s, _base: base});
+      });
+    });
+
+    if (activeSigs.length === 0) {
+      container.innerHTML = `<div class="empty-state"><div class="icon">🔍</div><p>目前最新 18D 區間尚無有效訊號</p></div>`;
+      return;
+    }
+
+    activeSigs.sort((a, b) => (b.trigger_ts || 0) - (a.trigger_ts || 0));
+
+    let html = '';
+    activeSigs.forEach((sig, idx) => {
+      const dir = sig.l2_direction || 'LONG';
+      const dirText = dir === 'LONG' ? '▲ LONG' : '▼ SHORT';
+      const prec = sig.precision || 4;
+      const entry = parseFloat(sig.entry_price);
+      const sl = parseFloat(sig.stop_loss);
+      const cp = parseFloat(sig.current_price || entry);
+      let rrStr = '—';
+      let rrCol = '#8b949e';
+      if (entry > 0 && sl > 0 && Math.abs(entry - sl) > 0) {
+        const risk = Math.abs(entry - sl);
+        let rr = dir === 'LONG' ? (cp - entry) / risk : (entry - cp) / risk;
+        rrStr = (rr >= 0 ? '+' : '') + rr.toFixed(2) + 'R';
+        rrCol = rr >= 0 ? '#3fb950' : '#f85149';
+      }
+      html += `
+      <div class="signal-card ${dir} active" style="cursor:pointer" onclick="selectSymbol('${sig._base}')">
+        <div class="card-header">
+          <div class="card-title">
+            <span style="color:#58a6ff;font-weight:600;font-size:0.95rem;">${sig._base}</span>
+            <span class="dir-badge ${dir}">${dirText}</span>
+            <span class="status-badge active">有效/未止損</span>
+            <span style="font-size:0.85rem;font-weight:700;color:${rrCol};margin-left:auto;">${rrStr}</span>
+          </div>
+          <div class="card-time">C2 觸發：${fmt(sig.c2_date)}</div>
+        </div>
+        <div class="card-grid">
+          <div class="detail-block">
+            <div class="detail-label">L2 (1D) 成立時間</div>
+            <div class="detail-value">${fmt(sig.l2_date)}</div>
+          </div>
+          <div class="detail-block">
+            <div class="detail-label">C1 布林觸碰時間</div>
+            <div class="detail-value">${fmt(sig.c1_date)}</div>
+          </div>
+          <div class="detail-block">
+            <div class="detail-label">C2 進場觸發時間</div>
+            <div class="detail-value">${fmt(sig.c2_date)}</div>
+          </div>
+          <div class="detail-block">
+            <div class="detail-label">進場價格</div>
+            <div class="detail-value price">${fmt(sig.entry_price, prec)}</div>
+          </div>
+          <div class="detail-block">
+            <div class="detail-label">止損價格</div>
+            <div class="detail-value sl">${fmt(sig.stop_loss, prec)}</div>
+          </div>
+          <div class="detail-block">
+            <div class="detail-label">即時 RR</div>
+            <div class="detail-value" style="color:${rrCol};font-weight:700;">${rrStr}</div>
+          </div>
+        </div>
+      </div>`;
+    });
+    container.innerHTML = html;
   }
 
   function selectSymbol(sym) {
@@ -2463,12 +2554,21 @@ def api_data():
                     cleaned_history[base].remove(existing)
                     cleaned_history[base].append(sig)
                 
+    # 建立 base -> 最新 current_price 的對照表（掃描時已注入）
+    price_map = {}
+    for base, sigs in cleaned_history.items():
+        for s in sigs:
+            cp = s.get('current_price')
+            if cp:
+                price_map[base] = cp
+                break
+
     # 側欄統一用 base coin 顯示
     watchlist_coins = sorted(set(
         [get_base_coin(k) for k in watchlist.keys()] +
         list(cleaned_history.keys())
     ))
-    return jsonify({"watchlist": watchlist_coins, "history": cleaned_history})
+    return jsonify({"watchlist": watchlist_coins, "history": cleaned_history, "price_map": price_map})
 
 def run_flask():
     port = int(os.environ.get("PORT", 8080))
