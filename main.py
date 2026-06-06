@@ -1483,9 +1483,12 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
         for c2 in all_historical_c2s:
             c2['current_price'] = current_price
 
-        is_trigger_met = l3_valid
+        is_trigger_met = l3_valid and simulated_pos
         if is_trigger_met:
             final_state = 'triggered'
+        elif l3_valid and not simulated_pos:
+            # L3 跌破/突破已成立，等待回踩進場
+            final_state = 'l3_waiting'
         elif l2_valid:
             final_state = 'l3_waiting'
         elif l1_valid:
@@ -1501,13 +1504,7 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
         if final_state in ['l1_waiting', 'l2_waiting']:
             action = 'remove'
 
-            expected_dir = ""
-            if l1_valid:
-                if l1_trend == 'BULLISH':
-                    expected_dir = 'LONG'
-                elif l1_trend == 'BEARISH':
-                    expected_dir = 'SHORT'
-                    
+            expected_dir = l2_direction if l2_direction else ""
             return {
                 'symbol': symbol, 
                 'action': 'remove',
