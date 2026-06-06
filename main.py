@@ -2417,15 +2417,22 @@ def api_data():
     watchlist = load_watchlist()
     history = load_history_signals()
     
-    # 清理並合併舊的 history key (避免 ADA 與 ADA/USDT:USDT 同時出現)
+    # 清理並合併舊的 history key
     cleaned_history = {}
     for k, v in history.items():
         base = get_base_coin(k)
         if base not in cleaned_history:
             cleaned_history[base] = []
         for sig in v:
-            if not any(s.get('_hist_id') == sig.get('_hist_id') for s in cleaned_history[base]):
+            ts = sig.get('trigger_ts')
+            existing = next((s for s in cleaned_history[base] if s.get('trigger_ts') == ts), None)
+            if not existing:
                 cleaned_history[base].append(sig)
+            else:
+                # 優先保留最新狀態 (active/closed)，取代舊版的 triggered
+                if existing.get('status') == 'triggered' and sig.get('status') != 'triggered':
+                    cleaned_history[base].remove(existing)
+                    cleaned_history[base].append(sig)
                 
     # 側欄統一用 base coin 顯示
     watchlist_coins = sorted(set(
