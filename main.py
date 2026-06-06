@@ -1388,24 +1388,32 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
                         
                         if is_long and not is_short:
                             if not (l2_valid and l2_direction == 'LONG'):
-                                l2_valid = True
-                                l2_valid_ts = t
-                                l2_direction = 'LONG'
-                                l2_date_str = pd.to_datetime(b1d['ts'], unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d')
-                                l2_locked_l1_date = l1_date_str
-                                l3_valid = False
-                                entry_price = l1_high
-                                stop_loss = float(b1d['low'])
+                                _sl = float(b1d['low'])
+                                _entry = l1_high
+                                _dist = abs(_entry - _sl) / _entry * 100 if _entry > 0 else 999
+                                if _dist <= 10:
+                                    l2_valid = True
+                                    l2_valid_ts = t
+                                    l2_direction = 'LONG'
+                                    l2_date_str = pd.to_datetime(b1d['ts'], unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d')
+                                    l2_locked_l1_date = l1_date_str
+                                    l3_valid = False
+                                    entry_price = _entry
+                                    stop_loss = _sl
                         elif is_short and not is_long:
                             if not (l2_valid and l2_direction == 'SHORT'):
-                                l2_valid = True
-                                l2_valid_ts = t
-                                l2_direction = 'SHORT'
-                                l2_date_str = pd.to_datetime(b1d['ts'], unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d')
-                                l2_locked_l1_date = l1_date_str
-                                l3_valid = False
-                                entry_price = l1_low
-                                stop_loss = float(b1d['high'])
+                                _sl = float(b1d['high'])
+                                _entry = l1_low
+                                _dist = abs(_entry - _sl) / _entry * 100 if _entry > 0 else 999
+                                if _dist <= 10:
+                                    l2_valid = True
+                                    l2_valid_ts = t
+                                    l2_direction = 'SHORT'
+                                    l2_date_str = pd.to_datetime(b1d['ts'], unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d')
+                                    l2_locked_l1_date = l1_date_str
+                                    l3_valid = False
+                                    entry_price = _entry
+                                    stop_loss = _sl
 
             # 3. 處理 3H (L3) 事件
             if simulated_pos:
