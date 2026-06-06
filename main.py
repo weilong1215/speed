@@ -1986,8 +1986,8 @@ async def run_scan():
             if base in history_signals and current_l1_ts > 0:
                 history_signals[base] = [s for s in history_signals[base] if s.get('l1_open_ts', 0) >= current_l1_ts]
 
-        # 所有 C2 觸發的訊號（新觸發 + 已過期 + 持倉中 + 歷史模擬捕捉到的）統一以 base_coin 為 key 存入歷史
-        all_triggered = real_new_triggers + missed_items + holding_items + all_past_events
+        # 只記錄掃描器推演出的 C2 事件，與實際倉位無關
+        all_triggered = real_new_triggers + missed_items + all_past_events
         for item in all_triggered:
             base = get_base_coin(item['symbol'])
             if base not in history_signals:
@@ -2013,6 +2013,10 @@ async def run_scan():
                     existing['status'] = 'closed'
                 elif new_status == 'active' and existing.get('status') in ['triggered', 'missed']:
                     existing['status'] = 'active'
+                # 每輪掃描都刷新 current_price，確保 RR 計算準確
+                cp = item.get('current_price')
+                if cp:
+                    existing['current_price'] = cp
         save_history_signals(history_signals)
 
         signals = load_active_signals()
