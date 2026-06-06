@@ -1417,9 +1417,9 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
                                 l2_locked_l1_date = l1_date_str
                                 l3_valid = False
 
-            # 3. 處理 3H (C1/C2) 事件
-            if len(history_3h) >= 4:
-                # 處理止損：止損後重置 C1 與 C2，重新等待布林觸碰
+            # 3. 處理 3H (C1) 事件
+            if len(history_3h) >= 5:
+                # 止損後重置 C1，重新等待下一個 4 根 pattern
                 if l3_valid and simulated_pos:
                     if l2_direction == 'LONG' and row['low'] <= stop_loss:
                         if all_historical_c2s and all_historical_c2s[-1]['status'] == 'active':
@@ -1429,9 +1429,6 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
                         c1_value = None
                         c1_ts = 0
                         c1_date_str = "未知"
-                        c2_value = None
-                        c2_ts = 0
-                        c2_date_str = "未知"
                     elif l2_direction == 'SHORT' and row['high'] >= stop_loss:
                         if all_historical_c2s and all_historical_c2s[-1]['status'] == 'active':
                             all_historical_c2s[-1]['status'] = 'closed'
@@ -1440,103 +1437,61 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
                         c1_value = None
                         c1_ts = 0
                         c1_date_str = "未知"
-                        c2_value = None
-                        c2_ts = 0
-                        c2_date_str = "未知"
 
                 if not simulated_pos and l2_valid:
-                    if row['ts'] >= l2_valid_ts and len(history_3h) >= 5:
+                    if row['ts'] >= l2_valid_ts:
 
                         def body_high(k): return max(float(k['open']), float(k['close']))
                         def body_low(k):  return min(float(k['open']), float(k['close']))
 
-                        def check_4bar_pattern(bars, direction):
-                            """
-                            bars: [bar0, bar1, bar2, bar3, bar4] (bar0 = 參照前一根)
-                            SHORT: bar1~bar2 收盤>前一根實體高點；bar3~bar4 收盤<前一根實體低點
-                            LONG:  bar1~bar2 收盤<前一根實體低點；bar3~bar4 收盤>前一根實體高點
-                            回傳 (成立, c_level) 其中 c_level = SHORT 時 max high, LONG 時 min low
-                            """
-                            b0, b1, b2, b3, b4 = bars
-                            if direction == 'SHORT':
-                                ok = (
-                                    float(b1['close']) > body_high(b0) and
-                                    float(b2['close']) > body_high(b1) and
-                                    float(b3['close']) < body_low(b2)  and
-                                    float(b4['close']) < body_low(b3)
-                                )
-                                level = max(float(b1['high']), float(b2['high']),
-                                            float(b3['high']), float(b4['high']))
-                                sl_ref = float(b4['high'])
-                            else:  # LONG
-                                ok = (
-                                    float(b1['close']) < body_low(b0)  and
-                                    float(b2['close']) < body_low(b1)  and
-                                    float(b3['close']) > body_high(b2) and
-                                    float(b4['close']) > body_high(b3)
-                                )
-                                level = min(float(b1['low']), float(b2['low']),
-                                            float(b3['low']), float(b4['low']))
-                                sl_ref = float(b4['low'])
-                            return ok, level, sl_ref
-
-                        # 取最近 5 根（含當根）
                         bars5 = list(history_3h[-5:])
+                        b0, b1, b2, b3, b4 = bars5
 
-                        # === C1 偵測 ===
-                        if c1_value is None:
-                            ok, level, _ = check_4bar_pattern(bars5, l2_direction)
-                            if ok:
-                                c1_value = level
-                                c1_ts    = int(bars5[4]['ts'])
+                        if l2_direction == 'SHORT':
+                            ok = (
+                                float(b1['close']) > body_high(b0) and
+                                float(b2['close']) > body_high(b1) and
+                                float(b3['close']) < body_low(b2)  and
+                                float(b4['close']) < body_low(b3)
+                            )
+                            sl_ref = float(b4['high'])
+                        else:  # LONG
+                            ok = (
+                                float(b1['close']) < body_low(b0)  and
+                                float(b2['close']) < body_low(b1)  and
+                                float(b3['close']) > body_high(b2) and
+                                float(b4['close']) > body_high(b3)
+                            )
+                            sl_ref = float(b4['low'])
+
+                        if ok:
+                            _entry = float(b4['close'])
+                            _sl    = sl_ref
+                            _dist  = abs(_entry - _sl) / _entry * 100 if _entry > 0 else 999
+                            if _dist <= 10:
+                                c1_value    = _sl
+                                c1_ts       = int(b4['ts'])
                                 c1_date_str = pd.to_datetime(c1_ts, unit='ms', utc=True)\
                                     .tz_convert('Asia/Taipei').strftime('%Y-%m-%d %H:%M:%S')
-
-                        # === C1 失效：價格觸碰 C1 水位 ===
-                        elif c1_value is not None and c2_value is None:
-                            if l2_direction == 'SHORT' and float(row['high']) >= c1_value:
-                                # 高點突破 C1，C1 作廢，重新等待
-                                c1_value = None
-                                c1_ts    = 0
-                                c1_date_str = "未知"
-                            elif l2_direction == 'LONG' and float(row['low']) <= c1_value:
-                                c1_value = None
-                                c1_ts    = 0
-                                c1_date_str = "未知"
-
-                        # === C2 偵測：C1 成立後，再找同樣 4 根 pattern ===
-                        if c1_value is not None and c2_value is None and len(history_3h) >= 5:
-                            # C2 的 bar1 必須在 C1 確立之後
-                            if bars5[1]['ts'] >= c1_ts:
-                                ok2, level2, sl_ref2 = check_4bar_pattern(bars5, l2_direction)
-                                if ok2:
-                                    _entry = float(bars5[4]['close'])
-                                    _sl    = sl_ref2
-                                    _dist  = abs(_entry - _sl) / _entry * 100 if _entry > 0 else 999
-                                    if _dist <= 10:
-                                        c2_value    = level2
-                                        c2_ts       = int(bars5[4]['ts'])
-                                        c2_date_str = pd.to_datetime(c2_ts, unit='ms', utc=True)\
-                                            .tz_convert('Asia/Taipei').strftime('%Y-%m-%d %H:%M:%S')
-                                        l3_valid    = True
-                                        simulated_pos = True
-                                        entry_price = _entry
-                                        stop_loss   = _sl
-                                        trigger_ts  = c2_ts
-                                        all_historical_c2s.append({
-                                            'symbol':       symbol,
-                                            'l1_date':      l2_locked_l1_date if l2_valid else l1_date_str,
-                                            'l2_date':      l2_date_str,
-                                            'c1_date':      c1_date_str,
-                                            'c2_date':      c2_date_str,
-                                            'entry_price':  entry_price,
-                                            'stop_loss':    stop_loss,
-                                            'trigger_ts':   trigger_ts,
-                                            'l2_direction': l2_direction,
-                                            'precision':    precision,
-                                            'l1_open_ts':   l1_open_ts,
-                                            'status':       'active'
-                                        })
+                                l3_valid    = True
+                                simulated_pos = True
+                                entry_price = _entry
+                                stop_loss   = _sl
+                                trigger_ts  = c1_ts
+                                all_historical_c2s.append({
+                                    'symbol':       symbol,
+                                    'l1_date':      l2_locked_l1_date if l2_valid else l1_date_str,
+                                    'l2_date':      l2_date_str,
+                                    'c1_date':      c1_date_str,
+                                    'c2_date':      c1_date_str,  # 同一根，沿用欄位
+                                    'entry_price':  entry_price,
+                                    'stop_loss':    stop_loss,
+                                    'trigger_ts':   trigger_ts,
+                                    'l2_direction': l2_direction,
+                                    'precision':    precision,
+                                    'l1_open_ts':   l1_open_ts,
+                                    'status':       'active'
+                                })
         current_price = float(df_1d['close'].iloc[-1]) if not df_1d.empty else 0.0
         for c2 in all_historical_c2s:
             c2['current_price'] = current_price
@@ -2436,7 +2391,7 @@ HTML_TEMPLATE = """
             <span class="status-badge active">有效/未止損</span>
             <span style="font-size:0.85rem;font-weight:700;color:${rrCol};margin-left:auto;">${rrStr}</span>
           </div>
-          <div class="card-time">C2 觸發：${fmt(sig.c2_date)}</div>
+          <div class="card-time">C1 觸發：${fmt(sig.c2_date)}</div>
         </div>
         <div class="card-grid">
           <div class="detail-block">
@@ -2444,11 +2399,11 @@ HTML_TEMPLATE = """
             <div class="detail-value">${fmt(sig.l2_date)}</div>
           </div>
           <div class="detail-block">
-            <div class="detail-label">C1 布林觸碰時間</div>
+            <div class="detail-label">C1 4根K棒觸發時間</div>
             <div class="detail-value">${fmt(sig.c1_date)}</div>
           </div>
           <div class="detail-block">
-            <div class="detail-label">C2 進場觸發時間</div>
+            <div class="detail-label">C1 進場時間</div>
             <div class="detail-value">${fmt(sig.c2_date)}</div>
           </div>
           <div class="detail-block">
@@ -2511,7 +2466,7 @@ HTML_TEMPLATE = """
             <span class="dir-badge ${dir}">${dirText}</span>
             <span class="status-badge ${status}">${statusText}</span>
           </div>
-          <div class="card-time">C2 觸發：${fmt(sig.c2_date)}</div>
+          <div class="card-time">C1 觸發：${fmt(sig.c2_date)}</div>
         </div>
         <div class="card-grid">
           <div class="detail-block">
@@ -2519,11 +2474,11 @@ HTML_TEMPLATE = """
             <div class="detail-value">${fmt(sig.l2_date)}</div>
           </div>
           <div class="detail-block">
-            <div class="detail-label">C1 布林觸碰時間</div>
+            <div class="detail-label">C1 4根K棒觸發時間</div>
             <div class="detail-value">${fmt(sig.c1_date)}</div>
           </div>
           <div class="detail-block">
-            <div class="detail-label">C2 進場觸發時間</div>
+            <div class="detail-label">C1 進場時間</div>
             <div class="detail-value">${fmt(sig.c2_date)}</div>
           </div>
           <div class="detail-block">
