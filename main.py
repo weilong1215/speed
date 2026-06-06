@@ -1611,8 +1611,8 @@ def send_triggered_message(item, default_loss):
         f"{dir_icon} 💎 <b>交易對:</b> {display_symbol}\n\n"
         f"📅 <b>L1 (18日) 日期:</b> <code>{l1_d}</code>\n"
         f"📅 <b>L2 (1日) 日期:</b> <code>{l2_d}</code>\n"
-        f"📅 <b>C1 成立時間:</b> <code>{c1_d}</code>\n"
-        f"📅 <b>C2 觸發時間:</b> <code>{l3_d}</code>\n"
+        f"📅 <b>L3 成立時間:</b> <code>{c1_d}</code>\n"
+        f"📅 <b>回踩進場時間:</b> <code>{l3_d}</code>\n"
         f"📍 <b>進場價格:</b> <code>{entry:.{precision}f}</code>\n"
         f"🛡️ <b>止損價格:</b> <code>{sl:.{precision}f}</code>\n"
         f"💰 <b>倉位價值:</b> <code>{position_value:.2f} USDT</code>"
@@ -2283,11 +2283,13 @@ HTML_TEMPLATE = """
       const rrText = totalRR >= 0 ? `+${totalRR.toFixed(2)}` : `${totalRR.toFixed(2)}`;
       const rrColor = totalRR >= 0 ? '#3fb950' : '#f85149';
       
+      const waitingCount = json.waiting_count || 0;
       document.getElementById('global-stats').innerHTML = `
-        <span>📊 總訊號數量：<strong style="color:#c9d1d9">${totalSigs}</strong></span>
+        <span>📊 實際進場：<strong style="color:#c9d1d9">${totalSigs}</strong></span>
+        <span>⏳ 等待回踩：<strong style="color:#e3b341">${waitingCount}</strong></span>
         <span>❌ 止損/失效：<strong style="color:#f85149">${closedSigs}</strong></span>
-        <span>🏆 勝率 (未止損)：<strong style="color:#3fb950">${winRate}%</strong></span>
-        <span>💰 目前有效總 RR 獲利：<strong style="color:${rrColor}">${rrText}</strong></span>
+        <span>🏆 勝率 (已進場)：<strong style="color:#3fb950">${winRate}%</strong></span>
+        <span>💰 有效總 RR：<strong style="color:${rrColor}">${rrText}</strong></span>
       `;
       
       renderSidebar(document.getElementById('search-input').value);
@@ -2375,7 +2377,7 @@ HTML_TEMPLATE = """
             <span class="status-badge active">有效/未止損</span>
             <span style="font-size:0.85rem;font-weight:700;color:${rrCol};margin-left:auto;">${rrStr}</span>
           </div>
-          <div class="card-time">C1 觸發：${fmt(sig.c2_date)}</div>
+          <div class="card-time">回踩進場：${fmt(sig.c2_date)}</div>
         </div>
         <div class="card-grid">
           <div class="detail-block">
@@ -2383,11 +2385,11 @@ HTML_TEMPLATE = """
             <div class="detail-value">${fmt(sig.l2_date)}</div>
           </div>
           <div class="detail-block">
-            <div class="detail-label">C1 4根K棒觸發時間</div>
+            <div class="detail-label">L3 跌破/突破邊界時間</div>
             <div class="detail-value">${fmt(sig.c1_date)}</div>
           </div>
           <div class="detail-block">
-            <div class="detail-label">C1 進場時間</div>
+            <div class="detail-label">回踩進場時間</div>
             <div class="detail-value">${fmt(sig.c2_date)}</div>
           </div>
           <div class="detail-block">
@@ -2450,7 +2452,7 @@ HTML_TEMPLATE = """
             <span class="dir-badge ${dir}">${dirText}</span>
             <span class="status-badge ${status}">${statusText}</span>
           </div>
-          <div class="card-time">C1 觸發：${fmt(sig.c2_date)}</div>
+          <div class="card-time">回踩進場：${fmt(sig.c2_date)}</div>
         </div>
         <div class="card-grid">
           <div class="detail-block">
@@ -2458,11 +2460,11 @@ HTML_TEMPLATE = """
             <div class="detail-value">${fmt(sig.l2_date)}</div>
           </div>
           <div class="detail-block">
-            <div class="detail-label">C1 4根K棒觸發時間</div>
+            <div class="detail-label">L3 跌破/突破邊界時間</div>
             <div class="detail-value">${fmt(sig.c1_date)}</div>
           </div>
           <div class="detail-block">
-            <div class="detail-label">C1 進場時間</div>
+            <div class="detail-label">回踩進場時間</div>
             <div class="detail-value">${fmt(sig.c2_date)}</div>
           </div>
           <div class="detail-block">
@@ -2547,7 +2549,8 @@ def api_data():
         [get_base_coin(k) for k in watchlist.keys()] +
         list(cleaned_history.keys())
     ))
-    return jsonify({"watchlist": watchlist_coins, "history": cleaned_history, "price_map": price_map})
+    waiting_count = sum(1 for w in watchlist.values() if w.get('scan_state') == 'l3_waiting')
+    return jsonify({"watchlist": watchlist_coins, "history": cleaned_history, "price_map": price_map, "waiting_count": waiting_count})
 
 def run_flask():
     port = int(os.environ.get("PORT", 8080))
