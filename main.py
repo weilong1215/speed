@@ -2555,13 +2555,16 @@ def api_data():
     watchlist = load_watchlist()
     history = load_history_signals()
     
-    # 清理並合併舊的 history key
+    # 清理並合併舊的 history key；同時過濾掉沒有 entry_price 的空殼持倉紀錄
     cleaned_history = {}
     for k, v in history.items():
         base = get_base_coin(k)
         if base not in cleaned_history:
             cleaned_history[base] = []
         for sig in v:
+            # 空殼（沒有進場價）代表是舊版持倉殘留，直接丟棄
+            if not sig.get('entry_price') or float(sig.get('entry_price', 0)) == 0:
+                continue
             ts = sig.get('trigger_ts')
             existing = next((s for s in cleaned_history[base] if s.get('trigger_ts') == ts), None)
             if not existing:
@@ -2571,7 +2574,8 @@ def api_data():
                 if existing.get('status') == 'triggered' and sig.get('status') != 'triggered':
                     cleaned_history[base].remove(existing)
                     cleaned_history[base].append(sig)
-                
+    # 清掉空的 key
+    cleaned_history = {k: v for k, v in cleaned_history.items() if v}
     # 建立 base -> 最新 current_price 的對照表
     # 優先從 history 中找掃描時注入的 current_price；
     # 若沒有（舊紀錄），退而使用 active_signals 的 entry_price 當佔位符
