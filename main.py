@@ -1374,12 +1374,16 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
                 if pd.notna(b1d['ma_10']):
                     if l2_valid:
                         if l2_direction == 'LONG' and b1d['close'] < b1d['ma_10']:
+                            if l3_valid and simulated_pos and all_historical_c2s and all_historical_c2s[-1]['status'] == 'active':
+                                all_historical_c2s[-1]['status'] = 'closed'
                             l2_valid = False
                             l3_valid = False
                             c1_value = None
                             c2_value = None
                             simulated_pos = False
                         elif l2_direction == 'SHORT' and b1d['close'] > b1d['ma_10']:
+                            if l3_valid and simulated_pos and all_historical_c2s and all_historical_c2s[-1]['status'] == 'active':
+                                all_historical_c2s[-1]['status'] = 'closed'
                             l2_valid = False
                             l3_valid = False
                             c1_value = None
@@ -1418,6 +1422,8 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
                 # 處理止損：止損後重置 C1 與 C2，重新等待布林觸碰
                 if l3_valid and simulated_pos:
                     if l2_direction == 'LONG' and row['low'] <= stop_loss:
+                        if all_historical_c2s and all_historical_c2s[-1]['status'] == 'active':
+                            all_historical_c2s[-1]['status'] = 'closed'
                         simulated_pos = False
                         l3_valid = False
                         c1_value = None
@@ -1427,6 +1433,8 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
                         c2_ts = 0
                         c2_date_str = "未知"
                     elif l2_direction == 'SHORT' and row['high'] >= stop_loss:
+                        if all_historical_c2s and all_historical_c2s[-1]['status'] == 'active':
+                            all_historical_c2s[-1]['status'] = 'closed'
                         simulated_pos = False
                         l3_valid = False
                         c1_value = None
@@ -1520,7 +1528,7 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
                                             'l2_direction': l2_direction,
                                             'precision': precision,
                                             'l1_open_ts': l1_open_ts,
-                                            'status': 'triggered'
+                                            'status': 'active'
                                         })
 
         is_trigger_met = l3_valid
@@ -1964,11 +1972,22 @@ async def run_scan():
 
             # 以 trigger_ts 作為唯一鍵防止重複寫入
             hist_id = f"{item.get('trigger_ts', 0)}_{base}"
-            if not any(s.get('_hist_id') == hist_id for s in history_signals[base]):
+            
+            existing = next((s for s in history_signals[base] if s.get('_hist_id') == hist_id), None)
+            
+            new_status = item.get('status', 'active')
+            if 'missed' in item and item['missed']:
+                new_status = 'missed'
+                
+            if not existing:
                 item_copy = item.copy()
                 item_copy['_hist_id'] = hist_id
-                item_copy['status'] = 'triggered'
+                item_copy['status'] = new_status
                 history_signals[base].append(item_copy)
+            else:
+                # 若歷史紀錄狀態有變更（如 active 變為 closed），則更新
+                if existing.get('status') == 'active' and new_status == 'closed':
+                    existing['status'] = 'closed'
         save_history_signals(history_signals)
 
         signals = load_active_signals()
@@ -2176,9 +2195,9 @@ HTML_TEMPLATE = """
     letter-spacing: 0.04em;
     text-transform: uppercase;
   }
-  .status-badge.active { background: rgba(88,166,255,0.1); color: #58a6ff; border: 1px solid rgba(88,166,255,0.25); }
-  .status-badge.closed { background: rgba(88,166,255,0.1); color: #58a6ff; border: 1px solid rgba(88,166,255,0.25); }
-  .status-badge.missed { background: rgba(88,166,255,0.1); color: #58a6ff; border: 1px solid rgba(88,166,255,0.25); }
+  .status-badge.active { background: rgba(63,185,80,0.1); color: #3fb950; border: 1px solid rgba(63,185,80,0.25); }
+  .status-badge.closed { background: rgba(248,81,73,0.1); color: #f85149; border: 1px solid rgba(248,81,73,0.25); }
+  .status-badge.missed { background: rgba(210,153,34,0.1); color: #d2991c; border: 1px solid rgba(210,153,34,0.25); }
   .status-badge.triggered { background: rgba(88,166,255,0.1); color: #58a6ff; border: 1px solid rgba(88,166,255,0.25); }
   .card-time { font-size: 0.75rem; color: #6e7681; }
 
@@ -2318,7 +2337,7 @@ HTML_TEMPLATE = """
       const dir = sig.l2_direction || 'LONG';
       const status = sig.status || 'unknown';
       const dirText = dir === 'LONG' ? '▲ LONG' : '▼ SHORT';
-      const statusMap = { active: '已觸發', closed: '已觸發', missed: '已觸發', triggered: '已觸發' };
+      const statusMap = { active: '有效/持倉中', closed: '已失效/止損', missed: '未上車', triggered: '歷史紀錄' };
       const statusText = statusMap[status] || status;
       const prec = sig.precision || 4;
 
