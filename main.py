@@ -1408,6 +1408,8 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
                                 l2_date_str = pd.to_datetime(b1d['ts'], unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d')
                                 l2_locked_l1_date = l1_date_str
                                 l3_valid = False
+                                entry_price = l1_high
+                                stop_loss = float(b1d['low'])
                         elif is_short and not is_long:
                             if not (l2_valid and l2_direction == 'SHORT'):
                                 l2_valid = True
@@ -1416,82 +1418,73 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
                                 l2_date_str = pd.to_datetime(b1d['ts'], unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d')
                                 l2_locked_l1_date = l1_date_str
                                 l3_valid = False
+                                entry_price = l1_low
+                                stop_loss = float(b1d['high'])
 
-            # 3. 處理 3H (C1) 事件
-            if len(history_3h) >= 5:
-                # 止損後重置 C1，重新等待下一個 4 根 pattern
-                if l3_valid and simulated_pos:
-                    if l2_direction == 'LONG' and row['low'] <= stop_loss:
-                        if all_historical_c2s and all_historical_c2s[-1]['status'] == 'active':
-                            all_historical_c2s[-1]['status'] = 'closed'
-                        simulated_pos = False
-                        l3_valid = False
-                        c1_value = None
-                        c1_ts = 0
-                        c1_date_str = "未知"
-                    elif l2_direction == 'SHORT' and row['high'] >= stop_loss:
-                        if all_historical_c2s and all_historical_c2s[-1]['status'] == 'active':
-                            all_historical_c2s[-1]['status'] = 'closed'
-                        simulated_pos = False
-                        l3_valid = False
-                        c1_value = None
-                        c1_ts = 0
-                        c1_date_str = "未知"
+            # 3. 處理 3H (L3) 事件
+            if simulated_pos:
+                # 止損邏輯：L2 K棒最高/低點
+                if l2_direction == 'LONG' and row['low'] <= stop_loss:
+                    if all_historical_c2s and all_historical_c2s[-1]['status'] == 'active':
+                        all_historical_c2s[-1]['status'] = 'closed'
+                    simulated_pos = False
+                    l3_valid = False
+                    c1_date_str = "未知"
+                elif l2_direction == 'SHORT' and row['high'] >= stop_loss:
+                    if all_historical_c2s and all_historical_c2s[-1]['status'] == 'active':
+                        all_historical_c2s[-1]['status'] = 'closed'
+                    simulated_pos = False
+                    l3_valid = False
+                    c1_date_str = "未知"
 
-                if not simulated_pos and l2_valid:
-                    if row['ts'] >= l2_valid_ts:
-
-                        def body_high(k): return max(float(k['open']), float(k['close']))
-                        def body_low(k):  return min(float(k['open']), float(k['close']))
-
-                        bars5 = list(history_3h[-5:])
-                        b0, b1, b2, b3, b4 = bars5
-
-                        if l2_direction == 'SHORT':
-                            ok = (
-                                float(b1['close']) > body_high(b0) and
-                                float(b2['close']) > body_high(b1) and
-                                float(b3['close']) < body_low(b2)  and
-                                float(b4['close']) < body_low(b3)
-                            )
-                            sl_ref = float(b4['high'])
-                        else:  # LONG
-                            ok = (
-                                float(b1['close']) < body_low(b0)  and
-                                float(b2['close']) < body_low(b1)  and
-                                float(b3['close']) > body_high(b2) and
-                                float(b4['close']) > body_high(b3)
-                            )
-                            sl_ref = float(b4['low'])
-
-                        if ok:
-                            _entry = float(b4['close'])
-                            _sl    = sl_ref
-                            _dist  = abs(_entry - _sl) / _entry * 100 if _entry > 0 else 999
-                            if _dist <= 10:
-                                c1_value    = _sl
-                                c1_ts       = int(b4['ts'])
-                                c1_date_str = pd.to_datetime(c1_ts, unit='ms', utc=True)\
-                                    .tz_convert('Asia/Taipei').strftime('%Y-%m-%d %H:%M:%S')
-                                l3_valid    = True
-                                simulated_pos = True
-                                entry_price = _entry
-                                stop_loss   = _sl
-                                trigger_ts  = c1_ts
-                                all_historical_c2s.append({
-                                    'symbol':       symbol,
-                                    'l1_date':      l2_locked_l1_date if l2_valid else l1_date_str,
-                                    'l2_date':      l2_date_str,
-                                    'c1_date':      c1_date_str,
-                                    'c2_date':      c1_date_str,  # 同一根，沿用欄位
-                                    'entry_price':  entry_price,
-                                    'stop_loss':    stop_loss,
-                                    'trigger_ts':   trigger_ts,
-                                    'l2_direction': l2_direction,
-                                    'precision':    precision,
-                                    'l1_open_ts':   l1_open_ts,
-                                    'status':       'active'
-                                })
+            if not simulated_pos and l2_valid:
+                if row['ts'] >= l2_valid_ts:
+                    # L2 發生後，尋找 L3 (3H 跌破/突破 L1 邊界)
+                    if not l3_valid:
+                        if l2_direction == 'SHORT' and float(row['close']) < entry_price:
+                            l3_valid = True
+                            c1_ts = int(row['ts'])
+                            c1_date_str = pd.to_datetime(c1_ts, unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d %H:%M:%S')
+                        elif l2_direction == 'LONG' and float(row['close']) > entry_price:
+                            l3_valid = True
+                            c1_ts = int(row['ts'])
+                            c1_date_str = pd.to_datetime(c1_ts, unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d %H:%M:%S')
+                    
+                    # L3 成立後，等待回踩觸發進場
+                    if l3_valid and int(row['ts']) > c1_ts:
+                        triggered = False
+                        if l2_direction == 'SHORT' and float(row['high']) >= entry_price:
+                            triggered = True
+                            # 如果同一根 K 棒也掃到止損，視為觸發後立刻止損
+                            if float(row['high']) >= stop_loss:
+                                simulated_pos = False
+                                l3_valid = False
+                                c1_date_str = "未知"
+                        elif l2_direction == 'LONG' and float(row['low']) <= entry_price:
+                            triggered = True
+                            if float(row['low']) <= stop_loss:
+                                simulated_pos = False
+                                l3_valid = False
+                                c1_date_str = "未知"
+                                
+                        if triggered and l3_valid:
+                            simulated_pos = True
+                            trigger_ts = int(row['ts'])
+                            c2_date_str = pd.to_datetime(trigger_ts, unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d %H:%M:%S')
+                            all_historical_c2s.append({
+                                'symbol':       symbol,
+                                'l1_date':      l2_locked_l1_date if l2_valid else l1_date_str,
+                                'l2_date':      l2_date_str,
+                                'c1_date':      c1_date_str,  # L3 成立時間
+                                'c2_date':      c2_date_str,  # 回踩進場時間
+                                'entry_price':  entry_price,
+                                'stop_loss':    stop_loss,
+                                'trigger_ts':   trigger_ts,
+                                'l2_direction': l2_direction,
+                                'precision':    precision,
+                                'l1_open_ts':   l1_open_ts,
+                                'status':       'active'
+                            })
         current_price = float(df_1d['close'].iloc[-1]) if not df_1d.empty else 0.0
         for c2 in all_historical_c2s:
             c2['current_price'] = current_price
