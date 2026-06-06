@@ -1896,13 +1896,27 @@ async def run_scan():
                 if s['status'] == 'active':
                     sym = s['symbol']
                     ts = s.get('timestamp', 0)
-                    dt_str = pd.to_datetime(ts, unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d') if ts > 0 else '持續追蹤'
-                    holding_map[sym] = {'symbol': sym, 'c2_date': dt_str, 'l2_direction': s.get('direction', '')}
+                    dt_str = pd.to_datetime(ts, unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d %H:%M:%S') if ts > 0 else '持續追蹤'
+                    # 保留完整欄位，讓 history_signals 能正確顯示 entry/sl/RR
+                    holding_map[sym] = {
+                        'symbol':        sym,
+                        'c2_date':       dt_str,
+                        'l2_direction':  s.get('direction', ''),
+                        'entry_price':   s.get('entry_price', 0.0),
+                        'stop_loss':     s.get('original_sl_price', s.get('sl_price', 0.0)),
+                        'precision':     s.get('precision', 4),
+                        'trigger_ts':    ts,
+                        'l1_open_ts':    s.get('l1_open_ts', 0),
+                        'l1_date':       s.get('l1_date', ''),
+                        'l2_date':       s.get('l2_date', ''),
+                        'c1_date':       s.get('c1_date', ''),
+                        'status':        'active',
+                    }
                     
         for p in existing_positions:
             sym = p['symbol']
             if sym not in holding_map:
-                holding_map[sym] = {'symbol': sym, 'c2_date': '外部建倉', 'l2_direction': p['side'].upper()}
+                holding_map[sym] = {'symbol': sym, 'c2_date': '外部建倉', 'l2_direction': p['side'].upper(), 'status': 'active'}
 
         holding_items = []
         real_watching = []
@@ -2554,7 +2568,9 @@ def api_data():
                     cleaned_history[base].remove(existing)
                     cleaned_history[base].append(sig)
                 
-    # 建立 base -> 最新 current_price 的對照表（掃描時已注入）
+    # 建立 base -> 最新 current_price 的對照表
+    # 優先從 history 中找掃描時注入的 current_price；
+    # 若沒有（舊紀錄），退而使用 active_signals 的 entry_price 當佔位符
     price_map = {}
     for base, sigs in cleaned_history.items():
         for s in sigs:
@@ -2562,6 +2578,15 @@ def api_data():
             if cp:
                 price_map[base] = cp
                 break
+
+    active_sigs = load_active_signals()
+    for slist in active_sigs.values():
+        for s in slist:
+            if s.get('status') == 'active':
+                base = get_base_coin(s['symbol'])
+                if base not in price_map and s.get('entry_price'):
+                    # 以進場價作為臨時佔位，前端 RR 算出 0，但至少不會崩潰
+                    price_map[base] = float(s['entry_price'])
 
     # 側欄統一用 base coin 顯示
     watchlist_coins = sorted(set(
