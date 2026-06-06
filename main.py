@@ -1439,38 +1439,48 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
                         c1_date_str = "未知"
 
                 if not simulated_pos and l2_valid:
-                    if row['ts'] >= l2_valid_ts:
+                    if row['ts'] >= l2_valid_ts and len(history_3h) >= 4:
+                        # 沿用原 C2 偵測邏輯（3根 + 前一根錨點）直接作為進場觸發
+                        k0, k1, k2, k3 = history_3h[-4], history_3h[-3], history_3h[-2], history_3h[-1]
 
                         def body_high(k): return max(float(k['open']), float(k['close']))
                         def body_low(k):  return min(float(k['open']), float(k['close']))
 
-                        bars5 = list(history_3h[-5:])
-                        b0, b1, b2, b3, b4 = bars5
+                        is_pattern = False
 
                         if l2_direction == 'SHORT':
-                            ok = (
-                                float(b1['close']) > body_high(b0) and
-                                float(b2['close']) > body_high(b1) and
-                                float(b3['close']) < body_low(b2)  and
-                                float(b4['close']) < body_low(b3)
-                            )
-                            sl_ref = float(b4['high'])
-                        else:  # LONG
-                            ok = (
-                                float(b1['close']) < body_low(b0)  and
-                                float(b2['close']) < body_low(b1)  and
-                                float(b3['close']) > body_high(b2) and
-                                float(b4['close']) > body_high(b3)
-                            )
-                            sl_ref = float(b4['low'])
+                            # k1, k2 陽線；k3 陰線
+                            # k1 收盤突破 k0 實體高點；k2 收盤高於 k1 收盤；k3 收盤低於 k2 實體低點
+                            cond1 = (float(k1['close']) > float(k1['open'])) and \
+                                    (float(k2['close']) > float(k2['open']))
+                            cond2 = float(k3['close']) < float(k3['open'])
+                            cond3 = float(k1['close']) > body_high(k0)
+                            cond4 = float(k2['close']) > float(k1['close'])
+                            cond5 = float(k3['close']) < body_low(k2)
+                            if cond1 and cond2 and cond3 and cond4 and cond5:
+                                is_pattern = True
+                                _entry = float(k3['close'])
+                                _sl    = float(k3['high'])
 
-                        if ok:
-                            _entry = float(b4['close'])
-                            _sl    = sl_ref
-                            _dist  = abs(_entry - _sl) / _entry * 100 if _entry > 0 else 999
+                        elif l2_direction == 'LONG':
+                            # k1, k2 陰線；k3 陽線
+                            # k1 收盤突破 k0 實體低點；k2 收盤低於 k1 收盤；k3 收盤高於 k2 實體高點
+                            cond1 = (float(k1['close']) < float(k1['open'])) and \
+                                    (float(k2['close']) < float(k2['open']))
+                            cond2 = float(k3['close']) > float(k3['open'])
+                            cond3 = float(k1['close']) < body_low(k0)
+                            cond4 = float(k2['close']) < float(k1['close'])
+                            cond5 = float(k3['close']) > body_high(k2)
+                            if cond1 and cond2 and cond3 and cond4 and cond5:
+                                is_pattern = True
+                                _entry = float(k3['close'])
+                                _sl    = float(k3['low'])
+
+                        if is_pattern:
+                            _dist = abs(_entry - _sl) / _entry * 100 if _entry > 0 else 999
                             if _dist <= 10:
                                 c1_value    = _sl
-                                c1_ts       = int(b4['ts'])
+                                c1_ts       = int(k3['ts'])
                                 c1_date_str = pd.to_datetime(c1_ts, unit='ms', utc=True)\
                                     .tz_convert('Asia/Taipei').strftime('%Y-%m-%d %H:%M:%S')
                                 l3_valid    = True
@@ -1483,7 +1493,7 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
                                     'l1_date':      l2_locked_l1_date if l2_valid else l1_date_str,
                                     'l2_date':      l2_date_str,
                                     'c1_date':      c1_date_str,
-                                    'c2_date':      c1_date_str,  # 同一根，沿用欄位
+                                    'c2_date':      c1_date_str,
                                     'entry_price':  entry_price,
                                     'stop_loss':    stop_loss,
                                     'trigger_ts':   trigger_ts,
