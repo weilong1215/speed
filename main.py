@@ -1445,90 +1445,97 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
                         c2_date_str = "未知"
 
                 if not simulated_pos and l2_valid:
-                    if row['ts'] >= l2_valid_ts:
-                        # === C1 偵測：布林觸碰 ===
-                        if c1_value is None:
-                            bb_upper = float(row.get('bb_upper', float('inf')))
-                            bb_lower = float(row.get('bb_lower', float('-inf')))
-                            
-                            is_c1_pattern = False
-                            if l2_direction == 'LONG':
-                                if row['low'] <= bb_lower:
-                                    is_c1_pattern = True
-                                    c1_value = float(row['low'])
-                            elif l2_direction == 'SHORT':
-                                if row['high'] >= bb_upper:
-                                    is_c1_pattern = True
-                                    c1_value = float(row['high'])
-                                    
-                            if is_c1_pattern:
-                                c1_ts = int(row['ts'])
-                                c1_date_str = pd.to_datetime(c1_ts, unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d %H:%M:%S')
+                    if row['ts'] >= l2_valid_ts and len(history_3h) >= 5:
 
-                        # === C2 偵測：需要 3 根 K 棒，且 C1 已成立 ===
-                        if c1_value is not None and c2_value is None:
-                            k0_c2, k1_c2, k2_c2, k3_c2 = history_3h[-4], history_3h[-3], history_3h[-2], history_3h[-1]
-                            
-                            # 確保 C2 的第一根 (k1_c2) 發生在 C1 成立當下或之後
-                            if k1_c2['ts'] >= c1_ts:
-                                is_c2_pattern = False
-                                
-                                if l2_direction == 'LONG':
-                                    cond1 = (k1_c2['close'] < k1_c2['open']) and (k2_c2['close'] < k2_c2['open'])
-                                    cond2 = (k3_c2['close'] > k3_c2['open'])
-                                    # 第一根吞噬前一根實體低點
-                                    cond3 = k1_c2['close'] < min(k0_c2['open'], k0_c2['close'])
-                                    # 第二根吞噬第一根的實體低點
-                                    cond4 = k2_c2['close'] < k1_c2['close']
-                                    # 第三根吞噬第二根的實體高點
-                                    cond5 = k3_c2['close'] > k2_c2['open']
-                                    
-                                    if cond1 and cond2 and cond3 and cond4 and cond5:
-                                        is_c2_pattern = True
-                                        c2_value = float(k3_c2['low'])
-                                        
-                                elif l2_direction == 'SHORT':
-                                    cond1 = (k1_c2['close'] > k1_c2['open']) and (k2_c2['close'] > k2_c2['open'])
-                                    cond2 = (k3_c2['close'] < k3_c2['open'])
-                                    # 第一根吞噬前一根實體高點
-                                    cond3 = k1_c2['close'] > max(k0_c2['open'], k0_c2['close'])
-                                    # 第二根吞噬第一根的實體高點
-                                    cond4 = k2_c2['close'] > k1_c2['close']
-                                    # 第三根吞噬第二根的實體低點
-                                    cond5 = k3_c2['close'] < k2_c2['open']
-                                    
-                                    if cond1 and cond2 and cond3 and cond4 and cond5:
-                                        is_c2_pattern = True
-                                        c2_value = float(k3_c2['high'])
-                                
-                                if is_c2_pattern:
-                                    c2_ts = int(k3_c2['ts'])
-                                    
-                                    # 進場用第三根的收盤價格，止損用第三根的最低/高點(即 c2_value)
-                                    _entry = float(k3_c2['close'])
-                                    _sl = float(c2_value)
-                                    
-                                    _dist = abs(_entry - _sl) / _entry * 100 if _entry > 0 else 999
+                        def body_high(k): return max(float(k['open']), float(k['close']))
+                        def body_low(k):  return min(float(k['open']), float(k['close']))
+
+                        def check_4bar_pattern(bars, direction):
+                            """
+                            bars: [bar0, bar1, bar2, bar3, bar4] (bar0 = 參照前一根)
+                            SHORT: bar1~bar2 收盤>前一根實體高點；bar3~bar4 收盤<前一根實體低點
+                            LONG:  bar1~bar2 收盤<前一根實體低點；bar3~bar4 收盤>前一根實體高點
+                            回傳 (成立, c_level) 其中 c_level = SHORT 時 max high, LONG 時 min low
+                            """
+                            b0, b1, b2, b3, b4 = bars
+                            if direction == 'SHORT':
+                                ok = (
+                                    float(b1['close']) > body_high(b0) and
+                                    float(b2['close']) > body_high(b1) and
+                                    float(b3['close']) < body_low(b2)  and
+                                    float(b4['close']) < body_low(b3)
+                                )
+                                level = max(float(b1['high']), float(b2['high']),
+                                            float(b3['high']), float(b4['high']))
+                                sl_ref = float(b4['high'])
+                            else:  # LONG
+                                ok = (
+                                    float(b1['close']) < body_low(b0)  and
+                                    float(b2['close']) < body_low(b1)  and
+                                    float(b3['close']) > body_high(b2) and
+                                    float(b4['close']) > body_high(b3)
+                                )
+                                level = min(float(b1['low']), float(b2['low']),
+                                            float(b3['low']), float(b4['low']))
+                                sl_ref = float(b4['low'])
+                            return ok, level, sl_ref
+
+                        # 取最近 5 根（含當根）
+                        bars5 = list(history_3h[-5:])
+
+                        # === C1 偵測 ===
+                        if c1_value is None:
+                            ok, level, _ = check_4bar_pattern(bars5, l2_direction)
+                            if ok:
+                                c1_value = level
+                                c1_ts    = int(bars5[4]['ts'])
+                                c1_date_str = pd.to_datetime(c1_ts, unit='ms', utc=True)\
+                                    .tz_convert('Asia/Taipei').strftime('%Y-%m-%d %H:%M:%S')
+
+                        # === C1 失效：價格觸碰 C1 水位 ===
+                        elif c1_value is not None and c2_value is None:
+                            if l2_direction == 'SHORT' and float(row['high']) >= c1_value:
+                                # 高點突破 C1，C1 作廢，重新等待
+                                c1_value = None
+                                c1_ts    = 0
+                                c1_date_str = "未知"
+                            elif l2_direction == 'LONG' and float(row['low']) <= c1_value:
+                                c1_value = None
+                                c1_ts    = 0
+                                c1_date_str = "未知"
+
+                        # === C2 偵測：C1 成立後，再找同樣 4 根 pattern ===
+                        if c1_value is not None and c2_value is None and len(history_3h) >= 5:
+                            # C2 的 bar1 必須在 C1 確立之後
+                            if bars5[1]['ts'] >= c1_ts:
+                                ok2, level2, sl_ref2 = check_4bar_pattern(bars5, l2_direction)
+                                if ok2:
+                                    _entry = float(bars5[4]['close'])
+                                    _sl    = sl_ref2
+                                    _dist  = abs(_entry - _sl) / _entry * 100 if _entry > 0 else 999
                                     if _dist <= 10:
-                                        l3_valid = True
+                                        c2_value    = level2
+                                        c2_ts       = int(bars5[4]['ts'])
+                                        c2_date_str = pd.to_datetime(c2_ts, unit='ms', utc=True)\
+                                            .tz_convert('Asia/Taipei').strftime('%Y-%m-%d %H:%M:%S')
+                                        l3_valid    = True
                                         simulated_pos = True
-                                        c2_date_str = pd.to_datetime(c2_ts, unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d %H:%M:%S')
                                         entry_price = _entry
-                                        stop_loss = _sl
-                                        trigger_ts = int(k3_c2['ts'])
+                                        stop_loss   = _sl
+                                        trigger_ts  = c2_ts
                                         all_historical_c2s.append({
-                                            'symbol': symbol,
-                                            'l1_date': l2_locked_l1_date if l2_valid else l1_date_str,
-                                            'l2_date': l2_date_str,
-                                            'c1_date': c1_date_str,
-                                            'c2_date': c2_date_str,
-                                            'entry_price': entry_price,
-                                            'stop_loss': stop_loss,
-                                            'trigger_ts': trigger_ts,
+                                            'symbol':       symbol,
+                                            'l1_date':      l2_locked_l1_date if l2_valid else l1_date_str,
+                                            'l2_date':      l2_date_str,
+                                            'c1_date':      c1_date_str,
+                                            'c2_date':      c2_date_str,
+                                            'entry_price':  entry_price,
+                                            'stop_loss':    stop_loss,
+                                            'trigger_ts':   trigger_ts,
                                             'l2_direction': l2_direction,
-                                            'precision': precision,
-                                            'l1_open_ts': l1_open_ts,
-                                            'status': 'active'
+                                            'precision':    precision,
+                                            'l1_open_ts':   l1_open_ts,
+                                            'status':       'active'
                                         })
         current_price = float(df_1d['close'].iloc[-1]) if not df_1d.empty else 0.0
         for c2 in all_historical_c2s:
