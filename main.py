@@ -1546,6 +1546,9 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
 
         cache_ts = trigger_ts if is_trigger_met else l1_valid_ts
         action = 'update' if (not cached_info or cached_info.get('ts') != cache_ts) else 'keep'
+        # 過濾：只保留屬於「最新一根已收盤 18D K 線」區間內的歷史訊號
+        filtered_c2s = [c2 for c2 in all_historical_c2s if c2.get('l1_open_ts') == l1_open_ts]
+
         if final_state in ['l1_waiting', 'l2_waiting']:
             action = 'remove'
 
@@ -1561,7 +1564,8 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
                 'action': 'remove',
                 'l1_date': l1_date_str if l1_valid else '未知',
                 'l2_direction': expected_dir,
-                'historical_c2s': all_historical_c2s
+                'historical_c2s': filtered_c2s,
+                'l1_open_ts': l1_open_ts
             }
 
         return {
@@ -1583,7 +1587,7 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
             'l1_high':            l1_high,
             'l1_low':             l1_low,
             'l1_open_ts':         l1_open_ts,
-            'historical_c2s':     all_historical_c2s,
+            'historical_c2s':     filtered_c2s,
         }
 
     except Exception as e:
@@ -1851,6 +1855,7 @@ async def run_scan():
 
         all_results = []
         all_past_events = []
+        latest_l1_open_ts_map = {}
         total_coins = len(coins)
         for i in range(0, total_coins, 20):
             batch = coins[i:i+20]
@@ -1860,6 +1865,9 @@ async def run_scan():
             for res in results:
                 if res is None: continue
                 sym = res['symbol']
+                
+                if res.get('l1_open_ts', 0) > 0:
+                    latest_l1_open_ts_map[get_base_coin(sym)] = res['l1_open_ts']
                 
                 if 'historical_c2s' in res:
                     all_past_events.extend(res['historical_c2s'])
@@ -1959,17 +1967,17 @@ async def run_scan():
 
         history_signals = load_history_signals()
 
+        # 清除所有不屬於最新 18D 區間的舊紀錄
+        for base, current_l1_ts in latest_l1_open_ts_map.items():
+            if base in history_signals and current_l1_ts > 0:
+                history_signals[base] = [s for s in history_signals[base] if s.get('l1_open_ts', 0) >= current_l1_ts]
+
         # 所有 C2 觸發的訊號（新觸發 + 已過期 + 持倉中 + 歷史模擬捕捉到的）統一以 base_coin 為 key 存入歷史
         all_triggered = real_new_triggers + missed_items + holding_items + all_past_events
         for item in all_triggered:
             base = get_base_coin(item['symbol'])
             if base not in history_signals:
                 history_signals[base] = []
-
-            # 切換到新 18D 區間時，清除舊區間的紀錄
-            l1_ts = item.get('l1_open_ts', 0)
-            if l1_ts > 0:
-                history_signals[base] = [s for s in history_signals[base] if s.get('l1_open_ts', 0) >= l1_ts]
 
             # 以 trigger_ts 作為唯一鍵防止重複寫入
             hist_id = f"{item.get('trigger_ts', 0)}_{base}"
