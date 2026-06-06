@@ -412,17 +412,16 @@ async def place_order(exchange, symbol, direction, entry, sl, precision, fixed_l
                             c_ma10 = float(c1d['ma_10'])
                             dt_str = pd.to_datetime(c1d['ts'], unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d')
                             
-                            if direction == 'LONG' and c_close < c_open:
+                            if direction == 'LONG' and c_close <= sl:
                                 skip_order = True
                                 alert_type = "淘汰"
-                                skip_reason = f"歷史 1D線 ({dt_str}) 收盤陰棒 (O:{c_open:.4f} C:{c_close:.4f})，動能轉弱"
+                                skip_reason = f"歷史 1D線 ({dt_str}) 收盤 ({c_close:.4f}) 跌破止損 ({sl:.4f})"
                                 break
-                            elif direction == 'SHORT' and c_close > c_open:
+                            elif direction == 'SHORT' and c_close >= sl:
                                 skip_order = True
                                 alert_type = "淘汰"
-                                skip_reason = f"歷史 1D線 ({dt_str}) 收盤陽棒 (O:{c_open:.4f} C:{c_close:.4f})，動能轉強"
+                                skip_reason = f"歷史 1D線 ({dt_str}) 收盤 ({c_close:.4f}) 突破止損 ({sl:.4f})"
                                 break
-                                
                             if direction == 'LONG' and c_close < c_ma10:
                                 skip_order = True
                                 alert_type = "淘汰"
@@ -1128,13 +1127,12 @@ async def monitor_positions(exchange):
                                         c_ma10 = float(c1d['ma_10'])
                                         dt_str = pd.to_datetime(c1d['ts'], unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d')
                                         
-                                        if direction == 'LONG' and c_close < c_open:
-                                            revoke_reason = f"歷史 1D線 ({dt_str}) 收盤陰棒 (O:{c_open:.4f} C:{c_close:.4f})，動能轉弱"
+                                        if direction == 'LONG' and c_close <= stop_loss:
+                                            revoke_reason = f"歷史 1D線 ({dt_str}) 收盤 ({c_close:.4f}) 跌破止損 ({stop_loss:.4f})"
                                             break
-                                        elif direction == 'SHORT' and c_close > c_open:
-                                            revoke_reason = f"歷史 1D線 ({dt_str}) 收盤陽棒 (O:{c_open:.4f} C:{c_close:.4f})，動能轉強"
+                                        elif direction == 'SHORT' and c_close >= stop_loss:
+                                            revoke_reason = f"歷史 1D線 ({dt_str}) 收盤 ({c_close:.4f}) 突破止損 ({stop_loss:.4f})"
                                             break
-                                            
                                         if direction == 'LONG' and c_close < c_ma10:
                                             revoke_reason = f"歷史 1D線 ({dt_str}) 收盤 ({c_close:.4f}) 跌破 10MA ({c_ma10:.4f})"
                                             break
