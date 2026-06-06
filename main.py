@@ -2152,9 +2152,10 @@ HTML_TEMPLATE = """
     letter-spacing: 0.04em;
     text-transform: uppercase;
   }
-  .status-badge.active { background: rgba(63,185,80,0.1); color: #3fb950; border: 1px solid rgba(63,185,80,0.25); }
-  .status-badge.closed { background: rgba(248,81,73,0.1); color: #f85149; border: 1px solid rgba(248,81,73,0.25); }
-  .status-badge.missed { background: rgba(210,153,34,0.1); color: #d2991c; border: 1px solid rgba(210,153,34,0.25); }
+  .status-badge.active { background: rgba(88,166,255,0.1); color: #58a6ff; border: 1px solid rgba(88,166,255,0.25); }
+  .status-badge.closed { background: rgba(88,166,255,0.1); color: #58a6ff; border: 1px solid rgba(88,166,255,0.25); }
+  .status-badge.missed { background: rgba(88,166,255,0.1); color: #58a6ff; border: 1px solid rgba(88,166,255,0.25); }
+  .status-badge.triggered { background: rgba(88,166,255,0.1); color: #58a6ff; border: 1px solid rgba(88,166,255,0.25); }
   .card-time { font-size: 0.75rem; color: #6e7681; }
 
   .card-grid {
@@ -2293,7 +2294,7 @@ HTML_TEMPLATE = """
       const dir = sig.l2_direction || 'LONG';
       const status = sig.status || 'unknown';
       const dirText = dir === 'LONG' ? '▲ LONG' : '▼ SHORT';
-      const statusMap = { active: '持倉中', closed: '已平倉/止損', missed: '未上車' };
+      const statusMap = { active: '已觸發', closed: '已觸發', missed: '已觸發', triggered: '已觸發' };
       const statusText = statusMap[status] || status;
       const prec = sig.precision || 4;
 
