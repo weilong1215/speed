@@ -1369,8 +1369,8 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
                                     all_historical_c2s[-1]['status'] = 'closed'
                                 l2_valid = False
                                 l3_valid = False
-                                c1_value = None
-                                c2_value = None
+                                c1_date_str = "未知"
+                                c2_date_str = "未知"
                                 simulated_pos = False
                         elif l2_direction == 'SHORT':
                             if b1d['close'] > b1d['ma_10'] or b1d['close'] >= stop_loss:
@@ -1378,8 +1378,8 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
                                     all_historical_c2s[-1]['status'] = 'closed'
                                 l2_valid = False
                                 l3_valid = False
-                                c1_value = None
-                                c2_value = None
+                                c1_date_str = "未知"
+                                c2_date_str = "未知"
                                 simulated_pos = False
                             
                     if l1_valid and b1d['ts'] >= l1_valid_ts:
@@ -1447,22 +1447,18 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
                     # L3 成立後，等待回踩觸發進場
                     if l3_valid and int(row['ts']) > c1_ts:
                         triggered = False
+                        is_immediate_sl = False
                         if l2_direction == 'SHORT' and float(row['high']) >= entry_price:
                             triggered = True
-                            # 如果同一根 K 棒也掃到止損，視為觸發後立刻止損
                             if float(row['high']) >= stop_loss:
-                                simulated_pos = False
-                                l3_valid = False
-                                c1_date_str = "未知"
+                                is_immediate_sl = True
                         elif l2_direction == 'LONG' and float(row['low']) <= entry_price:
                             triggered = True
                             if float(row['low']) <= stop_loss:
-                                simulated_pos = False
-                                l3_valid = False
-                                c1_date_str = "未知"
+                                is_immediate_sl = True
                                 
-                        if triggered and l3_valid:
-                            simulated_pos = True
+                        if triggered:
+                            simulated_pos = not is_immediate_sl
                             trigger_ts = int(row['ts'])
                             c2_date_str = pd.to_datetime(trigger_ts, unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d %H:%M:%S')
                             all_historical_c2s.append({
@@ -1477,8 +1473,13 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
                                 'l2_direction': l2_direction,
                                 'precision':    precision,
                                 'l1_open_ts':   l1_open_ts,
-                                'status':       'active'
+                                'status':       'closed' if is_immediate_sl else 'active'
                             })
+                            
+                            if is_immediate_sl:
+                                l3_valid = False
+                                c1_date_str = "未知"
+                                c2_date_str = "未知"
         current_price = float(df_1d['close'].iloc[-1]) if not df_1d.empty else 0.0
         for c2 in all_historical_c2s:
             c2['current_price'] = current_price
@@ -2512,6 +2513,9 @@ def api_data():
         for sig in v:
             # 空殼（沒有進場價）代表是舊版持倉殘留，直接丟棄
             if not sig.get('entry_price') or float(sig.get('entry_price', 0)) == 0:
+                continue
+            # 觸發時間為 0 代表是舊版 bug 造成的等待中殘留紀錄，直接丟棄
+            if not sig.get('trigger_ts') or int(sig.get('trigger_ts', 0)) == 0:
                 continue
             ts = sig.get('trigger_ts')
             existing = next((s for s in cleaned_history[base] if s.get('trigger_ts') == ts), None)
