@@ -1300,15 +1300,18 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
                     if is_immediate_sl:
                         simulated_pos = False
                         l2_valid = False
-                        latest_18d_ts = max([k for k in dict_18d.keys() if k <= t], default=None)
-                        if latest_18d_ts:
-                            curr_18d = dict_18d[latest_18d_ts]
+                        latest_18d_row = None
+                        for _r in reversed(list_18d):
+                            if int(_r['close_ts']) <= t_close:
+                                latest_18d_row = _r
+                                break
+                        if latest_18d_row:
                             l1_valid = True
-                            l1_valid_ts = latest_18d_ts
-                            l1_open_ts = int(curr_18d['ts'])
-                            l1_high = float(curr_18d['high'])
-                            l1_low = float(curr_18d['low'])
-                            l1_date_str = pd.to_datetime(curr_18d['ts'], unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d')
+                            l1_valid_ts = t_close
+                            l1_open_ts = int(latest_18d_row['ts'])
+                            l1_high = float(latest_18d_row['high'])
+                            l1_low = float(latest_18d_row['low'])
+                            l1_date_str = pd.to_datetime(l1_open_ts, unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d')
                         else:
                             l1_valid = False
 
