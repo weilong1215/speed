@@ -1042,6 +1042,8 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
         df_18d = pd.DataFrame(ohlcv_18d, columns=['ts', 'open', 'high', 'low', 'close', 'vol', 'close_ts'])
         df_18d_closed = df_18d[df_18d['close_ts'] <= now_utc].reset_index(drop=True)
 
+        df_1d = pd.DataFrame(ohlcv_1d, columns=['ts', 'open', 'high', 'low', 'close', 'vol'])
+
         df_3h = pd.DataFrame(ohlcv_3h, columns=['ts', 'open', 'high', 'low', 'close', 'vol', 'close_ts'])
         df_3h_closed = df_3h[df_3h['close_ts'] <= now_utc].reset_index(drop=True)
 
