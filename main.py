@@ -1067,15 +1067,18 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
         # 拉取 1D 與 1H 資料
         ohlcv_1d = await exchange.fetch_ohlcv(symbol, '1d', limit=500)
         if not ohlcv_1d or len(ohlcv_1d) < 36:
+            logger.info(f"🔎 {symbol} 略過: 1D K線不足 ({len(ohlcv_1d) if ohlcv_1d else 0} 根，需≥36)")
             return None
 
         ohlcv_1h = await exchange.fetch_ohlcv(symbol, '1h', limit=1000)
         if not ohlcv_1h or len(ohlcv_1h) < 100:
+            logger.info(f"🔎 {symbol} 略過: 1H K線不足 ({len(ohlcv_1h) if ohlcv_1h else 0} 根，需≥100)")
             return None
 
         ohlcv_18d = compose_18d_bars(ohlcv_1d)
         ohlcv_3h = compose_3h_bars(ohlcv_1h)
         if not ohlcv_18d or not ohlcv_3h:
+            logger.info(f"🔎 {symbol} 略過: 18D/3H 合成失敗 (18D={len(ohlcv_18d) if ohlcv_18d else 0}, 3H={len(ohlcv_3h) if ohlcv_3h else 0})")
             return None
 
         df_18d = pd.DataFrame(ohlcv_18d, columns=['ts', 'open', 'high', 'low', 'close', 'vol', 'close_ts'])
@@ -1238,6 +1241,8 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
                 f"🔎 {symbol} L1 H={l1_high:.{precision}f} L={l1_low:.{precision}f} "
                 f"本18D訊號={len(filtered_c2s)} 末筆={last_sig.get('l2_direction')} ({last_sig.get('status')})"
             )
+        elif not l1_valid:
+            logger.info(f"🔎 {symbol} L1 尚未成立 (18D 已收盤 K 棒不足)")
 
         if final_state in ['l1_waiting']:
             # L1 成立等待 L2：幣種必須保留在 watchlist，否則會被掃描器刪掉
@@ -1536,12 +1541,20 @@ async def run_scan():
             exclude_bases.update(custom_blacklist)
             coins = []
             
+            skipped_symbols = []
             for raw_sym in top_symbols:
                 base = raw_sym.replace('USDT', '')
                 ccxt_sym = f"{base}/USDT:USDT"
-                if ccxt_sym in markets and base not in exclude_bases:
+                if base in exclude_bases:
+                    skipped_symbols.append(f"{base}(黑名單)")
+                elif ccxt_sym not in markets:
+                    skipped_symbols.append(f"{base}(無合約)")
+                else:
                     coins.append(ccxt_sym)
-                    
+            if skipped_symbols:
+                logger.warning(f"⚠️ 榜單有 {len(skipped_symbols)} 個幣無法掃描: {', '.join(skipped_symbols)}")
+            logger.info(f"📊 實際掃描幣種: {len(coins)} 個")
+
             # 必須包含目前正在持倉與等待追蹤的幣種
             active_signals = load_active_signals()
             active_syms = set()
