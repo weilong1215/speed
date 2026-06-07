@@ -1313,15 +1313,28 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
         filtered_c2s = [c2 for c2 in all_historical_c2s if c2.get('l1_open_ts') == l1_open_ts]
 
         if final_state in ['l1_waiting']:
-            action = 'remove'
+            # L1 成立等待 L2：幣種必須保留在 watchlist，否則會被掃描器刪掉
             expected_dir = l2_direction if l2_direction else ""
             return {
-                'symbol': symbol, 
-                'action': 'remove',
-                'l1_date': l1_date_str if l1_valid else '未知',
-                'l2_direction': expected_dir,
-                'historical_c2s': filtered_c2s,
-                'l1_open_ts': l1_open_ts
+                'symbol':              symbol,
+                'action':              action,           # 'update' or 'keep'
+                'data':                {'ts': cache_ts},
+                'is_trigger_met':      False,
+                'is_watchlist_eligible': True,
+                'entry_price':         0.0,
+                'stop_loss':           0.0,
+                'trigger_ts':          0,
+                'precision':           precision,
+                'c1_date':             '',
+                'c2_date':             '',
+                'l1_date':             l1_date_str if l1_valid else '未知',
+                'l2_date':             '',
+                'l2_direction':        expected_dir,
+                'scan_state':          'l1_waiting',
+                'l1_high':             l1_high,
+                'l1_low':              l1_low,
+                'l1_open_ts':          l1_open_ts,
+                'historical_c2s':      filtered_c2s,
             }
 
         return {
