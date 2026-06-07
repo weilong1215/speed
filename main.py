@@ -255,7 +255,7 @@ def compose_3d_bars(ohlcv_1d):
     return result
 
 def compose_18d_bars(ohlcv_1d):
-    """將 1D OHLCV 合成 18D K棒 (按每年 1/1 台北時間起算，對齊 Bitget 日線)
+    """將 1D OHLCV 合成 18D K棒 (按每年 1/1 起算，與 compose_3d_bars 對齊邏輯相同)
     輸入: [[ts, open, high, low, close, vol], ...]
     輸出: [[ts, open, high, low, close, vol, close_ts], ...]
     """
@@ -263,14 +263,12 @@ def compose_18d_bars(ohlcv_1d):
         return []
 
     from datetime import datetime, timezone
-    from zoneinfo import ZoneInfo
-    TAIPEI = ZoneInfo('Asia/Taipei')
     PERIOD_MS = 18 * 24 * 3600 * 1000
     groups = {}
     for bar in ohlcv_1d:
         ts = bar[0]
-        dt = datetime.fromtimestamp(ts / 1000, tz=timezone.utc).astimezone(TAIPEI)
-        year_start_dt = datetime(dt.year, 1, 1, tzinfo=TAIPEI)
+        dt = datetime.fromtimestamp(ts / 1000, tz=timezone.utc)
+        year_start_dt = datetime(dt.year, 1, 1, tzinfo=timezone.utc)
         year_epoch_ms = int(year_start_dt.timestamp() * 1000)
 
         group_idx = (ts - year_epoch_ms) // PERIOD_MS
@@ -1140,13 +1138,14 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
         if not ohlcv_1d or len(ohlcv_1d) < 36:
             return None
 
-        # 合成 18D；3H 直接拉交易所原生 K 線（與 TradingView 一致）
-        ohlcv_18d = compose_18d_bars(ohlcv_1d)
-        ohlcv_3h_raw = await exchange.fetch_ohlcv(symbol, '3h', limit=1000)
-        if not ohlcv_18d or not ohlcv_3h_raw or len(ohlcv_3h_raw) < 20:
+        ohlcv_1h = await exchange.fetch_ohlcv(symbol, '1h', limit=1000)
+        if not ohlcv_1h or len(ohlcv_1h) < 100:
             return None
-        _3h_ms = 3 * 3600 * 1000
-        ohlcv_3h = [[b[0], b[1], b[2], b[3], b[4], b[5], b[0] + _3h_ms] for b in ohlcv_3h_raw]
+
+        ohlcv_18d = compose_18d_bars(ohlcv_1d)
+        ohlcv_3h = compose_3h_bars(ohlcv_1h)
+        if not ohlcv_18d or not ohlcv_3h:
+            return None
 
         df_18d = pd.DataFrame(ohlcv_18d, columns=['ts', 'open', 'high', 'low', 'close', 'vol', 'close_ts'])
         df_18d_closed = df_18d[df_18d['close_ts'] <= now_utc].reset_index(drop=True)
