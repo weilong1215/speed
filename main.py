@@ -914,120 +914,74 @@ async def monitor_positions(exchange):
                             if '40786' not in str(e):
                                 logger.error(f"掛止損失敗: {e}")
 
-                    await ensure_next_tp(exchange, symbol, side, sig, size, saved_signals, open_orders)
 
-                    # 進場後下一根 18D 收盤棒方向淘汰：多單陰棒 / 空單陽棒 → 市價平倉
-                    _l1_open_ts = sig.get('l1_open_ts', 0)
-                    _dir = sig['direction']
-                    _prec = sig.get('precision', 4)
-                    if _l1_open_ts > 0:
-                        try:
-                            _ohlcv_1d_mon = await exchange.fetch_ohlcv(symbol, '1d', limit=200)
-                            _ohlcv_18d_mon = compose_18d_bars(_ohlcv_1d_mon)
-                            _now_ms = int(time.time() * 1000)
-                            for _b18 in _ohlcv_18d_mon:
-                                _b18_open_ts  = int(_b18[0])
-                                _b18_close_ts = int(_b18[6])
-                                # L1 棒之後所有已收盤的 18D 棒逐一檢查
-                                if _b18_open_ts > _l1_open_ts and _b18_close_ts <= _now_ms:
-                                    _b18_o = float(_b18[1])
-                                    _b18_c = float(_b18[4])
-                                    _exit = False
-                                    _exit_reason = ""
-                                    _b18_dt = pd.to_datetime(_b18_open_ts, unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d')
-                                    if _dir == 'LONG' and _b18_c < _b18_o:
-                                        _exit = True
-                                        _exit_reason = f"18D 棒 ({_b18_dt}) 收陰棒，趨勢轉向"
-                                    elif _dir == 'SHORT' and _b18_c > _b18_o:
-                                        _exit = True
-                                        _exit_reason = f"18D 棒 ({_b18_dt}) 收陽棒，趨勢轉向"
-                                    if _exit:
-                                        logger.info(f"🚶 18D 方向淘汰 ({symbol}) {_exit_reason}，執行市價平倉")
-                                        try:
-                                            _cs = 'sell' if _dir == 'LONG' else 'buy'
-                                            _cp = {'reduceOnly': True, 'hedged': True, 'holdSide': 'long' if _dir == 'LONG' else 'short'}
-                                            await exchange.create_order(symbol, 'market', _cs, size, None, params=_cp)
-                                            send_telegram_message(
-                                                f"<b>\ud83d\udeb6 18D 方向淘汰 (市價平倉)</b>\n\n"
-                                                f"\ud83d\udc8e <b>交易對:</b> {get_base_coin(symbol)} [{_dir}]\n"
-                                                f"\ud83d\udcc9 <b>原因: {_exit_reason}，已市價平倉</b>"
-                                            )
-                                        except Exception as _ex18:
-                                            logger.error(f"18D 方向淘汰平倉失敗 ({symbol}): {_ex18}")
-                                        break  # 已出場，終止迴圈
-                        except Exception as _e18:
-                            logger.warning(f"18D 方向淘汰監控異常 ({symbol}): {_e18}")
 
                     # 進場後 1D 收盤跌破/漲破 10MA → 市價平倉
+                    # 3D 移動止損 (Trailing Stop)
                     _entry_ts = int(sig.get('timestamp', 0))
                     if _entry_ts > 0:
                         try:
-                            _ohlcv_1d_pos = await exchange.fetch_ohlcv(symbol, '1d', limit=200)
-                            _df_1d_pos = pd.DataFrame(_ohlcv_1d_pos, columns=['ts', 'open', 'high', 'low', 'close', 'vol'])
-                            _df_1d_pos['close_ts'] = _df_1d_pos['ts'] + 86400000
-                            _df_1d_pos['ma_10'] = _df_1d_pos['close'].rolling(window=10).mean()
-                            _now_ms_1d = int(time.time() * 1000)
-                            _closed_1d_pos = _df_1d_pos[_df_1d_pos['close_ts'] <= _now_ms_1d]
+                            _ohlcv_1d_mon = await exchange.fetch_ohlcv(symbol, '1d', limit=200)
+                            if _ohlcv_1d_mon and len(_ohlcv_1d_mon) > 0:
+                                _ohlcv_3d_mon = compose_3d_bars(_ohlcv_1d_mon)
+                                _df_3d_mon = pd.DataFrame(_ohlcv_3d_mon, columns=['ts', 'open', 'high', 'low', 'close', 'vol', 'close_ts'])
+                                _now_ms_3d = int(time.time() * 1000)
+                                _closed_3d_pos = _df_3d_mon[_df_3d_mon['close_ts'] <= _now_ms_3d].reset_index(drop=True)
 
-                            if len(_closed_1d_pos) > 0:
-                                _last_1d = _closed_1d_pos.iloc[-1]
-                                _last_1d_open_time = int(_last_1d['ts'])
-
-                                # 用日K的開盤時間比對，確保只檢查 C2 觸發「隔天」之後的日K
-                                if _last_1d_open_time > _entry_ts and not pd.isna(_last_1d['ma_10']):
-                                    _1d_open = float(_last_1d['open'])
-                                    _1d_close = float(_last_1d['close'])
-                                    _1d_ma10 = float(_last_1d['ma_10'])
-                                    _1d_exit = False
-                                    _1d_exit_reason = ""
-                                    _1d_dt = pd.to_datetime(int(_last_1d['ts']), unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d')
-                                    _entry_price_sig = float(sig['entry_price'])
-
-                                    # 日線收盤反向K棒：做多遇陰棒 / 做空遇陽棒 → 止損移至開倉價 (保本)
-                                    _move_sl_to_be = False
-                                    if _dir == 'LONG' and _1d_close < _1d_open:
-                                        _move_sl_to_be = True
-                                    elif _dir == 'SHORT' and _1d_close > _1d_open:
-                                        _move_sl_to_be = True
-
-                                    if _move_sl_to_be and float(sig['sl_price']) != _entry_price_sig:
-                                        logger.info(f"🔄 1D 反向K棒 ({symbol} {_1d_dt})，止損移至開倉價 {_entry_price_sig}")
-                                        sig['sl_price'] = _entry_price_sig
-                                        save_active_signals(saved_signals)
-                                        send_telegram_message(
-                                            f"<b>🔄 止損移至保本 (1D 反向K棒)</b>\n\n"
-                                            f"💎 <b>交易對:</b> {get_base_coin(symbol)} [{_dir}]\n"
-                                            f"📅 <b>日期:</b> {_1d_dt}\n"
-                                            f"🛡️ <b>新止損價:</b> <code>{_entry_price_sig:.{_prec}f}</code> (= 開倉價)"
-                                        )
-
-                                    # 日線 10MA 淘汰：做多跌破 / 做空漲破 → 市價平倉
-                                    if _dir == 'LONG' and _1d_close < _1d_ma10:
-                                        _1d_exit = True
-                                        _1d_exit_reason = f"1D 收盤 ({_1d_dt}) {_1d_close:.4f} 跌破 10MA ({_1d_ma10:.4f})"
-                                    elif _dir == 'SHORT' and _1d_close > _1d_ma10:
-                                        _1d_exit = True
-                                        _1d_exit_reason = f"1D 收盤 ({_1d_dt}) {_1d_close:.4f} 漲破 10MA ({_1d_ma10:.4f})"
-
-                                    if _1d_exit:
-                                        logger.info(f"📉 1D 10MA 淘汰 ({symbol}) {_1d_exit_reason}，執行市價平倉")
-                                        try:
-                                            _cs_1d = 'sell' if _dir == 'LONG' else 'buy'
-                                            _cp_1d = {'reduceOnly': True, 'hedged': True, 'holdSide': 'long' if _dir == 'LONG' else 'short'}
-                                            await exchange.create_order(symbol, 'market', _cs_1d, size, None, params=_cp_1d)
+                                if len(_closed_3d_pos) >= 2:
+                                    _last_3d = _closed_3d_pos.iloc[-1]
+                                    _prev_3d = _closed_3d_pos.iloc[-2]
+                                    
+                                    _last_3d_close_ts = int(_last_3d['close_ts'])
+                                    
+                                    # 只有在最新 3D K線是「進場之後」才進行判斷
+                                    if _last_3d_close_ts > _entry_ts:
+                                        _new_close = float(_last_3d['close'])
+                                        _new_high = float(_last_3d['high'])
+                                        _new_low = float(_last_3d['low'])
+                                        
+                                        _prev_open = float(_prev_3d['open'])
+                                        _prev_close = float(_prev_3d['close'])
+                                        
+                                        _current_sl = float(sig['sl_price'])
+                                        _new_sl = _current_sl
+                                        _move_sl = False
+                                        
+                                        if side.lower() == 'long':
+                                            _prev_body_high = max(_prev_open, _prev_close)
+                                            if _new_close > _prev_body_high:
+                                                if _new_low > _current_sl:
+                                                    _new_sl = _new_low
+                                                    _move_sl = True
+                                        elif side.lower() == 'short':
+                                            _prev_body_low = min(_prev_open, _prev_close)
+                                            if _new_close < _prev_body_low:
+                                                if _new_high < _current_sl or _current_sl == 0:
+                                                    _new_sl = _new_high
+                                                    _move_sl = True
+                                                    
+                                        if _move_sl:
+                                            _3d_dt = pd.to_datetime(int(_last_3d['ts']), unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d')
+                                            logger.info(f"🔄 3D 吞噬 ({symbol} {_3d_dt})，止損移至 {_new_sl}")
+                                            sig['sl_price'] = _new_sl
+                                            save_active_signals(saved_signals)
+                                            # 更新 history_signals 中的 sl
+                                            history_signals = load_history_signals()
+                                            base_coin = get_base_coin(symbol)
+                                            if base_coin in history_signals:
+                                                for hs in history_signals[base_coin]:
+                                                    if hs.get('trigger_ts') == _entry_ts:
+                                                        hs['stop_loss'] = _new_sl
+                                            save_history_signals(history_signals)
+                                            
                                             send_telegram_message(
-                                                f"<b>📉 1D 10MA 淘汰 (市價平倉)</b>\n\n"
-                                                f"💎 <b>交易對:</b> {get_base_coin(symbol)} [{_dir}]\n"
-                                                f"📉 <b>原因: {_1d_exit_reason}，已市價平倉</b>"
+                                                f"<b>🔄 3D 移動止損觸發</b>\n\n"
+                                                f"💎 <b>交易對:</b> {get_base_coin(symbol)} [{side.upper()}]\n"
+                                                f"📅 <b>觸發 K 線:</b> {_3d_dt}\n"
+                                                f"🛡️ <b>新止損價:</b> <code>{_new_sl:.4f}</code>"
                                             )
-                                        except Exception as _ex1d:
-                                            logger.error(f"1D 10MA 淘汰平倉失敗 ({symbol}): {_ex1d}")
-                        except Exception as _e1d:
-                            logger.warning(f"1D 10MA 淘汰監控異常 ({symbol}): {_e1d}")
-
-            if not found_signal:
-                logger.warning(f"⚠️ 發現外部倉位: {symbol} ({side}) | 本地無掃描信號，系統不介入。")
-
+                        except Exception as _e3d:
+                            logger.warning(f"3D 移動止損監控異常 ({symbol}): {_e3d}")
         # 2. 孤兒訊號清理 (倉位消失但訊號仍 active)
         for sig_key, sig_list in list(saved_signals.items()):
             for sig in sig_list:
@@ -1041,127 +995,55 @@ async def monitor_positions(exchange):
                 has_entry = any(
                     str(o.get('clientOrderId') or o.get('info', {}).get('clientOid') or "") == str(signal_id)
                     for o in open_orders)
+                
+                if has_pos:
+                    sig['has_entered'] = True
 
                 if has_entry:
-                    try:
                         entry_ts = int(sig.get('timestamp', 0))
-                        
-                        # L3 (3H棒) 的收盤時間是 entry_ts + 3小時，只監測此時間點之後的 1H K 棒
-                        l3_close_ts = entry_ts + 3 * 3600 * 1000
-                        ohlcv_1h = []
-                        try:
-                            ohlcv_1h = await exchange.fetch_ohlcv(symbol, '1h', since=l3_close_ts - 5 * 60 * 1000, limit=500)
-                        except Exception as e:
-                            logger.warning(f"  監控拉取 1H K 棒異常 ({symbol}): {e}")
-
                         ohlcv_1d = await exchange.fetch_ohlcv(symbol, '1d', limit=200)
-                        ticker = await exchange.fetch_ticker(symbol)
-                        current_price = float(ticker['last'])
-                        original_sl = float(sig.get('original_sl_price', sig['sl_price']))
-                        entry_price = float(sig['entry_price'])
-                        risk = abs(entry_price - original_sl)
-
-                        if risk > 0:
-                            is_runaway = False
-                            if direction == 'LONG' and current_price >= entry_price + TP_STEP_R * risk:
-                                is_runaway = True
-                            elif direction == 'SHORT' and current_price <= entry_price - TP_STEP_R * risk:
-                                is_runaway = True
-
-                            # 使用 1H K 棒做高低點精細比對 (只檢查 L3 收盤後的 K 棒)
-                            if not is_runaway and len(ohlcv_1h) > 0:
-                                for candle in ohlcv_1h:
-                                    candle_ts = int(candle[0])
-                                    if candle_ts >= l3_close_ts - 60000:
-                                        c_high = float(candle[2])
-                                        c_low = float(candle[3])
-                                        if direction == 'LONG' and c_high >= entry_price + 5 * risk:
-                                            is_runaway = True
-                                            break
-                                        elif direction == 'SHORT' and c_low <= entry_price - 5 * risk:
-                                            is_runaway = True
-                                            break
-
-                            if is_runaway:
-                                logger.info(f"🏃 價格已達 TP1 ({symbol})，撤銷未成交進場單 {signal_id}")
-                                entry_orders = [o for o in open_orders if str(o.get('clientOrderId') or o.get('info', {}).get('clientOid') or "") == str(signal_id)]
-                                for eo in entry_orders:
-                                    try:
-                                        await exchange.cancel_order(eo['id'], symbol)
-                                        open_orders = [o for o in open_orders if o['id'] != eo['id']]
-                                    except Exception as e:
-                                        logger.warning(f"撤銷未成交單失敗 {eo['id']}: {e}")
-
-                                if has_pos:
-                                    send_telegram_message(
-                                        f"<b>🏃 價格已達 TP1 (撤銷殘餘進場單)</b>\n\n"
-                                        f"💎 <b>交易對:</b> {get_base_coin(symbol)} [{direction}]\n"
-                                        f"📉 <b>狀態: 部分成交，殘餘進場單已撤銷，倉位繼續由 TP/SL 管理</b>"
-                                    )
-                                else:
-                                    send_telegram_message(
-                                        f"<b>🏃 價格已達 TP1 (錯失進場)</b>\n\n"
-                                        f"💎 <b>交易對:</b> {get_base_coin(symbol)} [{direction}]\n"
-                                        f"📉 <b>狀態: 已自動撤銷未成交之進場單</b>"
-                                    )
-                                    sig['status'] = 'closed'
-                                continue
-
-                        # 訊號淘汰條件撤單：若尚未進場，且 1D 線收盤出現反向 K 棒或跌破/漲破 10MA，則作廢訊號撤單
-                        if not is_runaway:
-                            try:
-                                df_1d_eval = pd.DataFrame(ohlcv_1d, columns=['ts', 'open', 'high', 'low', 'close', 'vol'])
-                                df_1d_eval['close_ts'] = df_1d_eval['ts'] + 86400000
-                                df_1d_eval['ma_10'] = df_1d_eval['close'].rolling(window=10).mean()
+                        
+                        try:
+                            df_1d_eval = pd.DataFrame(ohlcv_1d, columns=['ts', 'open', 'high', 'low', 'close', 'vol'])
+                            df_1d_eval['close_ts'] = df_1d_eval['ts'] + 86400000
+                            
+                            now_utc_1d_fl = int(time.time() * 1000)
+                            closed_1d = df_1d_eval[df_1d_eval['close_ts'] <= now_utc_1d_fl]
+                            
+                            if len(closed_1d) > 0:
+                                valid_closed = closed_1d[closed_1d['ts'] > entry_ts]
+                                revoke_reason = None
                                 
-                                now_utc_1d_fl = int(time.time() * 1000)
-                                closed_1d = df_1d_eval[df_1d_eval['close_ts'] <= now_utc_1d_fl]
-                                
-                                if len(closed_1d) > 0:
-                                    valid_closed = closed_1d[closed_1d['ts'] > entry_ts]
-                                    revoke_reason = None
+                                for _, c1d in valid_closed.iterrows():
+                                    c_close = float(c1d['close'])
+                                    dt_str = pd.to_datetime(c1d['ts'], unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d')
+                                    stop_loss = float(sig['sl_price'])
                                     
-                                    for _, c1d in valid_closed.iterrows():
-                                        c_open = float(c1d['open'])
-                                        c_close = float(c1d['close'])
-                                        c_ma10 = float(c1d['ma_10'])
-                                        dt_str = pd.to_datetime(c1d['ts'], unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d')
-                                        
-                                        if direction == 'LONG' and c_close <= stop_loss:
-                                            revoke_reason = f"歷史 1D線 ({dt_str}) 收盤 ({c_close:.4f}) 跌破止損 ({stop_loss:.4f})"
-                                            break
-                                        elif direction == 'SHORT' and c_close >= stop_loss:
-                                            revoke_reason = f"歷史 1D線 ({dt_str}) 收盤 ({c_close:.4f}) 突破止損 ({stop_loss:.4f})"
-                                            break
-                                        if direction == 'LONG' and c_close < c_ma10:
-                                            revoke_reason = f"歷史 1D線 ({dt_str}) 收盤 ({c_close:.4f}) 跌破 10MA ({c_ma10:.4f})"
-                                            break
-                                        elif direction == 'SHORT' and c_close > c_ma10:
-                                            revoke_reason = f"歷史 1D線 ({dt_str}) 收盤 ({c_close:.4f}) 漲破 10MA ({c_ma10:.4f})"
-                                            break
+                                    if direction == 'LONG' and c_close <= stop_loss:
+                                        revoke_reason = f"歷史 1D線 ({dt_str}) 收盤 ({c_close:.4f}) 跌破止損 ({stop_loss:.4f})"
+                                        break
+                                    elif direction == 'SHORT' and c_close >= stop_loss:
+                                        revoke_reason = f"歷史 1D線 ({dt_str}) 收盤 ({c_close:.4f}) 突破止損 ({stop_loss:.4f})"
+                                        break
 
-                                        if revoke_reason:
-                                                logger.info(f"🚫 淘汰條件已成立 [{revoke_reason}] ({symbol})，撤銷未成交單 {signal_id}")
-                                                entry_orders = [o for o in open_orders if str(o.get('clientOrderId') or o.get('info', {}).get('clientOid') or "") == str(signal_id)]
-                                                for eo in entry_orders:
-                                                    try:
-                                                        await exchange.cancel_order(eo['id'], symbol)
-                                                        open_orders = [o for o in open_orders if o['id'] != eo['id']]
-                                                    except Exception as e:
-                                                        logger.warning(f"撤銷未成交單失敗 {eo['id']}: {e}")
-                                                send_telegram_message(
-                                                    f"<b>🚫 訊號已淘汰 (撤銷進場)</b>\n\n"
-                                                    f"💎 <b>交易對:</b> {get_base_coin(symbol)} [{direction}]\n"
-                                                    f"📉 <b>狀態: {revoke_reason}，已自動撤銷進場單</b>"
-                                                )
-                                                sig['status'] = 'closed'
-                                                continue
-                            except Exception as e:
-                                logger.warning(f"檢查訊號淘汰撤單異常 ({symbol}): {e}")
-
-
-                    except Exception as e:
-                        logger.warning(f"檢查未成交單價格異常 ({symbol}): {e}")
+                                if revoke_reason:
+                                        logger.info(f"🚫 淘汰條件已成立 [{revoke_reason}] ({symbol})，撤銷未成交單 {signal_id}")
+                                        entry_orders = [o for o in open_orders if str(o.get('clientOrderId') or o.get('info', {}).get('clientOid') or "") == str(signal_id)]
+                                        for eo in entry_orders:
+                                            try:
+                                                await exchange.cancel_order(eo['id'], symbol)
+                                                open_orders = [o for o in open_orders if o['id'] != eo['id']]
+                                            except Exception as e:
+                                                logger.warning(f"撤銷未成交單失敗 {eo['id']}: {e}")
+                                        send_telegram_message(
+                                            f"<b>🚫 訊號已淘汰 (撤銷進場)</b>\n\n"
+                                            f"💎 <b>交易對:</b> {get_base_coin(symbol)} [{direction}]\n"
+                                            f"📉 <b>狀態: {revoke_reason}，已自動撤銷進場單</b>"
+                                        )
+                                        sig['status'] = 'closed'
+                                        continue
+                        except Exception as e:
+                            logger.warning(f"檢查訊號淘汰撤單異常 ({symbol}): {e}")
 
                 if not has_pos and not has_entry:
                     logger.info(f"🧹 偵測到歸零/孤兒訊號 {sig_key}，開始清理...")
@@ -1288,7 +1170,6 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
         # =========================================================
         # 將資料轉為 Dict 方便依時間查詢
         dict_18d = {int(row['close_ts']): row for _, row in df_18d_closed.iterrows()}
-        dict_1d = {int(row['close_ts']): row for _, row in df_1d_closed.iterrows()}
 
         # 狀態變數
         l1_valid = False
@@ -1299,201 +1180,130 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
         l1_date_str = "未知"
 
         l2_valid = False
-        l2_valid_ts = 0
         l2_direction = ""
         l2_date_str = "未知"
-        l2_locked_l1_date = "未知"
-
-        l3_valid = False
-        c1_date_str = "未知"
-        c2_date_str = "未知"
         
         entry_price = 0.0
         stop_loss = 0.0
         trigger_ts = 0
-        
-        history_3h = []
-        c1_value = None
-        c1_ts = 0
-        c2_value = None
-        c2_ts = 0
         simulated_pos = False
         all_historical_c2s = []
 
-        # 主迴圈：以 3H (最高解析度) 推進
+        # 主迴圈：以 3H 推進
         for _, row in df_3h_closed.iterrows():
             t = int(row['close_ts'])
-            history_3h.append(row)
-            if len(history_3h) > 4:
-                history_3h.pop(0)
             
             # 1. 處理 18D (L1) 事件
             if t in dict_18d:
                 curr_18d = dict_18d[t]
-                # L1 邊界更新 → 強制清除所有下層狀態，防止舊訊號殘留
-                l1_valid = True
-                l1_valid_ts = t
-                l1_open_ts = int(curr_18d['ts'])  # L1 18D 棒的開盤時間，用於追蹤進場後次棒方向
-                l1_high = float(curr_18d['high'])
-                l1_low = float(curr_18d['low'])
-                l1_date_str = pd.to_datetime(curr_18d['ts'], unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d')
-                l1_open = float(curr_18d['open'])
-                l1_close = float(curr_18d['close'])
-                    
-                l2_valid = False
-                l2_valid_ts = 0
-                l2_direction = ""
-                l2_date_str = "未知"
-                l2_locked_l1_date = "未知"
-                l3_valid = False
-                c1_date_str = "未知"
-                c2_date_str = "未知"
-                entry_price = 0.0
-                stop_loss = 0.0
-                trigger_ts = 0
-                history_3h = []
-                c1_value = None
-                c1_ts = 0
-                c2_value = None
-                c2_ts = 0
-                simulated_pos = False
+                # L1 邊界更新
+                if not simulated_pos:
+                    l1_valid = True
+                    l1_valid_ts = t
+                    l1_open_ts = int(curr_18d['ts'])
+                    l1_high = float(curr_18d['high'])
+                    l1_low = float(curr_18d['low'])
+                    l1_date_str = pd.to_datetime(curr_18d['ts'], unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d')
+                    l2_valid = False
+                    l2_direction = ""
 
-            # 2. 處理 1D (L2) 事件
-            if t in dict_1d:
-                b1d = dict_1d[t]
-                if pd.notna(b1d['ma_10']):
-                    if l2_valid:
-                        if l2_direction == 'LONG':
-                            if b1d['close'] < b1d['ma_10'] or b1d['close'] <= stop_loss:
-                                if l3_valid and simulated_pos and all_historical_c2s and all_historical_c2s[-1]['status'] == 'active':
-                                    all_historical_c2s[-1]['status'] = 'closed'
-                                l2_valid = False
-                                l3_valid = False
-                                c1_date_str = "未知"
-                                c2_date_str = "未知"
-                                simulated_pos = False
-                        elif l2_direction == 'SHORT':
-                            if b1d['close'] > b1d['ma_10'] or b1d['close'] >= stop_loss:
-                                if l3_valid and simulated_pos and all_historical_c2s and all_historical_c2s[-1]['status'] == 'active':
-                                    all_historical_c2s[-1]['status'] = 'closed'
-                                l2_valid = False
-                                l3_valid = False
-                                c1_date_str = "未知"
-                                c2_date_str = "未知"
-                                simulated_pos = False
-                            
-                    if l1_valid and b1d['ts'] >= l1_valid_ts:
-                        is_long = (b1d['close'] > l1_high) and (b1d['close'] > b1d['ma_10'])
-                        is_short = (b1d['close'] < l1_low) and (b1d['close'] < b1d['ma_10'])
-                        
-                        if is_long and not is_short:
-                            if not (l2_valid and l2_direction == 'LONG'):
-                                _sl = float(b1d['low'])
-                                _entry = l1_high
-                                _dist = abs(_entry - _sl) / _entry * 100 if _entry > 0 else 999
-                                if _dist <= 10:
-                                    l2_valid = True
-                                    l2_valid_ts = t
-                                    l2_direction = 'LONG'
-                                    l2_date_str = pd.to_datetime(b1d['ts'], unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d')
-                                    l2_locked_l1_date = l1_date_str
-                                    l3_valid = False
-                                    entry_price = _entry
-                                    stop_loss = _sl
-                        elif is_short and not is_long:
-                            if not (l2_valid and l2_direction == 'SHORT'):
-                                _sl = float(b1d['high'])
-                                _entry = l1_low
-                                _dist = abs(_entry - _sl) / _entry * 100 if _entry > 0 else 999
-                                if _dist <= 10:
-                                    l2_valid = True
-                                    l2_valid_ts = t
-                                    l2_direction = 'SHORT'
-                                    l2_date_str = pd.to_datetime(b1d['ts'], unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d')
-                                    l2_locked_l1_date = l1_date_str
-                                    l3_valid = False
-                                    entry_price = _entry
-                                    stop_loss = _sl
-
-            # 3. 處理 3H (L3) 事件
+            # 2. 止損檢查
             if simulated_pos:
-                # 止損邏輯：L2 K棒最高/低點
-                if l2_direction == 'LONG' and row['low'] <= stop_loss:
-                    if all_historical_c2s and all_historical_c2s[-1]['status'] == 'active':
-                        all_historical_c2s[-1]['status'] = 'closed'
-                    simulated_pos = False
-                    l3_valid = False
-                    c1_date_str = "未知"
-                elif l2_direction == 'SHORT' and row['high'] >= stop_loss:
-                    if all_historical_c2s and all_historical_c2s[-1]['status'] == 'active':
-                        all_historical_c2s[-1]['status'] = 'closed'
-                    simulated_pos = False
-                    l3_valid = False
-                    c1_date_str = "未知"
-
-            if not simulated_pos and l2_valid:
-                if row['ts'] >= l2_valid_ts:
-                    # L2 發生後，尋找 L3 (3H 跌破/突破 L1 邊界)
-                    if not l3_valid:
-                        if l2_direction == 'SHORT' and float(row['close']) < entry_price:
-                            l3_valid = True
-                            c1_ts = int(row['ts'])
-                            c1_date_str = pd.to_datetime(c1_ts, unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d %H:%M:%S')
-                        elif l2_direction == 'LONG' and float(row['close']) > entry_price:
-                            l3_valid = True
-                            c1_ts = int(row['ts'])
-                            c1_date_str = pd.to_datetime(c1_ts, unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d %H:%M:%S')
+                is_sl = False
+                if l2_direction == 'LONG' and float(row['low']) <= stop_loss:
+                    is_sl = True
+                elif l2_direction == 'SHORT' and float(row['high']) >= stop_loss:
+                    is_sl = True
                     
-                    # L3 成立後，等待回踩觸發進場
-                    if l3_valid and int(row['ts']) > c1_ts:
-                        triggered = False
-                        is_immediate_sl = False
-                        if l2_direction == 'SHORT' and float(row['high']) >= entry_price:
-                            triggered = True
-                            if float(row['high']) >= stop_loss:
-                                is_immediate_sl = True
-                        elif l2_direction == 'LONG' and float(row['low']) <= entry_price:
-                            triggered = True
-                            if float(row['low']) <= stop_loss:
-                                is_immediate_sl = True
-                                
-                        if triggered:
-                            simulated_pos = not is_immediate_sl
-                            trigger_ts = int(row['ts'])
-                            c2_date_str = pd.to_datetime(trigger_ts, unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d %H:%M:%S')
-                            all_historical_c2s.append({
-                                'symbol':       symbol,
-                                'l1_date':      l2_locked_l1_date if l2_valid else l1_date_str,
-                                'l2_date':      l2_date_str,
-                                'c1_date':      c1_date_str,  # L3 成立時間
-                                'c2_date':      c2_date_str,  # 回踩進場時間
-                                'entry_price':  entry_price,
-                                'stop_loss':    stop_loss,
-                                'trigger_ts':   trigger_ts,
-                                'l2_direction': l2_direction,
-                                'precision':    precision,
-                                'l1_open_ts':   l1_open_ts,
-                                'status':       'closed' if is_immediate_sl else 'active'
-                            })
-                            
-                            if is_immediate_sl:
-                                l3_valid = False
-                                c1_date_str = "未知"
-                                c2_date_str = "未知"
+                if is_sl:
+                    simulated_pos = False
+                    l2_valid = False
+                    if all_historical_c2s and all_historical_c2s[-1]['status'] == 'active':
+                        all_historical_c2s[-1]['status'] = 'closed'
+                    
+                    # 止損後，重新取得當前已收盤的最新的 18D 作為 L1 邊界
+                    latest_18d_ts = max([k for k in dict_18d.keys() if k <= t], default=None)
+                    if latest_18d_ts:
+                        curr_18d = dict_18d[latest_18d_ts]
+                        l1_valid = True
+                        l1_valid_ts = latest_18d_ts
+                        l1_open_ts = int(curr_18d['ts'])
+                        l1_high = float(curr_18d['high'])
+                        l1_low = float(curr_18d['low'])
+                        l1_date_str = pd.to_datetime(curr_18d['ts'], unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d')
+                    else:
+                        l1_valid = False
+
+            # 3. L2 觸發邏輯 (看 3H)
+            if not simulated_pos and l1_valid and t >= l1_valid_ts:
+                close_price = float(row['close'])
+                is_long = close_price > l1_high
+                is_short = close_price < l1_low
+                
+                triggered = False
+                if is_long and not is_short:
+                    l2_direction = 'LONG'
+                    entry_price = close_price
+                    stop_loss = float(row['low'])
+                    triggered = True
+                elif is_short and not is_long:
+                    l2_direction = 'SHORT'
+                    entry_price = close_price
+                    stop_loss = float(row['high'])
+                    triggered = True
+                    
+                if triggered:
+                    # 檢查是否同根 K 棒立即止損
+                    is_immediate_sl = False
+                    if l2_direction == 'LONG' and float(row['low']) <= stop_loss:
+                        is_immediate_sl = True
+                    elif l2_direction == 'SHORT' and float(row['high']) >= stop_loss:
+                        is_immediate_sl = True
+                        
+                    simulated_pos = not is_immediate_sl
+                    l2_valid = True
+                    trigger_ts = int(row['ts'])
+                    l2_date_str = pd.to_datetime(trigger_ts, unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d %H:%M:%S')
+                    
+                    all_historical_c2s.append({
+                        'symbol':       symbol,
+                        'l1_date':      l1_date_str,
+                        'l2_date':      l2_date_str,
+                        'c1_date':      l2_date_str,  # 為了向下相容保留，填上觸發時間
+                        'c2_date':      l2_date_str,  # 為了向下相容保留，填上觸發時間
+                        'entry_price':  entry_price,
+                        'stop_loss':    stop_loss,
+                        'trigger_ts':   trigger_ts,
+                        'l2_direction': l2_direction,
+                        'precision':    precision,
+                        'l1_open_ts':   l1_open_ts,
+                        'status':       'closed' if is_immediate_sl else 'active'
+                    })
+                    
+                    if is_immediate_sl:
+                        simulated_pos = False
+                        l2_valid = False
+                        latest_18d_ts = max([k for k in dict_18d.keys() if k <= t], default=None)
+                        if latest_18d_ts:
+                            curr_18d = dict_18d[latest_18d_ts]
+                            l1_valid = True
+                            l1_valid_ts = latest_18d_ts
+                            l1_open_ts = int(curr_18d['ts'])
+                            l1_high = float(curr_18d['high'])
+                            l1_low = float(curr_18d['low'])
+                            l1_date_str = pd.to_datetime(curr_18d['ts'], unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d')
+                        else:
+                            l1_valid = False
+
         current_price = float(df_1d['close'].iloc[-1]) if not df_1d.empty else 0.0
         for c2 in all_historical_c2s:
             c2['current_price'] = current_price
 
-        is_trigger_met = l3_valid and simulated_pos
+        is_trigger_met = l2_valid and simulated_pos
         if is_trigger_met:
             final_state = 'triggered'
-        elif l3_valid and not simulated_pos:
-            # L3 跌破/突破已成立，等待回踩進場
-            final_state = 'l3_waiting'
-        elif l2_valid:
-            final_state = 'l3_waiting'
         elif l1_valid:
-            final_state = 'l2_waiting'
+            final_state = 'l1_waiting'
         else:
             final_state = 'l1_waiting'
 
@@ -1502,9 +1312,8 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
         # 過濾：只保留屬於「最新一根已收盤 18D K 線」區間內的歷史訊號
         filtered_c2s = [c2 for c2 in all_historical_c2s if c2.get('l1_open_ts') == l1_open_ts]
 
-        if final_state in ['l1_waiting', 'l2_waiting']:
+        if final_state in ['l1_waiting']:
             action = 'remove'
-
             expected_dir = l2_direction if l2_direction else ""
             return {
                 'symbol': symbol, 
@@ -1525,9 +1334,9 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
             'stop_loss':          stop_loss,
             'trigger_ts':         trigger_ts,
             'precision':          precision,
-            'c1_date':            c1_date_str,
-            'c2_date':            c2_date_str,
-            'l1_date':            l2_locked_l1_date if l2_valid else l1_date_str,
+            'c1_date':            l2_date_str,
+            'c2_date':            l2_date_str,
+            'l1_date':            l1_date_str,
             'l2_date':            l2_date_str,
             'l2_direction':       l2_direction,
             'scan_state':         final_state,
@@ -1777,18 +1586,48 @@ async def run_scan():
 
     try:
         try:
+            url = 'https://api.bitget.com/api/v2/mix/market/tickers?productType=USDT-FUTURES'
+            res = requests.get(url, timeout=10).json()
+            top_symbols = []
+            if res.get('code') == '00000':
+                data = res['data']
+                sorted_data = sorted(data, key=lambda x: float(x.get('quoteVolume', 0)), reverse=True)
+                top_symbols = [x['symbol'] for x in sorted_data[:10]]
+            
             markets = await ex.load_markets()
             custom_blacklist = config.get("blacklist", ["XAUT", "PAXG", "TQQQ", "SQQQ"])
             exclude_bases = {"USDC", "FDUSD", "TUSD", "USDP", "BUSD", "EUR", "GBP", "DAI"}
             exclude_bases.update(custom_blacklist)
             coins = []
-            for s, m in markets.items():
-                if m.get('linear') and m.get('quote') == 'USDT':
-                    base = s.split('/')[0]
-                    if base not in exclude_bases:
-                        coins.append(s)
+            
+            for raw_sym in top_symbols:
+                base = raw_sym.replace('USDT', '')
+                ccxt_sym = f"{base}/USDT:USDT"
+                if ccxt_sym in markets and base not in exclude_bases:
+                    coins.append(ccxt_sym)
+                    
+            # 必須包含目前正在持倉與等待追蹤的幣種
+            active_signals = load_active_signals()
+            active_syms = set()
+            for slist in active_signals.values():
+                for s in slist:
+                    if s['status'] == 'active':
+                        active_syms.add(s['symbol'])
+                        
+            for sym in set(list(watchlist.keys()) + list(active_syms)):
+                if sym not in coins and sym in markets:
+                    coins.append(sym)
+            
+            if not coins:
+                for s, m in markets.items():
+                    if m.get('linear') and m.get('quote') == 'USDT':
+                        base = s.split('/')[0]
+                        if base not in exclude_bases:
+                            coins.append(s)
+            
             precisions = {s: max(0, int(round(-np.log10(markets[s].get('precision', {}).get('price', 1e-8))))) for s in coins}
-        except:
+        except Exception as e:
+            logger.error(f"拉取市場資料失敗: {e}")
             coins = ["BTC/USDT:USDT", "ETH/USDT:USDT", "SOL/USDT:USDT", "XRP/USDT:USDT", "DOGE/USDT:USDT", "ADA/USDT:USDT"]
             precisions = {s: 4 for s in coins}; precisions.update({"BTC/USDT:USDT": 2, "ETH/USDT:USDT": 2})
 
@@ -2264,10 +2103,27 @@ HTML_TEMPLATE = """
       let closedSigs = 0;
       let totalRR = 0;
       Object.values(allData).forEach(sigs => {
+      let totalSigs = 0;
+      let enteredSigs = 0;
+      let closedEnteredSigs = 0;
+      let waitingSigs = 0;
+      let totalRR = 0;
+      Object.values(allData).forEach(sigs => {
           totalSigs += sigs.length;
-          closedSigs += sigs.filter(s => s.status === 'closed').length;
+          sigs.forEach(s => {
+              if (s.has_entered) {
+                  enteredSigs++;
+                  if (s.status === 'closed') {
+                      closedEnteredSigs++;
+                  }
+              } else {
+                  if (s.status === 'active') {
+                      waitingSigs++;
+                  }
+              }
+          });
           
-          sigs.filter(s => s.status === 'active' || s.status === 'missed').forEach(s => {
+          sigs.filter(s => (s.status === 'active' || s.status === 'missed') && s.has_entered).forEach(s => {
               const entry = parseFloat(s.entry_price);
               const sl = parseFloat(s.stop_loss);
               const cp = parseFloat(s.current_price || entry);
@@ -2280,15 +2136,14 @@ HTML_TEMPLATE = """
               }
           });
       });
-      const winRate = totalSigs > 0 ? ((totalSigs - closedSigs) / totalSigs * 100).toFixed(1) : 0;
+      const winRate = enteredSigs > 0 ? ((enteredSigs - closedEnteredSigs) / enteredSigs * 100).toFixed(1) : 0;
       const rrText = totalRR >= 0 ? `+${totalRR.toFixed(2)}` : `${totalRR.toFixed(2)}`;
       const rrColor = totalRR >= 0 ? '#3fb950' : '#f85149';
       
-      const waitingCount = json.waiting_count || 0;
       document.getElementById('global-stats').innerHTML = `
-        <span>📊 實際進場：<strong style="color:#c9d1d9">${totalSigs}</strong></span>
-        <span>⏳ 等待回踩：<strong style="color:#e3b341">${waitingCount}</strong></span>
-        <span>❌ 止損/失效：<strong style="color:#f85149">${closedSigs}</strong></span>
+        <span>📊 實際進場：<strong style="color:#c9d1d9">${enteredSigs}</strong></span>
+        <span>⏳ 等待進場：<strong style="color:#e3b341">${waitingSigs}</strong></span>
+        <span>❌ 止損/失效 (已進場)：<strong style="color:#f85149">${closedEnteredSigs}</strong></span>
         <span>🏆 勝率 (已進場)：<strong style="color:#3fb950">${winRate}%</strong></span>
         <span>💰 有效總 RR：<strong style="color:${rrColor}">${rrText}</strong></span>
       `;
@@ -2378,20 +2233,16 @@ HTML_TEMPLATE = """
             <span class="status-badge active">有效/未止損</span>
             <span style="font-size:0.85rem;font-weight:700;color:${rrCol};margin-left:auto;">${rrStr}</span>
           </div>
-          <div class="card-time">回踩進場：${fmt(sig.c2_date)}</div>
+          <div class="card-time">突破進場：${fmt(sig.l2_date)}</div>
         </div>
         <div class="card-grid">
           <div class="detail-block">
-            <div class="detail-label">L2 (1D) 成立時間</div>
+            <div class="detail-label">L1 (18D) 邊界時間</div>
+            <div class="detail-value">${fmt(sig.l1_date)}</div>
+          </div>
+          <div class="detail-block">
+            <div class="detail-label">L2 (3H) 突破進場時間</div>
             <div class="detail-value">${fmt(sig.l2_date)}</div>
-          </div>
-          <div class="detail-block">
-            <div class="detail-label">L3 跌破/突破邊界時間</div>
-            <div class="detail-value">${fmt(sig.c1_date)}</div>
-          </div>
-          <div class="detail-block">
-            <div class="detail-label">回踩進場時間</div>
-            <div class="detail-value">${fmt(sig.c2_date)}</div>
           </div>
           <div class="detail-block">
             <div class="detail-label">進場價格</div>
@@ -2453,20 +2304,16 @@ HTML_TEMPLATE = """
             <span class="dir-badge ${dir}">${dirText}</span>
             <span class="status-badge ${status}">${statusText}</span>
           </div>
-          <div class="card-time">回踩進場：${fmt(sig.c2_date)}</div>
+          <div class="card-time">突破進場：${fmt(sig.l2_date)}</div>
         </div>
         <div class="card-grid">
           <div class="detail-block">
-            <div class="detail-label">L2 (1D) 成立時間</div>
+            <div class="detail-label">L1 (18D) 邊界時間</div>
+            <div class="detail-value">${fmt(sig.l1_date)}</div>
+          </div>
+          <div class="detail-block">
+            <div class="detail-label">L2 (3H) 突破進場時間</div>
             <div class="detail-value">${fmt(sig.l2_date)}</div>
-          </div>
-          <div class="detail-block">
-            <div class="detail-label">L3 跌破/突破邊界時間</div>
-            <div class="detail-value">${fmt(sig.c1_date)}</div>
-          </div>
-          <div class="detail-block">
-            <div class="detail-label">回踩進場時間</div>
-            <div class="detail-value">${fmt(sig.c2_date)}</div>
           </div>
           <div class="detail-block">
             <div class="detail-label">進場價格</div>
@@ -2553,8 +2400,7 @@ def api_data():
         [get_base_coin(k) for k in watchlist.keys()] +
         list(cleaned_history.keys())
     ))
-    waiting_count = sum(1 for w in watchlist.values() if w.get('scan_state') == 'l3_waiting')
-    return jsonify({"watchlist": watchlist_coins, "history": cleaned_history, "price_map": price_map, "waiting_count": waiting_count})
+    return jsonify({"watchlist": watchlist_coins, "history": cleaned_history, "price_map": price_map})
 
 def run_flask():
     port = int(os.environ.get("PORT", 8080))
