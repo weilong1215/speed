@@ -50,9 +50,9 @@ BITGET_API_KEY = os.getenv("BITGET_API_KEY", "")
 BITGET_SECRET_KEY = os.getenv("BITGET_API_SECRET", "") or os.getenv("BITGET_SECRET_KEY", "")
 BITGET_PASSWORD = os.getenv("BITGET_API_PASSWORD", "") or os.getenv("BITGET_PASSWORD", "")
 
-# 預設 TP 參數 (10R 停利 100%)
-TP_STEP_R = 10
-TP_CLOSE_PCT = 1.0
+# 階梯停利：每階平倉剩餘倉位的 50%
+TP_LADDER = [(10, 0.5), (20, 0.5), (30, 0.5)]
+TP_EXPIRE_R = 10  # 下單前/掛單中過期檢查用（首階 10R）
 
 logger.info(f"✅ 系統配置檢查: TG_TOKEN={'已設定' if TG_BOT_TOKEN else '未設定'}, TG_CHAT_ID={'已設定' if TG_CHAT_ID else '未設定'}")
 logger.info(f"✅ 交易所配置檢查: API_KEY={'已設定' if BITGET_API_KEY else '未設定'}")
@@ -209,53 +209,8 @@ def get_exchange():
             exchange_config['password'] = BITGET_PASSWORD
     return ccxt.bitget(exchange_config)
 
-# ============================================================================
-# 3D K 棒合成工具
-# ============================================================================
-
-def compose_3d_bars(ohlcv_1d):
-    """將 1D OHLCV 合成 3D K 棒 (按每年 1/1 起算，保持加密貨幣原有正常邏輯)
-    輸入: [[ts, open, high, low, close, vol], ...]
-    輸出: 同格式的 3D K 棒列表
-    """
-    if not ohlcv_1d or len(ohlcv_1d) < 3:
-        return []
-
-    from datetime import datetime, timezone
-    PERIOD_MS = 3 * 24 * 3600 * 1000
-    groups = {}
-    for bar in ohlcv_1d:
-        ts = bar[0]
-        dt = datetime.fromtimestamp(ts / 1000, tz=timezone.utc)
-        year_start_dt = datetime(dt.year, 1, 1, tzinfo=timezone.utc)
-        year_epoch_ms = int(year_start_dt.timestamp() * 1000)
-        
-        group_idx = (ts - year_epoch_ms) // PERIOD_MS
-        group_key = year_epoch_ms + group_idx * PERIOD_MS
-        
-        if group_key not in groups:
-            groups[group_key] = []
-        groups[group_key].append(bar)
-
-    # 合成 3D 棒
-    result = []
-    sorted_gts = sorted(groups.keys())
-    for i, gts in enumerate(sorted_gts):
-        bars = sorted(groups[gts], key=lambda x: x[0])
-        
-        result.append([
-            gts,
-            bars[0][1],
-            max(b[2] for b in bars),
-            min(b[3] for b in bars),
-            bars[-1][4],
-            sum(b[5] for b in bars),
-            gts + PERIOD_MS
-        ])
-    return result
-
 def compose_18d_bars(ohlcv_1d):
-    """將 1D OHLCV 合成 18D K棒 (按每年 1/1 起算，與 compose_3d_bars 對齊邏輯相同)
+    """將 1D OHLCV 合成 18D K棒 (按每年 1/1 起算)
     輸入: [[ts, open, high, low, close, vol], ...]
     輸出: [[ts, open, high, low, close, vol, close_ts], ...]
     """
@@ -332,6 +287,55 @@ def compose_3h_bars(ohlcv_1h):
 # 交易執行
 # ============================================================================
 
+async def check_signal_expired(exchange, symbol, direction, entry, sl, precision, trigger_ts, expire_r=None):
+    """檢查訊號是否已過期（價格已達 expire_r*R 或止損）。下單前與掛單中撤單共用。"""
+    if expire_r is None:
+        expire_r = TP_EXPIRE_R
+    risk_per_unit = abs(entry - sl)
+    if risk_per_unit == 0:
+        return False, "", ""
+
+    tp_price = entry + expire_r * risk_per_unit if direction == 'LONG' else entry - expire_r * risk_per_unit
+    l3_close_ts = trigger_ts + 3 * 3600 * 1000 if trigger_ts > 0 else int(time.time() * 1000)
+    since_ts = l3_close_ts - 5 * 60 * 1000
+
+    try:
+        ohlcv_1h = await exchange.fetch_ohlcv(symbol, '1h', since=since_ts, limit=500)
+        for candle in ohlcv_1h:
+            c_ts = int(candle[0])
+            c_high = float(candle[2])
+            c_low = float(candle[3])
+            if c_ts < l3_close_ts - 60000:
+                continue
+            dt_taiwan = pd.to_datetime(c_ts, unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d %H:%M')
+            if direction == 'LONG':
+                if c_high >= tp_price:
+                    return True, f"歷史 1H K 棒 ({dt_taiwan}) 最高價 {c_high:.{precision}f} 已達到/超過 {expire_r}R 停利點 ({tp_price:.{precision}f})", 'TP'
+                if c_low <= sl:
+                    return True, f"歷史 1H K 棒 ({dt_taiwan}) 最低價 {c_low:.{precision}f} 已達到/跌破止損點 ({sl:.{precision}f})", 'SL'
+            else:
+                if c_low <= tp_price:
+                    return True, f"歷史 1H K 棒 ({dt_taiwan}) 最低價 {c_low:.{precision}f} 已達到/低於 {expire_r}R 停利點 ({tp_price:.{precision}f})", 'TP'
+                if c_high >= sl:
+                    return True, f"歷史 1H K 棒 ({dt_taiwan}) 最高價 {c_high:.{precision}f} 已達到/突破止損點 ({sl:.{precision}f})", 'SL'
+
+        ticker = await exchange.fetch_ticker(symbol)
+        current_price = float(ticker['last'])
+        if direction == 'LONG':
+            if current_price >= tp_price:
+                return True, f"最新市價 {current_price:.{precision}f} 已達到/超過 {expire_r}R 停利點 ({tp_price:.{precision}f})", 'TP'
+            if current_price <= sl:
+                return True, f"最新市價 {current_price:.{precision}f} 已達到/跌破止損點 ({sl:.{precision}f})", 'SL'
+        else:
+            if current_price <= tp_price:
+                return True, f"最新市價 {current_price:.{precision}f} 已達到/低於 {expire_r}R 停利點 ({tp_price:.{precision}f})", 'TP'
+            if current_price >= sl:
+                return True, f"最新市價 {current_price:.{precision}f} 已達到/突破止損點 ({sl:.{precision}f})", 'SL'
+    except Exception as e:
+        logger.warning(f"  過期檢查異常 ({symbol}): {e}")
+    return False, "", ""
+
+
 async def place_order(exchange, symbol, direction, entry, sl, precision, fixed_loss_usdt, trigger_ts, l1_high=0.0, l1_low=0.0, l1_open_ts=0):
     """
     執行下單：Limit Order + 分層槓桿策略 (MAX → 20x → 10x)
@@ -346,90 +350,21 @@ async def place_order(exchange, symbol, direction, entry, sl, precision, fixed_l
         if risk_per_unit == 0: return None
         qty_risk_ideal = fixed_loss_usdt / risk_per_unit
 
-        # 下單前先監測價格與歷史 K 棒是否已達到 10R 或已達到/跌破止損
-        try:
-            tp1_price = entry + TP_STEP_R * risk_per_unit if direction == 'LONG' else entry - TP_STEP_R * risk_per_unit
-            
-            # L3 是 3H 棒，收盤時間為 trigger_ts + 3 小時。我們只監測信號成立收盤後的 K 棒。
-            l3_close_ts = trigger_ts + 3 * 3600 * 1000 if trigger_ts > 0 else int(time.time() * 1000)
-            since_ts = l3_close_ts - 5 * 60 * 1000 # 留 5 分鐘緩衝
-            
-            # 拉取 1H K 棒
-            ohlcv_1h = await exchange.fetch_ohlcv(symbol, '1h', since=since_ts, limit=500)
-            
-            skip_order = False
-            skip_reason = ""
-            alert_type = "" # "TP1" or "SL"
-            
-            # 1. 檢查信號收盤成立後的歷史 1H K 棒
-            for candle in ohlcv_1h:
-                c_ts = int(candle[0])
-                c_high = float(candle[2])
-                c_low = float(candle[3])
-                
-                # 只檢查 L3 收盤時間之後的 K 棒
-                if c_ts >= l3_close_ts - 60000:
-                    dt_taiwan = pd.to_datetime(c_ts, unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d %H:%M')
-                    if direction == 'LONG':
-                        if c_high >= tp1_price:
-                            skip_order = True
-                            alert_type = "TP1"
-                            skip_reason = f"歷史 1H K 棒 ({dt_taiwan}) 最高價 {c_high:.{precision}f} 已達到/超過 10R 停利點 ({tp1_price:.{precision}f})"
-                            break
-                        elif c_low <= sl:
-                            skip_order = True
-                            alert_type = "SL"
-                            skip_reason = f"歷史 1H K 棒 ({dt_taiwan}) 最低價 {c_low:.{precision}f} 已達到/跌破止損點 ({sl:.{precision}f})"
-                            break
-                    else:  # SHORT
-                        if c_low <= tp1_price:
-                            skip_order = True
-                            alert_type = "TP1"
-                            skip_reason = f"歷史 1H K 棒 ({dt_taiwan}) 最低價 {c_low:.{precision}f} 已達到/低於 10R 停利點 ({tp1_price:.{precision}f})"
-                            break
-                        elif c_high >= sl:
-                            skip_order = True
-                            alert_type = "SL"
-                            skip_reason = f"歷史 1H K 棒 ({dt_taiwan}) 最高價 {c_high:.{precision}f} 已達到/突破止損點 ({sl:.{precision}f})"
-                            break
-
-            # 2. 檢查最新 Ticker 價格
-            if not skip_order:
-                ticker = await exchange.fetch_ticker(symbol)
-                current_price = float(ticker['last'])
-                if direction == 'LONG':
-                    if current_price >= tp1_price:
-                        skip_order = True
-                        alert_type = "TP1"
-                        skip_reason = f"最新市價 {current_price:.{precision}f} 已達到/超過 10R 停利點 ({tp1_price:.{precision}f})"
-                    elif current_price <= sl:
-                        skip_order = True
-                        alert_type = "SL"
-                        skip_reason = f"最新市價 {current_price:.{precision}f} 已達到/跌破止損點 ({sl:.{precision}f})"
-                else:  # SHORT
-                    if current_price <= tp1_price:
-                        skip_order = True
-                        alert_type = "TP1"
-                        skip_reason = f"最新市價 {current_price:.{precision}f} 已達到/低於 10R 停利點 ({tp1_price:.{precision}f})"
-                    elif current_price >= sl:
-                        skip_order = True
-                        alert_type = "SL"
-                        skip_reason = f"最新市價 {current_price:.{precision}f} 已達到/突破止損點 ({sl:.{precision}f})"
-                        
-            if skip_order:
-                logger.warning(f"⚠️ {symbol} 下單前監測觸發過期，跳過下單: {skip_reason}")
-                title = "<b>🚫 跳過自動下單 (已達10R停利)</b>" if alert_type == "TP1" else "<b>🚫 跳過自動下單 (已達止損)</b>"
-                send_telegram_message(
-                    f"{title}\n\n"
-                    f"💎 <b>交易對:</b> {get_base_coin(symbol)} [{direction}]\n"
-                    f"🎯 進場價格: <code>{entry:.{precision}f}</code>\n"
-                    f"🛑 止損價格: <code>{sl:.{precision}f}</code>\n"
-                    f"🎯 10R價格: <code>{tp1_price:.{precision}f}</code>\n\n"
-                    f"⚠️ <b>原因:</b> {skip_reason}"
-                )
-                return 'skipped'
-        except Exception as e:
-            logger.warning(f"  下單前 1H K 棒價格監測異常 ({symbol}): {e}，跳過監測直接嘗試下單")
+        expired, skip_reason, alert_type = await check_signal_expired(
+            exchange, symbol, direction, entry, sl, precision, trigger_ts)
+        if expired:
+            tp_price = entry + TP_EXPIRE_R * risk_per_unit if direction == 'LONG' else entry - TP_EXPIRE_R * risk_per_unit
+            logger.warning(f"⚠️ {symbol} 下單前監測觸發過期，跳過下單: {skip_reason}")
+            title = f"<b>🚫 跳過自動下單 (已達{TP_EXPIRE_R}R停利)</b>" if alert_type == 'TP' else "<b>🚫 跳過自動下單 (已達止損)</b>"
+            send_telegram_message(
+                f"{title}\n\n"
+                f"💎 <b>交易對:</b> {get_base_coin(symbol)} [{direction}]\n"
+                f"🎯 進場價格: <code>{entry:.{precision}f}</code>\n"
+                f"🛑 止損價格: <code>{sl:.{precision}f}</code>\n"
+                f"🎯 {TP_EXPIRE_R}R價格: <code>{tp_price:.{precision}f}</code>\n\n"
+                f"⚠️ <b>原因:</b> {skip_reason}"
+            )
+            return 'skipped'
 
         # 1. 建構槓桿策略列表: MAX (幣種實際最大槓桿) → 20x → 10x
         # 應對 Bitget V2 API 欄位異動，同步檢查 maxLever、maxLeverage 與 limits 結構
@@ -568,7 +503,7 @@ async def place_order(exchange, symbol, direction, entry, sl, precision, fixed_l
                     'signal_id': signal_id, 'symbol': symbol, 'side': side, 'direction': direction,
                     'quantity': qty, 'entry_price': entry, 'sl_price': sl,
                     'original_sl_price': sl,
-                    'status': 'active', 'precision': precision,
+                    'status': 'active', 'precision': precision, 'tp_stage': 0,
                     'l1_high': l1_high, 'l1_low': l1_low, 'l1_open_ts': l1_open_ts,
                     'timestamp': trigger_ts if trigger_ts > 0 else int(time.time() * 1000)
                 })
@@ -654,11 +589,13 @@ async def _query_plan_order_status(exchange, symbol, client_oid):
         return 'error', 0.0
 
 
-async def ensure_next_tp(exchange, symbol, side, sig, size, saved_signals, open_orders):
-    """
-    固定 TP: 10R 平倉 100%
-    """
+async def manage_tp_ladder(exchange, symbol, side, sig, size, saved_signals, open_orders):
+    """階梯停利：10R/20R/30R 各平倉剩餘倉位 50%。"""
     try:
+        tp_stage = sig.get('tp_stage', 0)
+        if tp_stage >= len(TP_LADDER):
+            return
+
         signal_id = sig.get('signal_id', str(sig.get('timestamp')))
         entry = sig['entry_price']
         original_sl = sig.get('original_sl_price', sig['sl_price'])
@@ -668,31 +605,24 @@ async def ensure_next_tp(exchange, symbol, side, sig, size, saved_signals, open_
         direction = sig['direction']
         precision = sig.get('precision', 4)
 
-        tp_coid = f"tp1_{signal_id}"
+        r_mult, close_pct = TP_LADDER[tp_stage]
+        tp_coid = f"tp{int(r_mult)}_{signal_id}"
         stored_tp_order_id = sig.get('tp_order_id', '')
 
-        current_r_mult = TP_STEP_R
-        current_close_pct = 1.0
-
-        # === 情況 1: tp_order_id 有值 → 檢查該筆訂單是否還在掛單簿 ===
         if stored_tp_order_id:
             has_order = any(tp_coid in get_coid(o) for o in open_orders)
-
             if has_order:
                 tp_order_obj = next((o for o in open_orders if tp_coid in get_coid(o)), None)
                 if tp_order_obj:
                     existing_qty = float(tp_order_obj.get('amount', 0) or tp_order_obj.get('info', {}).get('size', 0) or 0)
-                    ideal_qty = float(exchange.amount_to_precision(symbol, size * current_close_pct))
+                    ideal_qty = float(exchange.amount_to_precision(symbol, size * close_pct))
                     if existing_qty > 0 and ideal_qty > 0 and abs(existing_qty - ideal_qty) / ideal_qty > 0.02:
-                        
-                        chk_tp_price = entry + current_r_mult * risk if direction == 'LONG' else entry - current_r_mult * risk
+                        chk_tp_price = entry + r_mult * risk if direction == 'LONG' else entry - r_mult * risk
                         chk_tp_price = round(chk_tp_price, precision)
                         full_qty = float(exchange.amount_to_precision(symbol, size))
-                        
                         if ideal_qty * chk_tp_price < 6 and full_qty > 0 and abs(existing_qty - full_qty) / full_qty <= 0.02:
                             return
-
-                        logger.info(f"🔄 TP1 數量不一致 ({symbol}): 掛單={existing_qty} vs 理想={ideal_qty}，撤舊掛新")
+                        logger.info(f"🔄 TP{r_mult}R 數量不一致 ({symbol}): 掛單={existing_qty} vs 理想={ideal_qty}，撤舊掛新")
                         try:
                             await exchange.cancel_order(tp_order_obj['id'], symbol, params={'stop': True})
                         except Exception as e:
@@ -702,54 +632,49 @@ async def ensure_next_tp(exchange, symbol, side, sig, size, saved_signals, open_
                         sig['tp_order_id'] = ''
                         save_active_signals(saved_signals)
                     else:
-                        return 
+                        return
             else:
                 plan_status, base_vol = await _query_plan_order_status(exchange, symbol, tp_coid)
-
                 if plan_status == 'executed':
                     sig['tp_order_id'] = ''
+                    sig['tp_stage'] = tp_stage + 1
                     save_active_signals(saved_signals)
-                    logger.info(f"🎯 TP1 ({current_r_mult}R) 確認成交 (成交量: {base_vol})，已完全平倉")
-
+                    logger.info(f"🎯 TP{r_mult}R 確認成交 (成交量: {base_vol})，進入下一階")
                     send_telegram_message(
-                        f"<b>🎯 TP1 ({current_r_mult}R) 止盈成交</b>\n\n"
+                        f"<b>🎯 TP{r_mult}R 止盈成交</b>\n\n"
                         f"💎 {get_base_coin(symbol)} [{direction}]\n"
-                        f"📊 <b>平倉比例:</b> 100%\n"
-                        f"🎉 <b>此筆交易已完結</b>"
+                        f"📊 <b>平倉比例:</b> {int(close_pct * 100)}% 剩餘倉位"
                     )
                 elif plan_status == 'canceled':
-                    logger.info(f"⚠️ TP1 被撤銷 ({symbol})，將自動補掛")
+                    logger.info(f"⚠️ TP{r_mult}R 被撤銷 ({symbol})，將自動補掛")
                     sig['tp_order_id'] = ''
                     save_active_signals(saved_signals)
                 elif plan_status == 'error':
-                    logger.warning(f"  TP1 歷史查詢 API 錯誤，保留追蹤等下輪重試")
+                    logger.warning(f"  TP{r_mult}R 歷史查詢 API 錯誤，保留追蹤等下輪重試")
                     return
                 else:
-                    logger.info(f"  TP1 歷史查無此單 ({symbol})，清空追蹤準備補掛")
+                    logger.info(f"  TP{r_mult}R 歷史查無此單 ({symbol})，清空追蹤準備補掛")
                     sig['tp_order_id'] = ''
                     save_active_signals(saved_signals)
 
-        # === 情況 2: tp_order_id 無值 → 掛出當階 TP 單 ===
-        existing_tp_in_orders = any(tp_coid in get_coid(o) for o in open_orders)
-        if existing_tp_in_orders:
-            logger.info(f"  TP1 已在掛單簿中 ({tp_coid})，跳過重複掛單")
+        if any(tp_coid in get_coid(o) for o in open_orders):
             tp_obj = next((o for o in open_orders if tp_coid in get_coid(o)), None)
             if tp_obj:
                 sig['tp_order_id'] = str(tp_obj.get('id', tp_coid))
                 save_active_signals(saved_signals)
             return
-        
-        tp_price = entry + current_r_mult * risk if direction == 'LONG' else entry - current_r_mult * risk
+
+        tp_price = entry + r_mult * risk if direction == 'LONG' else entry - r_mult * risk
         tp_price = round(tp_price, precision)
-        tp_qty = float(exchange.amount_to_precision(symbol, size * current_close_pct))
+        tp_qty = float(exchange.amount_to_precision(symbol, size * close_pct))
 
         if tp_qty <= 0 or tp_qty * tp_price < 6:
             full_qty = float(exchange.amount_to_precision(symbol, size))
             if full_qty > 0 and full_qty * tp_price >= 6:
                 tp_qty = full_qty
-                logger.info(f"  TP1 份額不足 6U，改為全倉平倉: {tp_qty}")
+                logger.info(f"  TP{r_mult}R 份額不足 6U，改為全倉平倉: {tp_qty}")
             else:
-                logger.debug(f"  TP1 全倉價值仍不足 6U，停止掛單 (粉塵由 SL 保護)")
+                logger.debug(f"  TP{r_mult}R 全倉價值仍不足 6U，停止掛單 (粉塵由 SL 保護)")
                 return
 
         order_side = 'sell' if direction == 'LONG' else 'buy'
@@ -759,7 +684,7 @@ async def ensure_next_tp(exchange, symbol, side, sig, size, saved_signals, open_
             'clientOid': tp_coid
         }
 
-        logger.info(f"🚀 掛出 TP1 ({current_r_mult}R): {symbol} @ {tp_price:.{precision}f} | qty: {tp_qty} | ID: {tp_coid}")
+        logger.info(f"🚀 掛出 TP{r_mult}R: {symbol} @ {tp_price:.{precision}f} | qty: {tp_qty} | ID: {tp_coid}")
         try:
             result = await exchange.create_order(symbol, 'market', order_side, tp_qty, None, params=tp_params)
             sig['tp_order_id'] = str(result.get('id', ''))
@@ -779,7 +704,7 @@ async def ensure_next_tp(exchange, symbol, side, sig, size, saved_signals, open_
 
 async def monitor_positions(exchange):
     """
-    倉位監控：無限階梯 TP 管理 + SL 補掛 + 孤兒單清理
+    倉位監控：階梯 TP + SL 補掛 + 掛單過期撤單 + 孤兒單清理
     """
     try:
         await exchange.load_markets()
@@ -872,74 +797,7 @@ async def monitor_positions(exchange):
                             if '40786' not in str(e):
                                 logger.error(f"掛止損失敗: {e}")
 
-
-
-                    # 進場後 1D 收盤跌破/漲破 10MA → 市價平倉
-                    # 3D 移動止損 (Trailing Stop)
-                    _entry_ts = int(sig.get('timestamp', 0))
-                    if _entry_ts > 0:
-                        try:
-                            _ohlcv_1d_mon = await exchange.fetch_ohlcv(symbol, '1d', limit=200)
-                            if _ohlcv_1d_mon and len(_ohlcv_1d_mon) > 0:
-                                _ohlcv_3d_mon = compose_3d_bars(_ohlcv_1d_mon)
-                                _df_3d_mon = pd.DataFrame(_ohlcv_3d_mon, columns=['ts', 'open', 'high', 'low', 'close', 'vol', 'close_ts'])
-                                _now_ms_3d = int(time.time() * 1000)
-                                _closed_3d_pos = _df_3d_mon[_df_3d_mon['close_ts'] <= _now_ms_3d].reset_index(drop=True)
-
-                                if len(_closed_3d_pos) >= 2:
-                                    _last_3d = _closed_3d_pos.iloc[-1]
-                                    _prev_3d = _closed_3d_pos.iloc[-2]
-                                    
-                                    _last_3d_close_ts = int(_last_3d['close_ts'])
-                                    
-                                    # 只有在最新 3D K線是「進場之後」才進行判斷
-                                    if _last_3d_close_ts > _entry_ts:
-                                        _new_close = float(_last_3d['close'])
-                                        _new_high = float(_last_3d['high'])
-                                        _new_low = float(_last_3d['low'])
-                                        
-                                        _prev_open = float(_prev_3d['open'])
-                                        _prev_close = float(_prev_3d['close'])
-                                        
-                                        _current_sl = float(sig['sl_price'])
-                                        _new_sl = _current_sl
-                                        _move_sl = False
-                                        
-                                        if side.lower() == 'long':
-                                            _prev_body_high = max(_prev_open, _prev_close)
-                                            if _new_close > _prev_body_high:
-                                                if _new_low > _current_sl:
-                                                    _new_sl = _new_low
-                                                    _move_sl = True
-                                        elif side.lower() == 'short':
-                                            _prev_body_low = min(_prev_open, _prev_close)
-                                            if _new_close < _prev_body_low:
-                                                if _new_high < _current_sl or _current_sl == 0:
-                                                    _new_sl = _new_high
-                                                    _move_sl = True
-                                                    
-                                        if _move_sl:
-                                            _3d_dt = pd.to_datetime(int(_last_3d['ts']), unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d')
-                                            logger.info(f"🔄 3D 吞噬 ({symbol} {_3d_dt})，止損移至 {_new_sl}")
-                                            sig['sl_price'] = _new_sl
-                                            save_active_signals(saved_signals)
-                                            # 更新 history_signals 中的 sl
-                                            history_signals = load_history_signals()
-                                            base_coin = get_base_coin(symbol)
-                                            if base_coin in history_signals:
-                                                for hs in history_signals[base_coin]:
-                                                    if hs.get('trigger_ts') == _entry_ts:
-                                                        hs['stop_loss'] = _new_sl
-                                            save_history_signals(history_signals)
-                                            
-                                            send_telegram_message(
-                                                f"<b>🔄 3D 移動止損觸發</b>\n\n"
-                                                f"💎 <b>交易對:</b> {get_base_coin(symbol)} [{side.upper()}]\n"
-                                                f"📅 <b>觸發 K 線:</b> {_3d_dt}\n"
-                                                f"🛡️ <b>新止損價:</b> <code>{_new_sl:.4f}</code>"
-                                            )
-                        except Exception as _e3d:
-                            logger.warning(f"3D 移動止損監控異常 ({symbol}): {_e3d}")
+                    await manage_tp_ladder(exchange, symbol, side, sig, size, saved_signals, open_orders)
         # 2. 孤兒訊號清理 (倉位消失但訊號仍 active)
         for sig_key, sig_list in list(saved_signals.items()):
             for sig in sig_list:
@@ -958,50 +816,29 @@ async def monitor_positions(exchange):
                     sig['has_entered'] = True
 
                 if has_entry:
-                        entry_ts = int(sig.get('timestamp', 0))
-                        ohlcv_1d = await exchange.fetch_ohlcv(symbol, '1d', limit=200)
-                        
-                        try:
-                            df_1d_eval = pd.DataFrame(ohlcv_1d, columns=['ts', 'open', 'high', 'low', 'close', 'vol'])
-                            df_1d_eval['close_ts'] = df_1d_eval['ts'] + 86400000
-                            
-                            now_utc_1d_fl = int(time.time() * 1000)
-                            closed_1d = df_1d_eval[df_1d_eval['close_ts'] <= now_utc_1d_fl]
-                            
-                            if len(closed_1d) > 0:
-                                valid_closed = closed_1d[closed_1d['ts'] > entry_ts]
-                                revoke_reason = None
-                                
-                                for _, c1d in valid_closed.iterrows():
-                                    c_close = float(c1d['close'])
-                                    dt_str = pd.to_datetime(c1d['ts'], unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d')
-                                    stop_loss = float(sig['sl_price'])
-                                    
-                                    if direction == 'LONG' and c_close <= stop_loss:
-                                        revoke_reason = f"歷史 1D線 ({dt_str}) 收盤 ({c_close:.4f}) 跌破止損 ({stop_loss:.4f})"
-                                        break
-                                    elif direction == 'SHORT' and c_close >= stop_loss:
-                                        revoke_reason = f"歷史 1D線 ({dt_str}) 收盤 ({c_close:.4f}) 突破止損 ({stop_loss:.4f})"
-                                        break
-
-                                if revoke_reason:
-                                        logger.info(f"🚫 淘汰條件已成立 [{revoke_reason}] ({symbol})，撤銷未成交單 {signal_id}")
-                                        entry_orders = [o for o in open_orders if str(o.get('clientOrderId') or o.get('info', {}).get('clientOid') or "") == str(signal_id)]
-                                        for eo in entry_orders:
-                                            try:
-                                                await exchange.cancel_order(eo['id'], symbol)
-                                                open_orders = [o for o in open_orders if o['id'] != eo['id']]
-                                            except Exception as e:
-                                                logger.warning(f"撤銷未成交單失敗 {eo['id']}: {e}")
-                                        send_telegram_message(
-                                            f"<b>🚫 訊號已淘汰 (撤銷進場)</b>\n\n"
-                                            f"💎 <b>交易對:</b> {get_base_coin(symbol)} [{direction}]\n"
-                                            f"📉 <b>狀態: {revoke_reason}，已自動撤銷進場單</b>"
-                                        )
-                                        sig['status'] = 'closed'
-                                        continue
-                        except Exception as e:
-                            logger.warning(f"檢查訊號淘汰撤單異常 ({symbol}): {e}")
+                    entry_price = float(sig.get('entry_price', 0))
+                    sl_price = float(sig['sl_price'])
+                    trigger_ts = int(sig.get('timestamp', 0))
+                    prec = int(sig.get('precision', 4))
+                    expired, revoke_reason, alert_type = await check_signal_expired(
+                        exchange, symbol, direction, entry_price, sl_price, prec, trigger_ts)
+                    if expired:
+                        logger.info(f"🚫 掛單過期 [{revoke_reason}] ({symbol})，撤銷未成交單 {signal_id}")
+                        entry_orders = [o for o in open_orders if str(o.get('clientOrderId') or o.get('info', {}).get('clientOid') or "") == str(signal_id)]
+                        for eo in entry_orders:
+                            try:
+                                await exchange.cancel_order(eo['id'], symbol)
+                                open_orders = [o for o in open_orders if o['id'] != eo['id']]
+                            except Exception as e:
+                                logger.warning(f"撤銷未成交單失敗 {eo['id']}: {e}")
+                        title = f"已達{TP_EXPIRE_R}R停利" if alert_type == 'TP' else "已達止損"
+                        send_telegram_message(
+                            f"<b>🚫 訊號已淘汰 (撤銷進場)</b>\n\n"
+                            f"💎 <b>交易對:</b> {get_base_coin(symbol)} [{direction}]\n"
+                            f"📉 <b>狀態: {title} — {revoke_reason}，已自動撤銷進場單</b>"
+                        )
+                        sig['status'] = 'closed'
+                        continue
 
                 if not has_pos and not has_entry:
                     logger.info(f"🧹 偵測到歸零/孤兒訊號 {sig_key}，開始清理...")
@@ -1044,7 +881,7 @@ async def monitor_positions(exchange):
                 del saved_signals[sig_key]
 
         # 3. 盲目孤兒單清理 (訂單找名單)
-        # Entry 格式: entry_{signal_id}, TP 格式: tp1_{signal_id}, SL 格式: sl_{signal_id}
+        # Entry: entry_*, TP: tp10_/tp20_/tp30_*, SL: sl_*
         tp_prefix_pattern = re.compile(r'^tp\d+_')
         all_active_ids = [str(s['signal_id']) for slist in saved_signals.values() for s in slist]
         for oo in open_orders:
@@ -1108,17 +945,7 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
         df_18d = pd.DataFrame(ohlcv_18d, columns=['ts', 'open', 'high', 'low', 'close', 'vol', 'close_ts'])
         df_18d_closed = df_18d[df_18d['close_ts'] <= now_utc].reset_index(drop=True)
 
-        df_1d = pd.DataFrame(ohlcv_1d, columns=['ts', 'open', 'high', 'low', 'close', 'vol'])
-        df_1d['close_ts'] = df_1d['ts'] + 86400000
-        df_1d['ma_10'] = df_1d['close'].rolling(window=10).mean()
-        df_1d_closed = df_1d[df_1d['close_ts'] <= now_utc].reset_index(drop=True)
-
         df_3h = pd.DataFrame(ohlcv_3h, columns=['ts', 'open', 'high', 'low', 'close', 'vol', 'close_ts'])
-        df_3h['ma_100'] = df_3h['close'].rolling(window=100).mean()
-        df_3h['ma_20'] = df_3h['close'].rolling(window=20).mean()
-        df_3h['std_20'] = df_3h['close'].rolling(window=20).std()
-        df_3h['bb_lower'] = df_3h['ma_20'] - 2 * df_3h['std_20']
-        df_3h['bb_upper'] = df_3h['ma_20'] + 2 * df_3h['std_20']
         df_3h_closed = df_3h[df_3h['close_ts'] <= now_utc].reset_index(drop=True)
 
         # =========================================================
