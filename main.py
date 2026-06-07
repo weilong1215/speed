@@ -1168,8 +1168,10 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
         # =========================================================
         # 單一時間軸事件推進：從舊往新找，即時監控失效條件
         # =========================================================
-        # 將資料轉為 Dict 方便依時間查詢
-        dict_18d = {int(row['close_ts']): row for _, row in df_18d_closed.iterrows()}
+        # 將 18D K 棒依「開盤時間」排列，方便逐 3H 棒判斷是否進入新的 18D 區間
+        # key = 18D 開盤 ts (ms)，value = row
+        list_18d = sorted(df_18d_closed.to_dict('records'), key=lambda r: r['ts'])
+        _18d_idx = 0  # 指向目前 3H 所在的 18D
 
         # 狀態變數
         l1_valid = False
@@ -1191,21 +1193,32 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
 
         # 主迴圈：以 3H 推進
         for _, row in df_3h_closed.iterrows():
-            t = int(row['close_ts'])
+            t = int(row['ts'])          # 3H 開盤時間
+            t_close = int(row['close_ts'])  # 3H 收盤時間
             
-            # 1. 處理 18D (L1) 事件
-            if t in dict_18d:
-                curr_18d = dict_18d[t]
-                # L1 邊界更新
-                if not simulated_pos:
-                    l1_valid = True
-                    l1_valid_ts = t
-                    l1_open_ts = int(curr_18d['ts'])
-                    l1_high = float(curr_18d['high'])
-                    l1_low = float(curr_18d['low'])
-                    l1_date_str = pd.to_datetime(curr_18d['ts'], unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d')
-                    l2_valid = False
-                    l2_direction = ""
+            # 1. 找出當前 3H 所屬的 18D 區間 (18D 開盤 <= 3H 開盤 < 18D 收盤)
+            #    逐步推進 _18d_idx 直到找到正確的 18D
+            while _18d_idx + 1 < len(list_18d) and int(list_18d[_18d_idx + 1]['ts']) <= t:
+                _18d_idx += 1
+            
+            if list_18d:
+                curr_18d_row = list_18d[_18d_idx]
+                curr_18d_open = int(curr_18d_row['ts'])
+                curr_18d_close = int(curr_18d_row['close_ts'])
+                
+                # 只有 3H K 棒完全落在 18D 收盤之後的下一根才切換
+                # 當 3H 開盤 >= 最新已收盤 18D 開盤，更新 L1 邊界
+                if curr_18d_open != l1_open_ts and not simulated_pos:
+                    # 新 18D 已收盤（close_ts <= now）才切換 L1
+                    if curr_18d_close <= now_utc:
+                        l1_valid = True
+                        l1_valid_ts = t_close   # 從這根 3H 收盤後開始有效
+                        l1_open_ts = curr_18d_open
+                        l1_high = float(curr_18d_row['high'])
+                        l1_low = float(curr_18d_row['low'])
+                        l1_date_str = pd.to_datetime(curr_18d_open, unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d')
+                        l2_valid = False
+                        l2_direction = ""
 
             # 2. 止損檢查
             if simulated_pos:
@@ -1221,21 +1234,25 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
                     if all_historical_c2s and all_historical_c2s[-1]['status'] == 'active':
                         all_historical_c2s[-1]['status'] = 'closed'
                     
-                    # 止損後，重新取得當前已收盤的最新的 18D 作為 L1 邊界
-                    latest_18d_ts = max([k for k in dict_18d.keys() if k <= t], default=None)
-                    if latest_18d_ts:
-                        curr_18d = dict_18d[latest_18d_ts]
+                    # 止損後，重新以最新已收盤 18D 作為 L1 邊界
+                    # list_18d 已按 ts 排序，找最大 open_ts <= t_close
+                    latest_18d_row = None
+                    for _r in reversed(list_18d):
+                        if int(_r['close_ts']) <= t_close:
+                            latest_18d_row = _r
+                            break
+                    if latest_18d_row:
                         l1_valid = True
-                        l1_valid_ts = latest_18d_ts
-                        l1_open_ts = int(curr_18d['ts'])
-                        l1_high = float(curr_18d['high'])
-                        l1_low = float(curr_18d['low'])
-                        l1_date_str = pd.to_datetime(curr_18d['ts'], unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d')
+                        l1_valid_ts = t_close
+                        l1_open_ts = int(latest_18d_row['ts'])
+                        l1_high = float(latest_18d_row['high'])
+                        l1_low = float(latest_18d_row['low'])
+                        l1_date_str = pd.to_datetime(l1_open_ts, unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d')
                     else:
                         l1_valid = False
 
-            # 3. L2 觸發邏輯 (看 3H)
-            if not simulated_pos and l1_valid and t >= l1_valid_ts:
+            # 3. L2 觸發邏輯 (看 3H 收盤)
+            if not simulated_pos and l1_valid and t_close > l1_valid_ts:
                 close_price = float(row['close'])
                 is_long = close_price > l1_high
                 is_short = close_price < l1_low
