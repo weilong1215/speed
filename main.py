@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 # 檔名: main.py
 
 import numpy as np
@@ -373,6 +371,41 @@ async def check_signal_expired(exchange, symbol, direction, entry, sl, precision
     if risk_per_unit == 0:
         return False, "", ""
 
+    # 動態計算 3D 吞噬保護止損
+    dynamic_sl = sl
+    if trigger_ts > 0:
+        try:
+            _ohlcv_1d = await exchange.fetch_ohlcv(symbol, '1d', limit=200)
+            if _ohlcv_1d:
+                _ohlcv_3d = compose_3d_bars(_ohlcv_1d)
+                _df_3d = pd.DataFrame(_ohlcv_3d, columns=['ts', 'open', 'high', 'low', 'close', 'vol', 'close_ts'])
+                _now_ms_3d = int(time.time() * 1000)
+                _closed_3d = _df_3d[_df_3d['close_ts'] <= _now_ms_3d].reset_index(drop=True)
+                
+                if len(_closed_3d) >= 2:
+                    _current_sl = sl
+                    for i in range(1, len(_closed_3d)):
+                        _last = _closed_3d.iloc[i]
+                        _prev = _closed_3d.iloc[i-1]
+                        if int(_last['close_ts']) > trigger_ts:
+                            _new_close = float(_last['close'])
+                            _new_high = float(_last['high'])
+                            _new_low = float(_last['low'])
+                            _prev_open = float(_prev['open'])
+                            _prev_close = float(_prev['close'])
+                            
+                            if direction.upper() == 'LONG':
+                                _prev_body_high = max(_prev_open, _prev_close)
+                                if _new_close > _prev_body_high and _new_low > _current_sl:
+                                    _current_sl = _new_low
+                            elif direction.upper() == 'SHORT':
+                                _prev_body_low = min(_prev_open, _prev_close)
+                                if _new_close < _prev_body_low and (_new_high < _current_sl or _current_sl == 0):
+                                    _current_sl = _new_high
+                    dynamic_sl = _current_sl
+        except Exception as e:
+            logger.warning(f"  過期檢查(3D止損)異常 ({symbol}): {e}")
+
     tp_price = entry + expire_r * risk_per_unit if direction == 'LONG' else entry - expire_r * risk_per_unit
     l3_close_ts = trigger_ts + 3 * 3600 * 1000 if trigger_ts > 0 else int(time.time() * 1000)
     since_ts = l3_close_ts - 5 * 60 * 1000
@@ -389,26 +422,26 @@ async def check_signal_expired(exchange, symbol, direction, entry, sl, precision
             if direction == 'LONG':
                 if c_high >= tp_price:
                     return True, f"歷史 1H K 棒 ({dt_taiwan}) 最高價 {c_high:.{precision}f} 已達到/超過 {expire_r}R 停利點 ({tp_price:.{precision}f})", 'TP'
-                if c_low <= sl:
-                    return True, f"歷史 1H K 棒 ({dt_taiwan}) 最低價 {c_low:.{precision}f} 已觸發保護止損 ({sl:.{precision}f})", 'PSL'
+                if c_low <= dynamic_sl:
+                    return True, f"歷史 1H K 棒 ({dt_taiwan}) 最低價 {c_low:.{precision}f} 已觸發保護止損 ({dynamic_sl:.{precision}f})", 'PSL'
             else:
                 if c_low <= tp_price:
                     return True, f"歷史 1H K 棒 ({dt_taiwan}) 最低價 {c_low:.{precision}f} 已達到/低於 {expire_r}R 停利點 ({tp_price:.{precision}f})", 'TP'
-                if c_high >= sl:
-                    return True, f"歷史 1H K 棒 ({dt_taiwan}) 最高價 {c_high:.{precision}f} 已觸發保護止損 ({sl:.{precision}f})", 'PSL'
+                if c_high >= dynamic_sl:
+                    return True, f"歷史 1H K 棒 ({dt_taiwan}) 最高價 {c_high:.{precision}f} 已觸發保護止損 ({dynamic_sl:.{precision}f})", 'PSL'
 
         ticker = await exchange.fetch_ticker(symbol)
         current_price = float(ticker['last'])
         if direction == 'LONG':
             if current_price >= tp_price:
                 return True, f"最新市價 {current_price:.{precision}f} 已達到/超過 {expire_r}R 停利點 ({tp_price:.{precision}f})", 'TP'
-            if current_price <= sl:
-                return True, f"最新市價 {current_price:.{precision}f} 已觸發保護止損 ({sl:.{precision}f})", 'PSL'
+            if current_price <= dynamic_sl:
+                return True, f"最新市價 {current_price:.{precision}f} 已觸發保護止損 ({dynamic_sl:.{precision}f})", 'PSL'
         else:
             if current_price <= tp_price:
                 return True, f"最新市價 {current_price:.{precision}f} 已達到/低於 {expire_r}R 停利點 ({tp_price:.{precision}f})", 'TP'
-            if current_price >= sl:
-                return True, f"最新市價 {current_price:.{precision}f} 已觸發保護止損 ({sl:.{precision}f})", 'PSL'
+            if current_price >= dynamic_sl:
+                return True, f"最新市價 {current_price:.{precision}f} 已觸發保護止損 ({dynamic_sl:.{precision}f})", 'PSL'
     except Exception as e:
         logger.warning(f"  過期檢查異常 ({symbol}): {e}")
     return False, "", ""
@@ -759,9 +792,9 @@ async def manage_tp_ladder(exchange, symbol, side, sig, size, saved_signals, ope
             full_qty = float(exchange.amount_to_precision(symbol, size))
             if full_qty > 0 and full_qty * tp_price >= 6:
                 tp_qty = full_qty
-                logger.info(f"  TP{r_mult}R 份額不足 6U，改為全倉平倉: {tp_qty}")
+                logger.warning(f"  TP{r_mult}R 份額價值不足 6U ({tp_qty * tp_price:.2f}U)，改為全倉平倉: {tp_qty}")
             else:
-                logger.debug(f"  TP{r_mult}R 全倉價值仍不足 6U，停止掛單 (粉塵由 SL 保護)")
+                logger.warning(f"  TP{r_mult}R 全倉價值仍不足 6U ({full_qty * tp_price:.2f}U)，停止掛單 (粉塵由 SL 保護)")
                 return
 
         order_side = 'sell' if direction == 'LONG' else 'buy'
@@ -953,9 +986,7 @@ async def monitor_positions(exchange):
                 direction = sig['direction']
                 has_pos = any(p['symbol'] == symbol and p['side'].upper() == direction for p in active_pos)
 
-                has_entry = any(
-                    str(o.get('clientOrderId') or o.get('info', {}).get('clientOid') or "") == str(signal_id)
-                    for o in open_orders)
+                has_entry = any(str(signal_id) in get_coid(o) for o in open_orders)
                 
                 if has_pos:
                     sig['has_entered'] = True
@@ -969,13 +1000,27 @@ async def monitor_positions(exchange):
                         exchange, symbol, direction, entry_price, sl_price, prec, trigger_ts)
                     if expired:
                         logger.info(f"🚫 掛單過期 [{revoke_reason}] ({symbol})，撤銷未成交單 {signal_id}")
-                        entry_orders = [o for o in open_orders if str(o.get('clientOrderId') or o.get('info', {}).get('clientOid') or "") == str(signal_id)]
+                        entry_orders = [o for o in open_orders if str(signal_id) in get_coid(o)]
                         for eo in entry_orders:
                             try:
                                 await exchange.cancel_order(eo['id'], symbol)
                                 open_orders = [o for o in open_orders if o['id'] != eo['id']]
                             except Exception as e:
                                 logger.warning(f"撤銷未成交單失敗 {eo['id']}: {e}")
+                                
+                        # 連帶強制撤銷可能殘留的原始附加計畫止損單
+                        for po in orders_plan:
+                            if po['symbol'] == symbol:
+                                _is_opp = (direction.upper() == 'LONG' and po['side'].lower() == 'sell') or \
+                                          (direction.upper() == 'SHORT' and po['side'].lower() == 'buy')
+                                _trig_p = float(po.get('triggerPrice', 0) or po.get('info', {}).get('triggerPrice', 0))
+                                if _is_opp and abs(_trig_p - sl_price) < 1e-8:
+                                    try:
+                                        await exchange.cancel_order(po['id'], symbol, params={'stop': True})
+                                        logger.info(f"🚫 連帶撤銷掛單中的附屬止損: {po['id']}")
+                                    except Exception:
+                                        pass
+                                        
                         if alert_type == 'TP':
                             title = f"已達{TP_EXPIRE_R}R停利"
                         elif alert_type == 'PSL':
@@ -993,9 +1038,7 @@ async def monitor_positions(exchange):
                 if not has_pos and not has_entry:
                     logger.info(f"🧹 偵測到歸零/孤兒訊號 {sig_key}，開始清理...")
 
-                    orphan_orders = [o for o in open_orders
-                                     if signal_id in str(o.get('clientOrderId') or
-                                                         o.get('info', {}).get('clientOid') or "")]
+                    orphan_orders = [o for o in open_orders if str(signal_id) in get_coid(o)]
                     for oo in orphan_orders:
                         try:
                             cid_str = get_coid(oo)
@@ -1035,7 +1078,7 @@ async def monitor_positions(exchange):
         tp_prefix_pattern = re.compile(r'^tp\d+_')
         all_active_ids = [str(s['signal_id']) for slist in saved_signals.values() for s in slist]
         for oo in open_orders:
-            co_id = str(oo.get('clientOrderId') or oo.get('info', {}).get('clientOid') or "")
+            co_id = get_coid(oo)
             is_sl = co_id.startswith("sl_")
             is_tp = bool(tp_prefix_pattern.match(co_id))
             is_entry = co_id.startswith("entry_")
