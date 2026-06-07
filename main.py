@@ -141,10 +141,18 @@ def load_config():
                 config = json.load(f)
             if "blacklist" not in config:
                 config["blacklist"] = ["XAUT", "PAXG", "TQQQ", "SQQQ"]
+            config.setdefault("coin_rank_mode", "hot")
+            config.setdefault("top_coins_count", 10)
             return config
         except Exception as e:
             logger.error(f"讀取設定檔失敗: {e}")
-    return {"total_capital": 300, "loss_pct": 2, "blacklist": ["XAUT", "PAXG", "TQQQ", "SQQQ"]}
+    return {
+        "total_capital": 300,
+        "loss_pct": 2,
+        "blacklist": ["XAUT", "PAXG", "TQQQ", "SQQQ"],
+        "coin_rank_mode": "hot",
+        "top_coins_count": 10,
+    }
 
 def save_config(data):
     try:
@@ -208,6 +216,37 @@ def get_exchange():
         if BITGET_PASSWORD:
             exchange_config['password'] = BITGET_PASSWORD
     return ccxt.bitget(exchange_config)
+
+
+def _bitget_ticker_hot_score(ticker):
+    """Bitget 無公開熱門榜 API；以 24h 成交額 × 波動加權近似 OKX 熱門榜。"""
+    vol = float(ticker.get('usdtVolume') or ticker.get('quoteVolume') or 0)
+    chg = abs(float(ticker.get('change24h') or ticker.get('changeUtc24h') or 0))
+    return vol * (1 + chg * 3)
+
+
+def fetch_top_bitget_symbols(limit=10, rank_mode='volume'):
+    """從 Bitget USDT 永續 tickers 取 Top N。rank_mode: volume | hot"""
+    try:
+        url = 'https://api.bitget.com/api/v2/mix/market/tickers?productType=USDT-FUTURES'
+        res = requests.get(url, timeout=10).json()
+        if res.get('code') != '00000':
+            logger.warning(f"拉取 Bitget tickers 失敗: {res.get('msg')}")
+            return []
+        data = res.get('data') or []
+        if rank_mode == 'hot':
+            sorted_data = sorted(data, key=_bitget_ticker_hot_score, reverse=True)
+            label = '熱門 (成交額×波動)'
+        else:
+            sorted_data = sorted(data, key=lambda x: float(x.get('quoteVolume', 0) or 0), reverse=True)
+            label = '成交額'
+        symbols = [x['symbol'] for x in sorted_data[:limit]]
+        logger.info(f"📊 幣種榜單 [{label}] Top {limit}: {', '.join(s.replace('USDT', '') for s in symbols)}")
+        return symbols
+    except Exception as e:
+        logger.warning(f"拉取榜單失敗: {e}")
+        return []
+
 
 def compose_3d_bars(ohlcv_1d):
     """將 1D OHLCV 合成 3D K 棒 (按每年 1/1 起算)
@@ -1487,14 +1526,10 @@ async def run_scan():
 
     try:
         try:
-            url = 'https://api.bitget.com/api/v2/mix/market/tickers?productType=USDT-FUTURES'
-            res = requests.get(url, timeout=10).json()
-            top_symbols = []
-            if res.get('code') == '00000':
-                data = res['data']
-                sorted_data = sorted(data, key=lambda x: float(x.get('quoteVolume', 0)), reverse=True)
-                top_symbols = [x['symbol'] for x in sorted_data[:10]]
-            
+            rank_mode = config.get('coin_rank_mode', 'hot')
+            top_n = int(config.get('top_coins_count', 10))
+            top_symbols = fetch_top_bitget_symbols(limit=top_n, rank_mode=rank_mode)
+
             markets = await ex.load_markets()
             custom_blacklist = config.get("blacklist", ["XAUT", "PAXG", "TQQQ", "SQQQ"])
             exclude_bases = {"USDC", "FDUSD", "TUSD", "USDP", "BUSD", "EUR", "GBP", "DAI"}
