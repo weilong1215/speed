@@ -209,6 +209,45 @@ def get_exchange():
             exchange_config['password'] = BITGET_PASSWORD
     return ccxt.bitget(exchange_config)
 
+def compose_3d_bars(ohlcv_1d):
+    """將 1D OHLCV 合成 3D K 棒 (按每年 1/1 起算)
+    輸入: [[ts, open, high, low, close, vol], ...]
+    輸出: 同格式的 3D K 棒列表
+    """
+    if not ohlcv_1d or len(ohlcv_1d) < 3:
+        return []
+
+    from datetime import datetime, timezone
+    PERIOD_MS = 3 * 24 * 3600 * 1000
+    groups = {}
+    for bar in ohlcv_1d:
+        ts = bar[0]
+        dt = datetime.fromtimestamp(ts / 1000, tz=timezone.utc)
+        year_start_dt = datetime(dt.year, 1, 1, tzinfo=timezone.utc)
+        year_epoch_ms = int(year_start_dt.timestamp() * 1000)
+
+        group_idx = (ts - year_epoch_ms) // PERIOD_MS
+        group_key = year_epoch_ms + group_idx * PERIOD_MS
+
+        if group_key not in groups:
+            groups[group_key] = []
+        groups[group_key].append(bar)
+
+    result = []
+    for gts in sorted(groups.keys()):
+        bars = sorted(groups[gts], key=lambda x: x[0])
+        result.append([
+            gts,
+            bars[0][1],
+            max(b[2] for b in bars),
+            min(b[3] for b in bars),
+            bars[-1][4],
+            sum(b[5] for b in bars),
+            gts + PERIOD_MS
+        ])
+    return result
+
+
 def compose_18d_bars(ohlcv_1d):
     """將 1D OHLCV 合成 18D K棒 (按每年 1/1 起算)
     輸入: [[ts, open, high, low, close, vol], ...]
@@ -704,7 +743,7 @@ async def manage_tp_ladder(exchange, symbol, side, sig, size, saved_signals, ope
 
 async def monitor_positions(exchange):
     """
-    倉位監控：階梯 TP + SL 補掛 + 掛單過期撤單 + 孤兒單清理
+    倉位監控：3D 移動止損 + 階梯 TP + SL 補掛 + 掛單過期撤單 + 孤兒單清理
     """
     try:
         await exchange.load_markets()
@@ -796,6 +835,64 @@ async def monitor_positions(exchange):
                         except Exception as e:
                             if '40786' not in str(e):
                                 logger.error(f"掛止損失敗: {e}")
+
+                    # 3D 移動止損：最新 3D 棒吞噬前棒實體 → 止損移至該棒低/高點
+                    _entry_ts = int(sig.get('timestamp', 0))
+                    if _entry_ts > 0:
+                        try:
+                            _ohlcv_1d_mon = await exchange.fetch_ohlcv(symbol, '1d', limit=200)
+                            if _ohlcv_1d_mon:
+                                _ohlcv_3d_mon = compose_3d_bars(_ohlcv_1d_mon)
+                                _df_3d_mon = pd.DataFrame(_ohlcv_3d_mon, columns=['ts', 'open', 'high', 'low', 'close', 'vol', 'close_ts'])
+                                _now_ms_3d = int(time.time() * 1000)
+                                _closed_3d_pos = _df_3d_mon[_df_3d_mon['close_ts'] <= _now_ms_3d].reset_index(drop=True)
+
+                                if len(_closed_3d_pos) >= 2:
+                                    _last_3d = _closed_3d_pos.iloc[-1]
+                                    _prev_3d = _closed_3d_pos.iloc[-2]
+                                    _last_3d_close_ts = int(_last_3d['close_ts'])
+
+                                    if _last_3d_close_ts > _entry_ts:
+                                        _new_close = float(_last_3d['close'])
+                                        _new_high = float(_last_3d['high'])
+                                        _new_low = float(_last_3d['low'])
+                                        _prev_open = float(_prev_3d['open'])
+                                        _prev_close = float(_prev_3d['close'])
+                                        _current_sl = float(sig['sl_price'])
+                                        _new_sl = _current_sl
+                                        _move_sl = False
+
+                                        if side.lower() == 'long':
+                                            _prev_body_high = max(_prev_open, _prev_close)
+                                            if _new_close > _prev_body_high and _new_low > _current_sl:
+                                                _new_sl = _new_low
+                                                _move_sl = True
+                                        elif side.lower() == 'short':
+                                            _prev_body_low = min(_prev_open, _prev_close)
+                                            if _new_close < _prev_body_low and (_new_high < _current_sl or _current_sl == 0):
+                                                _new_sl = _new_high
+                                                _move_sl = True
+
+                                        if _move_sl:
+                                            _3d_dt = pd.to_datetime(int(_last_3d['ts']), unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d')
+                                            logger.info(f"🔄 3D 吞噬 ({symbol} {_3d_dt})，止損移至 {_new_sl}")
+                                            sig['sl_price'] = _new_sl
+                                            save_active_signals(saved_signals)
+                                            history_signals = load_history_signals()
+                                            base_coin = get_base_coin(symbol)
+                                            if base_coin in history_signals:
+                                                for hs in history_signals[base_coin]:
+                                                    if hs.get('trigger_ts') == _entry_ts:
+                                                        hs['stop_loss'] = _new_sl
+                                            save_history_signals(history_signals)
+                                            send_telegram_message(
+                                                f"<b>🔄 3D 移動止損觸發</b>\n\n"
+                                                f"💎 <b>交易對:</b> {get_base_coin(symbol)} [{side.upper()}]\n"
+                                                f"📅 <b>觸發 K 線:</b> {_3d_dt}\n"
+                                                f"🛡️ <b>新止損價:</b> <code>{_new_sl:.4f}</code>"
+                                            )
+                        except Exception as _e3d:
+                            logger.warning(f"3D 移動止損監控異常 ({symbol}): {_e3d}")
 
                     await manage_tp_ladder(exchange, symbol, side, sig, size, saved_signals, open_orders)
         # 2. 孤兒訊號清理 (倉位消失但訊號仍 active)
