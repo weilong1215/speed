@@ -1151,7 +1151,6 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
         for _, row in df_3h_closed.iterrows():
             t = int(row['ts'])          # 3H 開盤時間
             t_close = int(row['close_ts'])  # 3H 收盤時間
-            sl_reentry_ref = None
 
             # 1. 以「最新一根已收盤的 18D K 棒」高低點作為 L1 邊界
             if list_18d:
@@ -1178,44 +1177,39 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
                         l2_valid = False
                         l2_direction = ""
 
-            def _check_sl():
-                nonlocal simulated_pos, l2_valid, sl_reentry_ref, l1_valid, l1_valid_ts, l1_open_ts, l1_high, l1_low, l1_date_str
-                if not simulated_pos:
-                    return False
+            # 2. 止損檢查（持倉中才檢查；收盤進場後止損從下一根起算，故本根進場後不立刻檢查 SL）
+            sl_hit_this_bar = False
+            if simulated_pos:
                 is_sl = (l2_direction == 'LONG' and float(row['low']) <= stop_loss) or \
                         (l2_direction == 'SHORT' and float(row['high']) >= stop_loss)
-                if not is_sl:
-                    return False
-                simulated_pos = False
-                l2_valid = False
-                sl_reentry_ref = stop_loss
-                if all_historical_c2s and all_historical_c2s[-1]['status'] == 'active':
-                    all_historical_c2s[-1]['status'] = 'closed'
-                latest_18d_row = None
-                for _r in reversed(list_18d):
-                    if int(_r['close_ts']) <= t_close:
-                        latest_18d_row = _r
-                        break
-                if latest_18d_row:
-                    l1_valid = True
-                    l1_valid_ts = int(latest_18d_row['close_ts'])
-                    l1_open_ts = int(latest_18d_row['ts'])
-                    l1_high = float(latest_18d_row['high'])
-                    l1_low = float(latest_18d_row['low'])
-                    l1_date_str = pd.to_datetime(l1_open_ts, unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d')
-                else:
-                    l1_valid = False
-                return True
+                if is_sl:
+                    sl_hit_this_bar = True
+                    simulated_pos = False
+                    l2_valid = False
+                    if all_historical_c2s and all_historical_c2s[-1]['status'] == 'active':
+                        all_historical_c2s[-1]['status'] = 'closed'
+                    latest_18d_row = None
+                    for _r in reversed(list_18d):
+                        if int(_r['close_ts']) <= t_close:
+                            latest_18d_row = _r
+                            break
+                    if latest_18d_row:
+                        l1_valid = True
+                        l1_valid_ts = int(latest_18d_row['close_ts'])
+                        l1_open_ts = int(latest_18d_row['ts'])
+                        l1_high = float(latest_18d_row['high'])
+                        l1_low = float(latest_18d_row['low'])
+                        l1_date_str = pd.to_datetime(l1_open_ts, unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d')
 
-            def _try_l2():
-                nonlocal simulated_pos, l2_valid, l2_direction, entry_price, stop_loss, trigger_ts, l2_date_str, sl_reentry_ref
-                if simulated_pos or not l1_valid or t_close < l1_valid_ts:
-                    return False
+            # 3. L2 觸發：未持倉 + 前一根仍在邊界內 + 當根穿透且收盤確認
+            #    持倉中不重複進場；止損後若當根又跌破/突破邊界（前收在界內）可算新訊號
+            if not simulated_pos and l1_valid and t_close >= l1_valid_ts:
                 bar_high = float(row['high'])
                 bar_low = float(row['low'])
                 close_price = float(row['close'])
-                if sl_reentry_ref is not None:
-                    inside_ref = float(sl_reentry_ref)
+                # 止損當根再突破：用開盤價判斷是否從邊界內重新穿透；其餘用前一根收盤
+                if sl_hit_this_bar:
+                    inside_ref = float(row['open'])
                 elif prev_close is not None:
                     inside_ref = float(prev_close)
                 else:
@@ -1223,6 +1217,7 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
 
                 is_long = bar_high > l1_high and close_price > l1_high and inside_ref <= l1_high
                 is_short = bar_low < l1_low and close_price < l1_low and inside_ref >= l1_low
+
                 triggered = False
                 if is_long and not is_short:
                     l2_direction = 'LONG'
@@ -1234,27 +1229,19 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
                     entry_price = close_price
                     stop_loss = float(row['high'])
                     triggered = True
-                if not triggered:
-                    return False
 
-                simulated_pos = True
-                l2_valid = True
-                trigger_ts = int(t_close) if sl_reentry_ref is not None else int(row['ts'])
-                l2_date_str = pd.to_datetime(trigger_ts, unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d %H:%M:%S')
-                all_historical_c2s.append({
-                    'symbol': symbol, 'l1_date': l1_date_str, 'l2_date': l2_date_str,
-                    'c1_date': l2_date_str, 'c2_date': l2_date_str,
-                    'entry_price': entry_price, 'stop_loss': stop_loss, 'trigger_ts': trigger_ts,
-                    'l2_direction': l2_direction, 'precision': precision, 'l1_open_ts': l1_open_ts,
-                    'status': 'active', 'has_entered': True,
-                })
-                sl_reentry_ref = None
-                return True
-
-            # 2+3. 止損與 L2 可同根重複：進場 → 止損 → 同根再突破
-            _check_sl()
-            if _try_l2() and _check_sl():
-                _try_l2()
+                if triggered:
+                    simulated_pos = True
+                    l2_valid = True
+                    trigger_ts = int(row['ts'])
+                    l2_date_str = pd.to_datetime(trigger_ts, unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d %H:%M:%S')
+                    all_historical_c2s.append({
+                        'symbol': symbol, 'l1_date': l1_date_str, 'l2_date': l2_date_str,
+                        'c1_date': l2_date_str, 'c2_date': l2_date_str,
+                        'entry_price': entry_price, 'stop_loss': stop_loss, 'trigger_ts': trigger_ts,
+                        'l2_direction': l2_direction, 'precision': precision, 'l1_open_ts': l1_open_ts,
+                        'status': 'active', 'has_entered': True,
+                    })
 
             prev_close = float(row['close'])
 
