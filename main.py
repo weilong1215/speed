@@ -219,7 +219,7 @@ def get_exchange():
 
 
 def _bitget_ticker_hot_score(ticker):
-    """Bitget 無公開熱門榜 API；以 24h 成交額 × 波動加權近似 OKX 熱門榜。"""
+    """Bitget Open API 無 App「熱門」榜端點；以 tickers 的成交額×波動加權近似 App 熱門排序。"""
     vol = float(ticker.get('usdtVolume') or ticker.get('quoteVolume') or 0)
     chg = abs(float(ticker.get('change24h') or ticker.get('changeUtc24h') or 0))
     return vol * (1 + chg * 3)
@@ -236,7 +236,7 @@ def fetch_top_bitget_symbols(limit=10, rank_mode='volume'):
         data = res.get('data') or []
         if rank_mode == 'hot':
             sorted_data = sorted(data, key=_bitget_ticker_hot_score, reverse=True)
-            label = '熱門 (成交額×波動)'
+            label = '熱門 (Bitget tickers 成交額×波動)'
         else:
             sorted_data = sorted(data, key=lambda x: float(x.get('quoteVolume', 0) or 0), reverse=True)
             label = '成交額'
