@@ -50,8 +50,8 @@ BITGET_API_KEY = os.getenv("BITGET_API_KEY", "")
 BITGET_SECRET_KEY = os.getenv("BITGET_API_SECRET", "") or os.getenv("BITGET_SECRET_KEY", "")
 BITGET_PASSWORD = os.getenv("BITGET_API_PASSWORD", "") or os.getenv("BITGET_PASSWORD", "")
 
-# 預設 TP 參數 (5R 停利 100%)
-TP_STEP_R = 5
+# 預設 TP 參數 (10R 停利 100%)
+TP_STEP_R = 10
 TP_CLOSE_PCT = 1.0
 
 logger.info(f"✅ 系統配置檢查: TG_TOKEN={'已設定' if TG_BOT_TOKEN else '未設定'}, TG_CHAT_ID={'已設定' if TG_CHAT_ID else '未設定'}")
@@ -346,9 +346,9 @@ async def place_order(exchange, symbol, direction, entry, sl, precision, fixed_l
         if risk_per_unit == 0: return None
         qty_risk_ideal = fixed_loss_usdt / risk_per_unit
 
-        # 下單前先監測價格與歷史 K 棒是否已達到 TP1 或已達到/跌破止損
+        # 下單前先監測價格與歷史 K 棒是否已達到 10R 或已達到/跌破止損
         try:
-            tp1_price = entry + 5 * risk_per_unit if direction == 'LONG' else entry - 5 * risk_per_unit
+            tp1_price = entry + TP_STEP_R * risk_per_unit if direction == 'LONG' else entry - TP_STEP_R * risk_per_unit
             
             # L3 是 3H 棒，收盤時間為 trigger_ts + 3 小時。我們只監測信號成立收盤後的 K 棒。
             l3_close_ts = trigger_ts + 3 * 3600 * 1000 if trigger_ts > 0 else int(time.time() * 1000)
@@ -374,7 +374,7 @@ async def place_order(exchange, symbol, direction, entry, sl, precision, fixed_l
                         if c_high >= tp1_price:
                             skip_order = True
                             alert_type = "TP1"
-                            skip_reason = f"歷史 1H K 棒 ({dt_taiwan}) 最高價 {c_high:.{precision}f} 已達到/超過 TP1 停利點 ({tp1_price:.{precision}f})"
+                            skip_reason = f"歷史 1H K 棒 ({dt_taiwan}) 最高價 {c_high:.{precision}f} 已達到/超過 10R 停利點 ({tp1_price:.{precision}f})"
                             break
                         elif c_low <= sl:
                             skip_order = True
@@ -385,57 +385,15 @@ async def place_order(exchange, symbol, direction, entry, sl, precision, fixed_l
                         if c_low <= tp1_price:
                             skip_order = True
                             alert_type = "TP1"
-                            skip_reason = f"歷史 1H K 棒 ({dt_taiwan}) 最低價 {c_low:.{precision}f} 已達到/低於 TP1 停利點 ({tp1_price:.{precision}f})"
+                            skip_reason = f"歷史 1H K 棒 ({dt_taiwan}) 最低價 {c_low:.{precision}f} 已達到/低於 10R 停利點 ({tp1_price:.{precision}f})"
                             break
                         elif c_high >= sl:
                             skip_order = True
                             alert_type = "SL"
                             skip_reason = f"歷史 1H K 棒 ({dt_taiwan}) 最高價 {c_high:.{precision}f} 已達到/突破止損點 ({sl:.{precision}f})"
                             break
-                            break
-                            
-            # 2. 檢查 1D 淘汰條件 (收盤反向或跌/漲破 10MA)
-            if not skip_order:
-                try:
-                    ohlcv_1d = await exchange.fetch_ohlcv(symbol, '1d', limit=200)
-                    df_1d_eval = pd.DataFrame(ohlcv_1d, columns=['ts', 'open', 'high', 'low', 'close', 'vol'])
-                    df_1d_eval['close_ts'] = df_1d_eval['ts'] + 86400000
-                    df_1d_eval['ma_10'] = df_1d_eval['close'].rolling(window=10).mean()
-                    now_utc_1d_fl = int(time.time() * 1000)
-                    closed_1d = df_1d_eval[df_1d_eval['close_ts'] <= now_utc_1d_fl]
-                    
-                    if len(closed_1d) > 0:
-                        valid_closed = closed_1d[closed_1d['ts'] > trigger_ts]
-                        for _, c1d in valid_closed.iterrows():
-                            c_open = float(c1d['open'])
-                            c_close = float(c1d['close'])
-                            c_ma10 = float(c1d['ma_10'])
-                            dt_str = pd.to_datetime(c1d['ts'], unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d')
-                            
-                            if direction == 'LONG' and c_close <= sl:
-                                skip_order = True
-                                alert_type = "淘汰"
-                                skip_reason = f"歷史 1D線 ({dt_str}) 收盤 ({c_close:.4f}) 跌破止損 ({sl:.4f})"
-                                break
-                            elif direction == 'SHORT' and c_close >= sl:
-                                skip_order = True
-                                alert_type = "淘汰"
-                                skip_reason = f"歷史 1D線 ({dt_str}) 收盤 ({c_close:.4f}) 突破止損 ({sl:.4f})"
-                                break
-                            if direction == 'LONG' and c_close < c_ma10:
-                                skip_order = True
-                                alert_type = "淘汰"
-                                skip_reason = f"歷史 1D線 ({dt_str}) 收盤 ({c_close:.4f}) 跌破 10MA ({c_ma10:.4f})"
-                                break
-                            elif direction == 'SHORT' and c_close > c_ma10:
-                                skip_order = True
-                                alert_type = "淘汰"
-                                skip_reason = f"歷史 1D線 ({dt_str}) 收盤 ({c_close:.4f}) 漲破 10MA ({c_ma10:.4f})"
-                                break
-                except Exception as e:
-                    logger.warning(f"下單前檢查 1D 條件異常 ({symbol}): {e}")
 
-            # 3. 檢查最新 Ticker 價格
+            # 2. 檢查最新 Ticker 價格
             if not skip_order:
                 ticker = await exchange.fetch_ticker(symbol)
                 current_price = float(ticker['last'])
@@ -443,7 +401,7 @@ async def place_order(exchange, symbol, direction, entry, sl, precision, fixed_l
                     if current_price >= tp1_price:
                         skip_order = True
                         alert_type = "TP1"
-                        skip_reason = f"最新市價 {current_price:.{precision}f} 已達到/超過 TP1 停利點 ({tp1_price:.{precision}f})"
+                        skip_reason = f"最新市價 {current_price:.{precision}f} 已達到/超過 10R 停利點 ({tp1_price:.{precision}f})"
                     elif current_price <= sl:
                         skip_order = True
                         alert_type = "SL"
@@ -452,7 +410,7 @@ async def place_order(exchange, symbol, direction, entry, sl, precision, fixed_l
                     if current_price <= tp1_price:
                         skip_order = True
                         alert_type = "TP1"
-                        skip_reason = f"最新市價 {current_price:.{precision}f} 已達到/低於 TP1 停利點 ({tp1_price:.{precision}f})"
+                        skip_reason = f"最新市價 {current_price:.{precision}f} 已達到/低於 10R 停利點 ({tp1_price:.{precision}f})"
                     elif current_price >= sl:
                         skip_order = True
                         alert_type = "SL"
@@ -460,13 +418,13 @@ async def place_order(exchange, symbol, direction, entry, sl, precision, fixed_l
                         
             if skip_order:
                 logger.warning(f"⚠️ {symbol} 下單前監測觸發過期，跳過下單: {skip_reason}")
-                title = "<b>🚫 跳過自動下單 (已達TP1停利)</b>" if alert_type == "TP1" else "<b>🚫 跳過自動下單 (已達止損)</b>"
+                title = "<b>🚫 跳過自動下單 (已達10R停利)</b>" if alert_type == "TP1" else "<b>🚫 跳過自動下單 (已達止損)</b>"
                 send_telegram_message(
                     f"{title}\n\n"
                     f"💎 <b>交易對:</b> {get_base_coin(symbol)} [{direction}]\n"
                     f"🎯 進場價格: <code>{entry:.{precision}f}</code>\n"
                     f"🛑 止損價格: <code>{sl:.{precision}f}</code>\n"
-                    f"🎯 TP1價格: <code>{tp1_price:.{precision}f}</code>\n\n"
+                    f"🎯 10R價格: <code>{tp1_price:.{precision}f}</code>\n\n"
                     f"⚠️ <b>原因:</b> {skip_reason}"
                 )
                 return 'skipped'
@@ -698,7 +656,7 @@ async def _query_plan_order_status(exchange, symbol, client_oid):
 
 async def ensure_next_tp(exchange, symbol, side, sig, size, saved_signals, open_orders):
     """
-    固定 TP: 5R 平倉 100%
+    固定 TP: 10R 平倉 100%
     """
     try:
         signal_id = sig.get('signal_id', str(sig.get('timestamp')))
@@ -713,7 +671,7 @@ async def ensure_next_tp(exchange, symbol, side, sig, size, saved_signals, open_
         tp_coid = f"tp1_{signal_id}"
         stored_tp_order_id = sig.get('tp_order_id', '')
 
-        current_r_mult = 5
+        current_r_mult = TP_STEP_R
         current_close_pct = 1.0
 
         # === 情況 1: tp_order_id 有值 → 檢查該筆訂單是否還在掛單簿 ===
@@ -751,10 +709,10 @@ async def ensure_next_tp(exchange, symbol, side, sig, size, saved_signals, open_
                 if plan_status == 'executed':
                     sig['tp_order_id'] = ''
                     save_active_signals(saved_signals)
-                    logger.info(f"🎯 TP1 (5R) 確認成交 (成交量: {base_vol})，已完全平倉")
+                    logger.info(f"🎯 TP1 ({current_r_mult}R) 確認成交 (成交量: {base_vol})，已完全平倉")
 
                     send_telegram_message(
-                        f"<b>🎯 TP1 (5R) 止盈成交</b>\n\n"
+                        f"<b>🎯 TP1 ({current_r_mult}R) 止盈成交</b>\n\n"
                         f"💎 {get_base_coin(symbol)} [{direction}]\n"
                         f"📊 <b>平倉比例:</b> 100%\n"
                         f"🎉 <b>此筆交易已完結</b>"
@@ -1193,7 +1151,7 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
         for _, row in df_3h_closed.iterrows():
             t = int(row['ts'])          # 3H 開盤時間
             t_close = int(row['close_ts'])  # 3H 收盤時間
-            skip_l2_this_bar = False
+            sl_reentry_ref = None
 
             # 1. 以「最新一根已收盤的 18D K 棒」高低點作為 L1 邊界
             if list_18d:
@@ -1220,47 +1178,51 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
                         l2_valid = False
                         l2_direction = ""
 
-            # 2. 止損檢查
-            if simulated_pos:
-                is_sl = False
-                if l2_direction == 'LONG' and float(row['low']) <= stop_loss:
-                    is_sl = True
-                elif l2_direction == 'SHORT' and float(row['high']) >= stop_loss:
-                    is_sl = True
-                    
-                if is_sl:
-                    simulated_pos = False
-                    l2_valid = False
-                    skip_l2_this_bar = True
-                    if all_historical_c2s and all_historical_c2s[-1]['status'] == 'active':
-                        all_historical_c2s[-1]['status'] = 'closed'
-                    
-                    # 止損後，重新以最新已收盤 18D 作為 L1 邊界
-                    latest_18d_row = None
-                    for _r in reversed(list_18d):
-                        if int(_r['close_ts']) <= t_close:
-                            latest_18d_row = _r
-                            break
-                    if latest_18d_row:
-                        l1_valid = True
-                        l1_valid_ts = int(latest_18d_row['close_ts'])
-                        l1_open_ts = int(latest_18d_row['ts'])
-                        l1_high = float(latest_18d_row['high'])
-                        l1_low = float(latest_18d_row['low'])
-                        l1_date_str = pd.to_datetime(l1_open_ts, unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d')
-                    else:
-                        l1_valid = False
+            def _check_sl():
+                nonlocal simulated_pos, l2_valid, sl_reentry_ref, l1_valid, l1_valid_ts, l1_open_ts, l1_high, l1_low, l1_date_str
+                if not simulated_pos:
+                    return False
+                is_sl = (l2_direction == 'LONG' and float(row['low']) <= stop_loss) or \
+                        (l2_direction == 'SHORT' and float(row['high']) >= stop_loss)
+                if not is_sl:
+                    return False
+                simulated_pos = False
+                l2_valid = False
+                sl_reentry_ref = stop_loss
+                if all_historical_c2s and all_historical_c2s[-1]['status'] == 'active':
+                    all_historical_c2s[-1]['status'] = 'closed'
+                latest_18d_row = None
+                for _r in reversed(list_18d):
+                    if int(_r['close_ts']) <= t_close:
+                        latest_18d_row = _r
+                        break
+                if latest_18d_row:
+                    l1_valid = True
+                    l1_valid_ts = int(latest_18d_row['close_ts'])
+                    l1_open_ts = int(latest_18d_row['ts'])
+                    l1_high = float(latest_18d_row['high'])
+                    l1_low = float(latest_18d_row['low'])
+                    l1_date_str = pd.to_datetime(l1_open_ts, unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d')
+                else:
+                    l1_valid = False
+                return True
 
-            # 3. L2 觸發：當根 K 棒穿透 18D 邊界且收盤確認，且前一根收盤仍在邊界內（避免已突破後每根重複觸發）
-            if not skip_l2_this_bar and not simulated_pos and l1_valid and t_close >= l1_valid_ts:
+            def _try_l2():
+                nonlocal simulated_pos, l2_valid, l2_direction, entry_price, stop_loss, trigger_ts, l2_date_str, sl_reentry_ref
+                if simulated_pos or not l1_valid or t_close < l1_valid_ts:
+                    return False
                 bar_high = float(row['high'])
                 bar_low = float(row['low'])
                 close_price = float(row['close'])
-                inside_ref = float(prev_close) if prev_close is not None else float(row['open'])
+                if sl_reentry_ref is not None:
+                    inside_ref = float(sl_reentry_ref)
+                elif prev_close is not None:
+                    inside_ref = float(prev_close)
+                else:
+                    inside_ref = float(row['open'])
 
                 is_long = bar_high > l1_high and close_price > l1_high and inside_ref <= l1_high
                 is_short = bar_low < l1_low and close_price < l1_low and inside_ref >= l1_low
-                
                 triggered = False
                 if is_long and not is_short:
                     l2_direction = 'LONG'
@@ -1272,28 +1234,27 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
                     entry_price = close_price
                     stop_loss = float(row['high'])
                     triggered = True
-                    
-                if triggered:
-                    # 進場在 3H 收盤價；止損從下一根 K 棒起監控（同根 high/low 必含 SL 價，不能當立即止損）
-                    simulated_pos = True
-                    l2_valid = True
-                    trigger_ts = int(row['ts'])
-                    l2_date_str = pd.to_datetime(trigger_ts, unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d %H:%M:%S')
-                    
-                    all_historical_c2s.append({
-                        'symbol':       symbol,
-                        'l1_date':      l1_date_str,
-                        'l2_date':      l2_date_str,
-                        'c1_date':      l2_date_str,
-                        'c2_date':      l2_date_str,
-                        'entry_price':  entry_price,
-                        'stop_loss':    stop_loss,
-                        'trigger_ts':   trigger_ts,
-                        'l2_direction': l2_direction,
-                        'precision':    precision,
-                        'l1_open_ts':   l1_open_ts,
-                        'status':       'active'
-                    })
+                if not triggered:
+                    return False
+
+                simulated_pos = True
+                l2_valid = True
+                trigger_ts = int(t_close) if sl_reentry_ref is not None else int(row['ts'])
+                l2_date_str = pd.to_datetime(trigger_ts, unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d %H:%M:%S')
+                all_historical_c2s.append({
+                    'symbol': symbol, 'l1_date': l1_date_str, 'l2_date': l2_date_str,
+                    'c1_date': l2_date_str, 'c2_date': l2_date_str,
+                    'entry_price': entry_price, 'stop_loss': stop_loss, 'trigger_ts': trigger_ts,
+                    'l2_direction': l2_direction, 'precision': precision, 'l1_open_ts': l1_open_ts,
+                    'status': 'active', 'has_entered': True,
+                })
+                sl_reentry_ref = None
+                return True
+
+            # 2+3. 止損與 L2 可同根重複：進場 → 止損 → 同根再突破
+            _check_sl()
+            if _try_l2() and _check_sl():
+                _try_l2()
 
             prev_close = float(row['close'])
 
@@ -1819,6 +1780,7 @@ async def run_scan():
                 item_copy = item.copy()
                 item_copy['_hist_id'] = hist_id
                 item_copy['status'] = new_status
+                item_copy['has_entered'] = True
                 history_signals[base].append(item_copy)
             else:
                 # 同步狀態：若是 closed 則必定覆蓋；若是 active 則覆蓋舊版的 triggered/missed
@@ -1827,6 +1789,7 @@ async def run_scan():
                 elif new_status == 'active' and existing.get('status') in ['triggered', 'missed']:
                     existing['status'] = 'active'
                 # 每輪掃描都刷新 current_price，確保 RR 計算準確
+                existing['has_entered'] = True
                 cp = item.get('current_price')
                 if cp:
                     existing['current_price'] = cp
@@ -2126,26 +2089,20 @@ HTML_TEMPLATE = """
         if (cp) sigs.forEach(s => { if (!s.current_price) s.current_price = cp; });
       });
       
-      let enteredSigs = 0;
-      let closedEnteredSigs = 0;
-      let waitingSigs = 0;
+      let activeSigs = 0;
+      let closedSigs = 0;
       let totalRR = 0;
       Object.values(allData).forEach(sigs => {
           sigs.forEach(s => {
-              if (s.has_entered) {
-                  enteredSigs++;
-                  if (s.status === 'closed') {
-                      closedEnteredSigs++;
-                  }
+              if (s.status === 'closed') {
+                  closedSigs++;
               } else if (s.status === 'active' || s.status === 'missed') {
-                  waitingSigs++;
+                  activeSigs++;
               }
-          });
-          sigs.filter(s => (s.status === 'active' || s.status === 'missed') && s.has_entered).forEach(s => {
               const entry = parseFloat(s.entry_price);
               const sl = parseFloat(s.stop_loss);
               const cp = parseFloat(s.current_price || entry);
-              if (entry > 0 && sl > 0 && Math.abs(entry - sl) > 0) {
+              if (entry > 0 && sl > 0 && Math.abs(entry - sl) > 0 && (s.status === 'active' || s.status === 'missed')) {
                   const risk = Math.abs(entry - sl);
                   let rr = 0;
                   if (s.l2_direction === 'LONG') rr = (cp - entry) / risk;
@@ -2154,15 +2111,15 @@ HTML_TEMPLATE = """
               }
           });
       });
-      const winRate = enteredSigs > 0 ? ((enteredSigs - closedEnteredSigs) / enteredSigs * 100).toFixed(1) : 0;
+      const totalSigs = activeSigs + closedSigs;
+      const winRate = totalSigs > 0 ? ((totalSigs - closedSigs) / totalSigs * 100).toFixed(1) : 0;
       const rrText = totalRR >= 0 ? `+${totalRR.toFixed(2)}` : `${totalRR.toFixed(2)}`;
       const rrColor = totalRR >= 0 ? '#3fb950' : '#f85149';
       
       document.getElementById('global-stats').innerHTML = `
-        <span>📊 實際進場：<strong style="color:#c9d1d9">${enteredSigs}</strong></span>
-        <span>⏳ 等待進場：<strong style="color:#e3b341">${waitingSigs}</strong></span>
-        <span>❌ 止損/失效 (已進場)：<strong style="color:#f85149">${closedEnteredSigs}</strong></span>
-        <span>🏆 勝率 (已進場)：<strong style="color:#3fb950">${winRate}%</strong></span>
+        <span>📊 有效訊號：<strong style="color:#3fb950">${activeSigs}</strong></span>
+        <span>❌ 已止損/失效：<strong style="color:#f85149">${closedSigs}</strong></span>
+        <span>🏆 勝率：<strong style="color:#3fb950">${winRate}%</strong></span>
         <span>💰 有效總 RR：<strong style="color:${rrColor}">${rrText}</strong></span>
       `;
       
@@ -2248,7 +2205,7 @@ HTML_TEMPLATE = """
           <div class="card-title">
             <span style="color:#58a6ff;font-weight:600;font-size:0.95rem;">${sig._base}</span>
             <span class="dir-badge ${dir}">${dirText}</span>
-            <span class="status-badge active">有效/未止損</span>
+            <span class="status-badge active">有效</span>
             <span style="font-size:0.85rem;font-weight:700;color:${rrCol};margin-left:auto;">${rrStr}</span>
           </div>
           <div class="card-time">突破進場：${fmt(sig.l2_date)}</div>
@@ -2310,7 +2267,7 @@ HTML_TEMPLATE = """
       const dir = sig.l2_direction || 'LONG';
       const status = sig.status || 'unknown';
       const dirText = dir === 'LONG' ? '▲ LONG' : '▼ SHORT';
-      const statusMap = { active: '有效/未止損', closed: '已失效/止損', missed: '有效/未止損', triggered: '歷史紀錄' };
+      const statusMap = { active: '有效', closed: '已失效/止損', missed: '有效', triggered: '歷史紀錄' };
       const statusText = statusMap[status] || status;
       const prec = sig.precision || 4;
 
