@@ -366,7 +366,7 @@ def compose_3h_bars(ohlcv_1h):
 # ============================================================================
 
 async def check_signal_expired(exchange, symbol, direction, entry, sl, precision, trigger_ts, expire_r=None):
-    """檢查訊號是否已過期（價格已達 expire_r*R 或止損）。下單前與掛單中撤單共用。"""
+    """檢查訊號是否已過期（價格已達 expire_r*R 或觸發保護止損）。下單前與掛單中撤單共用。"""
     if expire_r is None:
         expire_r = TP_EXPIRE_R
     risk_per_unit = abs(entry - sl)
@@ -390,12 +390,12 @@ async def check_signal_expired(exchange, symbol, direction, entry, sl, precision
                 if c_high >= tp_price:
                     return True, f"歷史 1H K 棒 ({dt_taiwan}) 最高價 {c_high:.{precision}f} 已達到/超過 {expire_r}R 停利點 ({tp_price:.{precision}f})", 'TP'
                 if c_low <= sl:
-                    return True, f"歷史 1H K 棒 ({dt_taiwan}) 最低價 {c_low:.{precision}f} 已達到/跌破止損點 ({sl:.{precision}f})", 'SL'
+                    return True, f"歷史 1H K 棒 ({dt_taiwan}) 最低價 {c_low:.{precision}f} 已觸發保護止損 ({sl:.{precision}f})", 'PSL'
             else:
                 if c_low <= tp_price:
                     return True, f"歷史 1H K 棒 ({dt_taiwan}) 最低價 {c_low:.{precision}f} 已達到/低於 {expire_r}R 停利點 ({tp_price:.{precision}f})", 'TP'
                 if c_high >= sl:
-                    return True, f"歷史 1H K 棒 ({dt_taiwan}) 最高價 {c_high:.{precision}f} 已達到/突破止損點 ({sl:.{precision}f})", 'SL'
+                    return True, f"歷史 1H K 棒 ({dt_taiwan}) 最高價 {c_high:.{precision}f} 已觸發保護止損 ({sl:.{precision}f})", 'PSL'
 
         ticker = await exchange.fetch_ticker(symbol)
         current_price = float(ticker['last'])
@@ -403,18 +403,19 @@ async def check_signal_expired(exchange, symbol, direction, entry, sl, precision
             if current_price >= tp_price:
                 return True, f"最新市價 {current_price:.{precision}f} 已達到/超過 {expire_r}R 停利點 ({tp_price:.{precision}f})", 'TP'
             if current_price <= sl:
-                return True, f"最新市價 {current_price:.{precision}f} 已達到/跌破止損點 ({sl:.{precision}f})", 'SL'
+                return True, f"最新市價 {current_price:.{precision}f} 已觸發保護止損 ({sl:.{precision}f})", 'PSL'
         else:
             if current_price <= tp_price:
                 return True, f"最新市價 {current_price:.{precision}f} 已達到/低於 {expire_r}R 停利點 ({tp_price:.{precision}f})", 'TP'
             if current_price >= sl:
-                return True, f"最新市價 {current_price:.{precision}f} 已達到/突破止損點 ({sl:.{precision}f})", 'SL'
+                return True, f"最新市價 {current_price:.{precision}f} 已觸發保護止損 ({sl:.{precision}f})", 'PSL'
     except Exception as e:
         logger.warning(f"  過期檢查異常 ({symbol}): {e}")
     return False, "", ""
 
 
-async def place_order(exchange, symbol, direction, entry, sl, precision, fixed_loss_usdt, trigger_ts, l1_high=0.0, l1_low=0.0, l1_open_ts=0):
+async def place_order(exchange, symbol, direction, entry, sl, precision, fixed_loss_usdt, trigger_ts,
+                      l1_high=0.0, l1_low=0.0, l1_open_ts=0, l1_date='', l2_date=''):
     """
     執行下單：Limit Order + 分層槓桿策略 (MAX → 20x → 10x)
 
@@ -433,12 +434,17 @@ async def place_order(exchange, symbol, direction, entry, sl, precision, fixed_l
         if expired:
             tp_price = entry + TP_EXPIRE_R * risk_per_unit if direction == 'LONG' else entry - TP_EXPIRE_R * risk_per_unit
             logger.warning(f"⚠️ {symbol} 下單前監測觸發過期，跳過下單: {skip_reason}")
-            title = f"<b>🚫 跳過自動下單 (已達{TP_EXPIRE_R}R停利)</b>" if alert_type == 'TP' else "<b>🚫 跳過自動下單 (已達止損)</b>"
+            if alert_type == 'TP':
+                title = f"<b>🚫 跳過自動下單 (已達{TP_EXPIRE_R}R停利)</b>"
+            elif alert_type == 'PSL':
+                title = "<b>🚫 跳過自動下單 (已觸發保護止損)</b>"
+            else:
+                title = "<b>🚫 跳過自動下單</b>"
             send_telegram_message(
                 f"{title}\n\n"
                 f"💎 <b>交易對:</b> {get_base_coin(symbol)} [{direction}]\n"
                 f"🎯 進場價格: <code>{entry:.{precision}f}</code>\n"
-                f"🛑 止損價格: <code>{sl:.{precision}f}</code>\n"
+                f"🛡️ 保護止損: <code>{sl:.{precision}f}</code>\n"
                 f"🎯 {TP_EXPIRE_R}R價格: <code>{tp_price:.{precision}f}</code>\n\n"
                 f"⚠️ <b>原因:</b> {skip_reason}"
             )
@@ -583,14 +589,17 @@ async def place_order(exchange, symbol, direction, entry, sl, precision, fixed_l
                     'original_sl_price': sl,
                     'status': 'active', 'precision': precision, 'tp_stage': 0,
                     'l1_high': l1_high, 'l1_low': l1_low, 'l1_open_ts': l1_open_ts,
+                    'l1_date': l1_date, 'l2_date': l2_date,
                     'timestamp': trigger_ts if trigger_ts > 0 else int(time.time() * 1000)
                 })
                 save_active_signals(signals)
+                l2_display = l2_date or (pd.to_datetime(trigger_ts, unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d %H:%M:%S') if trigger_ts > 0 else '未知')
                 send_telegram_message(
                     f"<b>🤖 自動下單 ({leverage}x)</b>\n\n"
                     f"💎 {get_base_coin(symbol)} [{direction}]\n"
+                    f"📅 L2 (3H): <code>{l2_display}</code>\n"
                     f"🎯 進場: <code>{entry:.{precision}f}</code>\n"
-                    f"🛑 止損: <code>{sl:.{precision}f}</code>"
+                    f"🛡️ 保護止損: <code>{sl:.{precision}f}</code>"
                 )
                 return order
 
@@ -967,7 +976,12 @@ async def monitor_positions(exchange):
                                 open_orders = [o for o in open_orders if o['id'] != eo['id']]
                             except Exception as e:
                                 logger.warning(f"撤銷未成交單失敗 {eo['id']}: {e}")
-                        title = f"已達{TP_EXPIRE_R}R停利" if alert_type == 'TP' else "已達止損"
+                        if alert_type == 'TP':
+                            title = f"已達{TP_EXPIRE_R}R停利"
+                        elif alert_type == 'PSL':
+                            title = "已觸發保護止損"
+                        else:
+                            title = "訊號已過期"
                         send_telegram_message(
                             f"<b>🚫 訊號已淘汰 (撤銷進場)</b>\n\n"
                             f"💎 <b>交易對:</b> {get_base_coin(symbol)} [{direction}]\n"
@@ -1252,7 +1266,7 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
                 'action':              action,           # 'update' or 'keep'
                 'data':                {'ts': cache_ts},
                 'is_trigger_met':      False,
-                'is_watchlist_eligible': True,
+                'is_watchlist_eligible': False,
                 'entry_price':         0.0,
                 'stop_loss':           0.0,
                 'trigger_ts':          0,
@@ -1301,27 +1315,28 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
 # ============================================================================
 
 def send_grouped_message(item_list, title):
-    """合併傳入的幣種清單為一則群組訊息，按日期排列"""
+    """合併傳入的幣種清單為一則群組訊息，按 L2 (3H 突破) 日期排列"""
     if not item_list:
         return
 
-    filtered_items = [item for item in item_list if item.get('l2_date') not in (None, '未知', '未知日期', '') or item.get('c1_date') not in (None, '未知', '未知日期', '') or item.get('c2_date') not in (None, '未知', '未知日期', '')]
-        
+    filtered_items = []
+    for item in item_list:
+        l2 = item.get('l2_date', '')
+        if not l2 or l2 in ('未知', '未知日期', ''):
+            ts = item.get('trigger_ts', 0)
+            if ts > 0:
+                l2 = pd.to_datetime(ts, unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d %H:%M:%S')
+        if l2 and l2 not in ('未知', '未知日期', '', '外部建倉', '持續追蹤'):
+            item = dict(item)
+            item['l2_date'] = l2
+            filtered_items.append(item)
+
     if not filtered_items:
         return
 
     date_groups = {}
     for item in filtered_items:
-        if title in ('🛑 <b>加密貨幣[未上車]</b>', '💼 <b>加密貨幣[持倉中]</b>'):
-            raw_date = item.get('c2_date')
-            if not raw_date or raw_date in ('未知', '未知日期', ''):
-                raw_date = item.get('c1_date', '')
-        else:
-            raw_date = item.get('c1_date')
-            if not raw_date or raw_date in ('未知', '未知日期', ''):
-                raw_date = item.get('l2_date', '')
-                
-        # 只截取前 10 碼 YYYY-MM-DD，不要具體時間
+        raw_date = item.get('l2_date', '')
         d = raw_date[:10] if len(raw_date) >= 10 else raw_date
         if d not in date_groups:
             date_groups[d] = []
@@ -1347,15 +1362,15 @@ def send_grouped_message(item_list, title):
     send_telegram_message("\n".join(lines))
 
 def send_triggered_message(item, default_loss):
-    """3H 已成立的幣種，獨立一則訊息，含倉位價值與成立日期"""
+    """3H 已成立的幣種，獨立一則訊息，含倉位價值與 L2 日期"""
     display_symbol = get_base_coin(item['symbol'])
     precision = item['precision']
     entry = item['entry_price']
     sl = item['stop_loss']
     l1_d = item.get('l1_date', '未知')
     l2_d = item.get('l2_date', '未知')
-    l3_d = item.get('c2_date', '未知')
-    c1_d = item.get('c1_date', '未知')
+    if (not l2_d or l2_d == '未知') and item.get('trigger_ts', 0) > 0:
+        l2_d = pd.to_datetime(item['trigger_ts'], unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d %H:%M:%S')
     direction = item.get('l2_direction', '')
     dir_icon = "🟢" if direction == "LONG" else "🔴" if direction == "SHORT" else ""
 
@@ -1363,13 +1378,11 @@ def send_triggered_message(item, default_loss):
     position_value = default_loss / loss_pct if loss_pct > 0 else 0
 
     msg = (
-        f"{dir_icon} 💎 <b>交易對:</b> {display_symbol}\n\n"
-        f"📅 <b>L1 (18日) 日期:</b> <code>{l1_d}</code>\n"
-        f"📅 <b>L2 (1日) 日期:</b> <code>{l2_d}</code>\n"
-        f"📅 <b>L3 成立時間:</b> <code>{c1_d}</code>\n"
-        f"📅 <b>回踩進場時間:</b> <code>{l3_d}</code>\n"
+        f"{dir_icon} 💎 <b>交易對:</b> {display_symbol} [{direction}]\n\n"
+        f"📅 <b>L1 (18D) 邊界:</b> <code>{l1_d}</code>\n"
+        f"📅 <b>L2 (3H) 突破進場:</b> <code>{l2_d}</code>\n"
         f"📍 <b>進場價格:</b> <code>{entry:.{precision}f}</code>\n"
-        f"🛡️ <b>止損價格:</b> <code>{sl:.{precision}f}</code>\n"
+        f"🛡️ <b>保護止損:</b> <code>{sl:.{precision}f}</code>\n"
         f"💰 <b>倉位價值:</b> <code>{position_value:.2f} USDT</code>"
     )
     send_telegram_message(msg)
@@ -1631,11 +1644,11 @@ async def run_scan():
                 if s['status'] == 'active':
                     sym = s['symbol']
                     ts = s.get('timestamp', 0)
-                    dt_str = pd.to_datetime(ts, unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d %H:%M:%S') if ts > 0 else '持續追蹤'
-                    # 保留完整欄位，讓 history_signals 能正確顯示 entry/sl/RR
+                    l2_date = s.get('l2_date', '')
+                    if not l2_date and ts > 0:
+                        l2_date = pd.to_datetime(ts, unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d %H:%M:%S')
                     holding_map[sym] = {
                         'symbol':        sym,
-                        'c2_date':       dt_str,
                         'l2_direction':  s.get('direction', ''),
                         'entry_price':   s.get('entry_price', 0.0),
                         'stop_loss':     s.get('original_sl_price', s.get('sl_price', 0.0)),
@@ -1643,18 +1656,16 @@ async def run_scan():
                         'trigger_ts':    ts,
                         'l1_open_ts':    s.get('l1_open_ts', 0),
                         'l1_date':       s.get('l1_date', ''),
-                        'l2_date':       s.get('l2_date', ''),
-                        'c1_date':       s.get('c1_date', ''),
+                        'l2_date':       l2_date,
                         'status':        'active',
                     }
-                    
+
         for p in existing_positions:
             sym = p['symbol']
             if sym not in holding_map:
-                holding_map[sym] = {'symbol': sym, 'c2_date': '外部建倉', 'l2_direction': p['side'].upper(), 'status': 'active'}
+                holding_map[sym] = {'symbol': sym, 'l2_direction': p['side'].upper(), 'status': 'active'}
 
         holding_items = []
-        real_watching = []
         real_new_triggers = []
         missed_items = []
 
@@ -1684,8 +1695,6 @@ async def run_scan():
                     missed_items.append(item)
                 else:
                     real_new_triggers.append(item)
-            else:
-                real_watching.append(item)
 
         holding_items = list(holding_items_dict.values())
 
@@ -1696,7 +1705,8 @@ async def run_scan():
                 order = await place_order(
                     ex, sym, item.get('l2_direction', 'LONG'), item['entry_price'], item['stop_loss'],
                     item['precision'], default_loss, item.get('trigger_ts', 0),
-                    l1_high=item.get('l1_high', 0.0), l1_low=item.get('l1_low', 0.0), l1_open_ts=item.get('l1_open_ts', 0)
+                    l1_high=item.get('l1_high', 0.0), l1_low=item.get('l1_low', 0.0), l1_open_ts=item.get('l1_open_ts', 0),
+                    l1_date=item.get('l1_date', ''), l2_date=item.get('l2_date', '')
                 )
                 if order == 'skipped':
                     # 標記為錯失並更新 last_trigger_ts，防止重複下單與警報
@@ -1763,20 +1773,17 @@ async def run_scan():
             
         if holding_items:
             send_grouped_message(holding_items, "💼 <b>加密貨幣[持倉中]</b>")
-            
-        if real_watching:
-            send_grouped_message(real_watching, "👀 <b>加密貨幣[關注中]</b>")
-            
+
         if missed_items:
             send_grouped_message(missed_items, "🛑 <b>加密貨幣[未上車]</b>")
 
         active_count = len(watchlist)
-        logger.info(f"✅ 掃描完成。新觸發: {len(real_new_triggers)} / 持倉: {len(holding_items)} / 持倉新訊號: {len(real_holding_new_triggers)} / 關注: {len(real_watching)} / 未上車: {len(missed_items)} / 追蹤總數: {active_count}")
+        logger.info(f"✅ 掃描完成。新觸發: {len(real_new_triggers)} / 持倉: {len(holding_items)} / 持倉新訊號: {len(real_holding_new_triggers)} / 未上車: {len(missed_items)} / 追蹤總數: {active_count}")
 
-        if not real_new_triggers and not holding_items and not real_watching and not missed_items:
-            send_telegram_message(f"✅ <b>條件掃描完成</b>\n本次共掃描 {total_coins} 個幣種，無滿足條件標的。\n(當前清單追蹤中: {active_count} 個)")
+        if not real_new_triggers and not holding_items and not missed_items:
+            send_telegram_message(f"✅ <b>條件掃描完成</b>\n本次共掃描 {total_coins} 個幣種，無滿足條件標的。\n(當前追蹤觸發訊號: {active_count} 個)")
 
-        if real_new_triggers or holding_items or real_watching or real_holding_new_triggers or missed_items:
+        if real_new_triggers or holding_items or real_holding_new_triggers or missed_items:
             send_system_settings_message(config)
     finally:
         await ex.close()
