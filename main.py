@@ -785,6 +785,7 @@ async def manage_tp_ladder(exchange, symbol, side, sig, size, saved_signals, ope
             return
 
         tp_price = entry + r_mult * risk if direction == 'LONG' else entry - r_mult * risk
+        tp_price = max(10 ** -precision, tp_price)
         tp_price = round(tp_price, precision)
         tp_qty = float(exchange.amount_to_precision(symbol, size * close_pct))
 
@@ -1245,15 +1246,27 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
 
                 triggered = False
                 if is_long and not is_short:
-                    l2_direction = 'LONG'
-                    entry_price = close_price
-                    stop_loss = float(row['low'])
-                    triggered = True
+                    tmp_entry = close_price
+                    tmp_sl = float(row['low'])
+                    sl_pct = abs(tmp_entry - tmp_sl) / tmp_entry if tmp_entry > 0 else 0
+                    if sl_pct <= 0.10:
+                        l2_direction = 'LONG'
+                        entry_price = tmp_entry
+                        stop_loss = tmp_sl
+                        triggered = True
+                    else:
+                        logger.info(f"  🔎 {symbol} 多單止損比例 {sl_pct*100:.1f}% > 10% 視為不成立，繼續尋找")
                 elif is_short and not is_long:
-                    l2_direction = 'SHORT'
-                    entry_price = close_price
-                    stop_loss = float(row['high'])
-                    triggered = True
+                    tmp_entry = close_price
+                    tmp_sl = float(row['high'])
+                    sl_pct = abs(tmp_entry - tmp_sl) / tmp_entry if tmp_entry > 0 else 0
+                    if sl_pct <= 0.05:
+                        l2_direction = 'SHORT'
+                        entry_price = tmp_entry
+                        stop_loss = tmp_sl
+                        triggered = True
+                    else:
+                        logger.info(f"  🔎 {symbol} 空單止損比例 {sl_pct*100:.1f}% > 5% 視為不成立，繼續尋找")
 
                 if triggered:
                     simulated_pos = True
