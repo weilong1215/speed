@@ -1187,6 +1187,7 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
         trigger_ts = 0
         simulated_pos = False
         all_historical_c2s = []
+        prev_close = None
 
         # 主迴圈：以 3H 推進
         for _, row in df_3h_closed.iterrows():
@@ -1250,11 +1251,15 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
                     else:
                         l1_valid = False
 
-            # 3. L2 觸發邏輯 (3H 收盤突破/跌破 18D 高低點)
+            # 3. L2 觸發：當根 K 棒穿透 18D 邊界且收盤確認，且前一根收盤仍在邊界內（避免已突破後每根重複觸發）
             if not skip_l2_this_bar and not simulated_pos and l1_valid and t_close >= l1_valid_ts:
+                bar_high = float(row['high'])
+                bar_low = float(row['low'])
                 close_price = float(row['close'])
-                is_long = close_price > l1_high
-                is_short = close_price < l1_low
+                inside_ref = float(prev_close) if prev_close is not None else float(row['open'])
+
+                is_long = bar_high > l1_high and close_price > l1_high and inside_ref <= l1_high
+                is_short = bar_low < l1_low and close_price < l1_low and inside_ref >= l1_low
                 
                 triggered = False
                 if is_long and not is_short:
@@ -1289,6 +1294,8 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
                         'l1_open_ts':   l1_open_ts,
                         'status':       'active'
                     })
+
+            prev_close = float(row['close'])
 
         current_price = float(df_1d['close'].iloc[-1]) if not df_1d.empty else 0.0
         for c2 in all_historical_c2s:
@@ -2119,30 +2126,21 @@ HTML_TEMPLATE = """
         if (cp) sigs.forEach(s => { if (!s.current_price) s.current_price = cp; });
       });
       
-      let totalSigs = 0;
-      let closedSigs = 0;
-      let totalRR = 0;
-      Object.values(allData).forEach(sigs => {
-      let totalSigs = 0;
       let enteredSigs = 0;
       let closedEnteredSigs = 0;
       let waitingSigs = 0;
       let totalRR = 0;
       Object.values(allData).forEach(sigs => {
-          totalSigs += sigs.length;
           sigs.forEach(s => {
               if (s.has_entered) {
                   enteredSigs++;
                   if (s.status === 'closed') {
                       closedEnteredSigs++;
                   }
-              } else {
-                  if (s.status === 'active') {
-                      waitingSigs++;
-                  }
+              } else if (s.status === 'active' || s.status === 'missed') {
+                  waitingSigs++;
               }
           });
-          
           sigs.filter(s => (s.status === 'active' || s.status === 'missed') && s.has_entered).forEach(s => {
               const entry = parseFloat(s.entry_price);
               const sl = parseFloat(s.stop_loss);
