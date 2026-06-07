@@ -142,7 +142,7 @@ def load_config():
             if "blacklist" not in config:
                 config["blacklist"] = ["XAUT", "PAXG", "TQQQ", "SQQQ"]
             config.setdefault("coin_rank_mode", "hot")
-            config.setdefault("top_coins_count", 10)
+            config.setdefault("top_coins_count", 20)
             return config
         except Exception as e:
             logger.error(f"讀取設定檔失敗: {e}")
@@ -151,7 +151,7 @@ def load_config():
         "loss_pct": 2,
         "blacklist": ["XAUT", "PAXG", "TQQQ", "SQQQ"],
         "coin_rank_mode": "hot",
-        "top_coins_count": 10,
+        "top_coins_count": 20,
     }
 
 def save_config(data):
@@ -225,7 +225,7 @@ def _bitget_ticker_hot_score(ticker):
     return vol * (1 + chg * 3)
 
 
-def fetch_top_bitget_symbols(limit=10, rank_mode='volume'):
+def fetch_top_bitget_symbols(limit=20, rank_mode='volume'):
     """從 Bitget USDT 永續 tickers 取 Top N。rank_mode: volume | hot"""
     try:
         url = 'https://api.bitget.com/api/v2/mix/market/tickers?productType=USDT-FUTURES'
@@ -1527,7 +1527,7 @@ async def run_scan():
     try:
         try:
             rank_mode = config.get('coin_rank_mode', 'hot')
-            top_n = int(config.get('top_coins_count', 10))
+            top_n = int(config.get('top_coins_count', 20))
             top_symbols = fetch_top_bitget_symbols(limit=top_n, rank_mode=rank_mode)
 
             markets = await ex.load_markets()
