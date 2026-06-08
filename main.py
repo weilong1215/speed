@@ -371,6 +371,9 @@ async def check_signal_expired(exchange, symbol, direction, entry, sl, precision
         except Exception as e:
             logger.warning(f"  過期檢查(1D止損)異常 ({symbol}): {e}")
 
+    if dynamic_sl != sl:
+        return True, f"已產生移動保護止損 (原: {sl:.{precision}f} -> 新: {dynamic_sl:.{precision}f})", 'PSL'
+
     tp_price = entry + expire_r * risk_per_unit if direction == 'LONG' else entry - expire_r * risk_per_unit
     l3_close_ts = trigger_ts + 3 * 3600 * 1000 if trigger_ts > 0 else int(time.time() * 1000)
     since_ts = l3_close_ts - 5 * 60 * 1000
@@ -387,26 +390,26 @@ async def check_signal_expired(exchange, symbol, direction, entry, sl, precision
             if direction == 'LONG':
                 if c_high >= tp_price:
                     return True, f"歷史 1H K 棒 ({dt_taiwan}) 最高價 {c_high:.{precision}f} 已達到/超過 {expire_r}R 停利點 ({tp_price:.{precision}f})", 'TP'
-                if c_low <= dynamic_sl:
-                    return True, f"歷史 1H K 棒 ({dt_taiwan}) 最低價 {c_low:.{precision}f} 已觸發保護止損 ({dynamic_sl:.{precision}f})", 'PSL'
+                if c_low <= sl:
+                    return True, f"歷史 1H K 棒 ({dt_taiwan}) 最低價 {c_low:.{precision}f} 已觸發初始止損 ({sl:.{precision}f})", 'PSL'
             else:
                 if c_low <= tp_price:
                     return True, f"歷史 1H K 棒 ({dt_taiwan}) 最低價 {c_low:.{precision}f} 已達到/低於 {expire_r}R 停利點 ({tp_price:.{precision}f})", 'TP'
-                if c_high >= dynamic_sl:
-                    return True, f"歷史 1H K 棒 ({dt_taiwan}) 最高價 {c_high:.{precision}f} 已觸發保護止損 ({dynamic_sl:.{precision}f})", 'PSL'
+                if c_high >= sl:
+                    return True, f"歷史 1H K 棒 ({dt_taiwan}) 最高價 {c_high:.{precision}f} 已觸發初始止損 ({sl:.{precision}f})", 'PSL'
 
         ticker = await exchange.fetch_ticker(symbol)
         current_price = float(ticker['last'])
         if direction == 'LONG':
             if current_price >= tp_price:
                 return True, f"最新市價 {current_price:.{precision}f} 已達到/超過 {expire_r}R 停利點 ({tp_price:.{precision}f})", 'TP'
-            if current_price <= dynamic_sl:
-                return True, f"最新市價 {current_price:.{precision}f} 已觸發保護止損 ({dynamic_sl:.{precision}f})", 'PSL'
+            if current_price <= sl:
+                return True, f"最新市價 {current_price:.{precision}f} 已觸發初始止損 ({sl:.{precision}f})", 'PSL'
         else:
             if current_price <= tp_price:
                 return True, f"最新市價 {current_price:.{precision}f} 已達到/低於 {expire_r}R 停利點 ({tp_price:.{precision}f})", 'TP'
-            if current_price >= dynamic_sl:
-                return True, f"最新市價 {current_price:.{precision}f} 已觸發保護止損 ({dynamic_sl:.{precision}f})", 'PSL'
+            if current_price >= sl:
+                return True, f"最新市價 {current_price:.{precision}f} 已觸發初始止損 ({sl:.{precision}f})", 'PSL'
     except Exception as e:
         logger.warning(f"  過期檢查異常 ({symbol}): {e}")
     return False, "", ""
@@ -1568,8 +1571,8 @@ async def run_scan():
         try:
             rank_mode = config.get('coin_rank_mode', 'hot')
             top_n = int(config.get('top_coins_count', 20))
-            # 多拉 30 檔備用，確保過濾黑名單/無合約後仍有 top_n 個有效標的
-            top_symbols = fetch_top_bitget_symbols(limit=30, rank_mode=rank_mode)
+            # 多拉 100 檔備用，確保過濾黑名單/無合約後仍有 top_n 個有效標的
+            top_symbols = fetch_top_bitget_symbols(limit=100, rank_mode=rank_mode)
 
             markets = await ex.load_markets()
             custom_blacklist = config.get("blacklist", ["XAUT", "PAXG", "TQQQ", "SQQQ"])
