@@ -285,43 +285,7 @@ def compose_3d_bars(ohlcv_1d):
     return result
 
 
-def compose_18d_bars(ohlcv_1d):
-    """將 1D OHLCV 合成 18D K棒 (按每年 1/1 起算)
-    輸入: [[ts, open, high, low, close, vol], ...]
-    輸出: [[ts, open, high, low, close, vol, close_ts], ...]
-    """
-    if not ohlcv_1d or len(ohlcv_1d) < 18:
-        return []
 
-    from datetime import datetime, timezone
-    PERIOD_MS = 18 * 24 * 3600 * 1000
-    groups = {}
-    for bar in ohlcv_1d:
-        ts = bar[0]
-        dt = datetime.fromtimestamp(ts / 1000, tz=timezone.utc)
-        year_start_dt = datetime(dt.year, 1, 1, tzinfo=timezone.utc)
-        year_epoch_ms = int(year_start_dt.timestamp() * 1000)
-
-        group_idx = (ts - year_epoch_ms) // PERIOD_MS
-        group_key = year_epoch_ms + group_idx * PERIOD_MS
-
-        if group_key not in groups:
-            groups[group_key] = []
-        groups[group_key].append(bar)
-
-    result = []
-    for gts in sorted(groups.keys()):
-        bars = sorted(groups[gts], key=lambda x: x[0])
-        result.append([
-            gts,
-            bars[0][1],
-            max(b[2] for b in bars),
-            min(b[3] for b in bars),
-            bars[-1][4],
-            sum(b[5] for b in bars),
-            gts + PERIOD_MS
-        ])
-    return result
 
 def compose_3h_bars(ohlcv_1h):
     """將 1H OHLCV 合成 3H K棒 (從每天 00:00 UTC 起算，每 3 根 1H 合一根)
@@ -371,22 +335,23 @@ async def check_signal_expired(exchange, symbol, direction, entry, sl, precision
     if risk_per_unit == 0:
         return False, "", ""
 
-    # 動態計算 3D 吞噬保護止損
+    # 動態計算 1D 吞噬保護止損
     dynamic_sl = sl
     if trigger_ts > 0:
         try:
             _ohlcv_1d = await exchange.fetch_ohlcv(symbol, '1d', limit=200)
             if _ohlcv_1d:
-                _ohlcv_3d = compose_3d_bars(_ohlcv_1d)
-                _df_3d = pd.DataFrame(_ohlcv_3d, columns=['ts', 'open', 'high', 'low', 'close', 'vol', 'close_ts'])
-                _now_ms_3d = int(time.time() * 1000)
-                _closed_3d = _df_3d[_df_3d['close_ts'] <= _now_ms_3d].reset_index(drop=True)
+                _df_1d = pd.DataFrame(_ohlcv_1d, columns=['ts', 'open', 'high', 'low', 'close', 'vol'])
+                _now_ms = int(time.time() * 1000)
+                # 1D K 棒收盤時間 = 開盤時間 + 1D，用此篩選已收盤
+                _df_1d['close_ts'] = _df_1d['ts'] + 24 * 3600 * 1000
+                _closed_1d = _df_1d[_df_1d['close_ts'] <= _now_ms].reset_index(drop=True)
                 
-                if len(_closed_3d) >= 2:
+                if len(_closed_1d) >= 2:
                     _current_sl = sl
-                    for i in range(1, len(_closed_3d)):
-                        _last = _closed_3d.iloc[i]
-                        _prev = _closed_3d.iloc[i-1]
+                    for i in range(1, len(_closed_1d)):
+                        _last = _closed_1d.iloc[i]
+                        _prev = _closed_1d.iloc[i-1]
                         if int(_last['close_ts']) > trigger_ts:
                             _new_close = float(_last['close'])
                             _new_high = float(_last['high'])
@@ -404,7 +369,7 @@ async def check_signal_expired(exchange, symbol, direction, entry, sl, precision
                                     _current_sl = _new_high
                     dynamic_sl = _current_sl
         except Exception as e:
-            logger.warning(f"  過期檢查(3D止損)異常 ({symbol}): {e}")
+            logger.warning(f"  過期檢查(1D止損)異常 ({symbol}): {e}")
 
     tp_price = entry + expire_r * risk_per_unit if direction == 'LONG' else entry - expire_r * risk_per_unit
     l3_close_ts = trigger_ts + 3 * 3600 * 1000 if trigger_ts > 0 else int(time.time() * 1000)
@@ -575,7 +540,8 @@ async def place_order(exchange, symbol, direction, entry, sl, precision, fixed_l
                     continue
 
                 actual_risk = qty * risk_per_unit
-                if actual_risk < fixed_loss_usdt * 0.9:
+                # 0.75 容忍精度截斷：qty 為交易所最小精度取整，允許最多 25% 曝險縮水
+                if actual_risk < fixed_loss_usdt * 0.75:
                     msg = f"⚠️ 資金不足以建立標準部位 ({actual_risk:.2f}/{fixed_loss_usdt})\n可用餘額: {available:.2f} USDT"
                     logger.warning(msg)
                     send_telegram_message(f"<b>⚠️ 資金不足</b>\n{get_base_coin(symbol)}\n可用: {available:.2f} USDT")
@@ -825,7 +791,7 @@ async def manage_tp_ladder(exchange, symbol, side, sig, size, saved_signals, ope
 
 async def monitor_positions(exchange):
     """
-    倉位監控：3D 移動止損 + 階梯 TP + SL 補掛 + 掛單過期撤單 + 孤兒單清理
+    倉位監控：1D 移動止損 + 階梯 TP + SL 補掛 + 掛單過期撤單 + 孤兒單清理
     """
     try:
         await exchange.load_markets()
@@ -918,28 +884,28 @@ async def monitor_positions(exchange):
                             if '40786' not in str(e):
                                 logger.error(f"掛止損失敗: {e}")
 
-                    # 3D 移動止損：最新 3D 棒吞噬前棒實體 → 止損移至該棒低/高點
+                    # 1D 移動止損：最新 1D 棒吞噬前棒實體 → 止損移至該棒低/高點
                     _entry_ts = int(sig.get('timestamp', 0))
                     if _entry_ts > 0:
                         try:
                             _ohlcv_1d_mon = await exchange.fetch_ohlcv(symbol, '1d', limit=200)
                             if _ohlcv_1d_mon:
-                                _ohlcv_3d_mon = compose_3d_bars(_ohlcv_1d_mon)
-                                _df_3d_mon = pd.DataFrame(_ohlcv_3d_mon, columns=['ts', 'open', 'high', 'low', 'close', 'vol', 'close_ts'])
-                                _now_ms_3d = int(time.time() * 1000)
-                                _closed_3d_pos = _df_3d_mon[_df_3d_mon['close_ts'] <= _now_ms_3d].reset_index(drop=True)
+                                _df_1d_mon = pd.DataFrame(_ohlcv_1d_mon, columns=['ts', 'open', 'high', 'low', 'close', 'vol'])
+                                _now_ms_mon = int(time.time() * 1000)
+                                _df_1d_mon['close_ts'] = _df_1d_mon['ts'] + 24 * 3600 * 1000
+                                _closed_1d_pos = _df_1d_mon[_df_1d_mon['close_ts'] <= _now_ms_mon].reset_index(drop=True)
 
-                                if len(_closed_3d_pos) >= 2:
-                                    _last_3d = _closed_3d_pos.iloc[-1]
-                                    _prev_3d = _closed_3d_pos.iloc[-2]
-                                    _last_3d_close_ts = int(_last_3d['close_ts'])
+                                if len(_closed_1d_pos) >= 2:
+                                    _last_1d = _closed_1d_pos.iloc[-1]
+                                    _prev_1d = _closed_1d_pos.iloc[-2]
+                                    _last_1d_close_ts = int(_last_1d['close_ts'])
 
-                                    if _last_3d_close_ts > _entry_ts:
-                                        _new_close = float(_last_3d['close'])
-                                        _new_high = float(_last_3d['high'])
-                                        _new_low = float(_last_3d['low'])
-                                        _prev_open = float(_prev_3d['open'])
-                                        _prev_close = float(_prev_3d['close'])
+                                    if _last_1d_close_ts > _entry_ts:
+                                        _new_close = float(_last_1d['close'])
+                                        _new_high = float(_last_1d['high'])
+                                        _new_low = float(_last_1d['low'])
+                                        _prev_open = float(_prev_1d['open'])
+                                        _prev_close = float(_prev_1d['close'])
                                         _current_sl = float(sig['sl_price'])
                                         _new_sl = _current_sl
                                         _move_sl = False
@@ -956,8 +922,8 @@ async def monitor_positions(exchange):
                                                 _move_sl = True
 
                                         if _move_sl:
-                                            _3d_dt = pd.to_datetime(int(_last_3d['ts']), unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d')
-                                            logger.info(f"🔄 3D 吞噬 ({symbol} {_3d_dt})，止損移至 {_new_sl}")
+                                            _1d_dt = pd.to_datetime(int(_last_1d['ts']), unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d')
+                                            logger.info(f"🔄 1D 吞噬 ({symbol} {_1d_dt})，止損移至 {_new_sl}")
                                             sig['sl_price'] = _new_sl
                                             save_active_signals(saved_signals)
                                             history_signals = load_history_signals()
@@ -968,13 +934,13 @@ async def monitor_positions(exchange):
                                                         hs['stop_loss'] = _new_sl
                                             save_history_signals(history_signals)
                                             send_telegram_message(
-                                                f"<b>🔄 3D 移動止損觸發</b>\n\n"
+                                                f"<b>🔄 1D 移動止損觸發</b>\n\n"
                                                 f"💎 <b>交易對:</b> {get_base_coin(symbol)} [{side.upper()}]\n"
-                                                f"📅 <b>觸發 K 線:</b> {_3d_dt}\n"
+                                                f"📅 <b>觸發 K 線:</b> {_1d_dt}\n"
                                                 f"🛡️ <b>新止損價:</b> <code>{_new_sl:.4f}</code>"
                                             )
-                        except Exception as _e3d:
-                            logger.warning(f"3D 移動止損監控異常 ({symbol}): {_e3d}")
+                        except Exception as _e1d:
+                            logger.warning(f"1D 移動止損監控異常 ({symbol}): {_e1d}")
 
                     await manage_tp_ladder(exchange, symbol, side, sig, size, saved_signals, open_orders)
         # 2. 孤兒訊號清理 (倉位消失但訊號仍 active)
@@ -1124,8 +1090,8 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
 
         # 拉取 1D 與 1H 資料
         ohlcv_1d = await exchange.fetch_ohlcv(symbol, '1d', limit=500)
-        if not ohlcv_1d or len(ohlcv_1d) < 36:
-            logger.info(f"🔎 {symbol} 略過: 1D K線不足 ({len(ohlcv_1d) if ohlcv_1d else 0} 根，需≥36)")
+        if not ohlcv_1d or len(ohlcv_1d) < 6:
+            logger.info(f"🔎 {symbol} 略過: 1D K線不足 ({len(ohlcv_1d) if ohlcv_1d else 0} 根，需≥6)")
             return None
 
         ohlcv_1h = await exchange.fetch_ohlcv(symbol, '1h', limit=1000)
@@ -1133,14 +1099,14 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
             logger.info(f"🔎 {symbol} 略過: 1H K線不足 ({len(ohlcv_1h) if ohlcv_1h else 0} 根，需≥100)")
             return None
 
-        ohlcv_18d = compose_18d_bars(ohlcv_1d)
+        ohlcv_3d = compose_3d_bars(ohlcv_1d)
         ohlcv_3h = compose_3h_bars(ohlcv_1h)
-        if not ohlcv_18d or not ohlcv_3h:
-            logger.info(f"🔎 {symbol} 略過: 18D/3H 合成失敗 (18D={len(ohlcv_18d) if ohlcv_18d else 0}, 3H={len(ohlcv_3h) if ohlcv_3h else 0})")
+        if not ohlcv_3d or not ohlcv_3h:
+            logger.info(f"🔎 {symbol} 略過: 3D/3H 合成失敗 (3D={len(ohlcv_3d) if ohlcv_3d else 0}, 3H={len(ohlcv_3h) if ohlcv_3h else 0})")
             return None
 
-        df_18d = pd.DataFrame(ohlcv_18d, columns=['ts', 'open', 'high', 'low', 'close', 'vol', 'close_ts'])
-        df_18d_closed = df_18d[df_18d['close_ts'] <= now_utc].reset_index(drop=True)
+        df_3d = pd.DataFrame(ohlcv_3d, columns=['ts', 'open', 'high', 'low', 'close', 'vol', 'close_ts'])
+        df_3d_closed = df_3d[df_3d['close_ts'] <= now_utc].reset_index(drop=True)
 
         df_1d = pd.DataFrame(ohlcv_1d, columns=['ts', 'open', 'high', 'low', 'close', 'vol'])
 
@@ -1150,9 +1116,9 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
         # =========================================================
         # 單一時間軸事件推進：從舊往新找，即時監控失效條件
         # =========================================================
-        # 將 18D K 棒依「開盤時間」排列，方便逐 3H 棒判斷是否進入新的 18D 區間
-        # key = 18D 開盤 ts (ms)，value = row
-        list_18d = sorted(df_18d_closed.to_dict('records'), key=lambda r: r['ts'])
+        # 將 3D K 棒依「開盤時間」排列，方便逐 3H 棒判斷是否進入新的 3D 區間
+        # key = 3D 開盤 ts (ms)，value = row
+        list_3d = sorted(df_3d_closed.to_dict('records'), key=lambda r: r['ts'])
 
         # 狀態變數
         l1_valid = False
@@ -1178,27 +1144,27 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
             t = int(row['ts'])          # 3H 開盤時間
             t_close = int(row['close_ts'])  # 3H 收盤時間
 
-            # 1. 以「最新一根已收盤的 18D K 棒」高低點作為 L1 邊界
-            if list_18d:
-                latest_18d_row = None
-                for _r in reversed(list_18d):
+            # 1. 以「最新一根已收盤的 3D K 棒」高低點作為 L1 邊界
+            if list_3d:
+                latest_3d_row = None
+                for _r in reversed(list_3d):
                     if int(_r['close_ts']) <= t_close:
-                        latest_18d_row = _r
+                        latest_3d_row = _r
                         break
-                if latest_18d_row:
-                    new_open = int(latest_18d_row['ts'])
+                if latest_3d_row:
+                    new_open = int(latest_3d_row['ts'])
                     if new_open != l1_open_ts:
-                        # 新 18D 週期開始：結束上一週期模擬持倉，允許重新觸發
+                        # 新 3D 週期開始：結束上一週期模擬持倉，允許重新觸發
                         if simulated_pos:
                             simulated_pos = False
                             l2_valid = False
                             if all_historical_c2s and all_historical_c2s[-1]['status'] == 'active':
                                 all_historical_c2s[-1]['status'] = 'closed'
                         l1_valid = True
-                        l1_valid_ts = int(latest_18d_row['close_ts'])
+                        l1_valid_ts = int(latest_3d_row['close_ts'])
                         l1_open_ts = new_open
-                        l1_high = float(latest_18d_row['high'])
-                        l1_low = float(latest_18d_row['low'])
+                        l1_high = float(latest_3d_row['high'])
+                        l1_low = float(latest_3d_row['low'])
                         l1_date_str = pd.to_datetime(l1_open_ts, unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d')
                         l2_valid = False
                         l2_direction = ""
@@ -1214,17 +1180,17 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
                     l2_valid = False
                     if all_historical_c2s and all_historical_c2s[-1]['status'] == 'active':
                         all_historical_c2s[-1]['status'] = 'closed'
-                    latest_18d_row = None
-                    for _r in reversed(list_18d):
+                    latest_3d_row = None
+                    for _r in reversed(list_3d):
                         if int(_r['close_ts']) <= t_close:
-                            latest_18d_row = _r
+                            latest_3d_row = _r
                             break
-                    if latest_18d_row:
+                    if latest_3d_row:
                         l1_valid = True
-                        l1_valid_ts = int(latest_18d_row['close_ts'])
-                        l1_open_ts = int(latest_18d_row['ts'])
-                        l1_high = float(latest_18d_row['high'])
-                        l1_low = float(latest_18d_row['low'])
+                        l1_valid_ts = int(latest_3d_row['close_ts'])
+                        l1_open_ts = int(latest_3d_row['ts'])
+                        l1_high = float(latest_3d_row['high'])
+                        l1_low = float(latest_3d_row['low'])
                         l1_date_str = pd.to_datetime(l1_open_ts, unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d')
 
             # 3. L2 觸發：未持倉 + 前一根仍在邊界內 + 當根穿透且收盤確認
@@ -1297,22 +1263,22 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
 
         cache_ts = trigger_ts if is_trigger_met else l1_valid_ts
         action = 'update' if (not cached_info or cached_info.get('ts') != cache_ts) else 'keep'
-        # 過濾：只保留屬於「最新一根已收盤 18D K 線」區間內的歷史訊號
+        # 過濾：只保留屬於「最新一根已收盤 3D K 線」區間內的歷史訊號
         filtered_c2s = [c2 for c2 in all_historical_c2s if c2.get('l1_open_ts') == l1_open_ts]
 
         if l1_valid and len(filtered_c2s) == 0:
             logger.info(
                 f"🔎 {symbol} L1 H={l1_high:.{precision}f} L={l1_low:.{precision}f} "
-                f"現價={current_price:.{precision}f} 本18D週期訊號=0"
+                f"現價={current_price:.{precision}f} 本3D週期訊號=0"
             )
         elif filtered_c2s:
             last_sig = filtered_c2s[-1]
             logger.info(
                 f"🔎 {symbol} L1 H={l1_high:.{precision}f} L={l1_low:.{precision}f} "
-                f"本18D訊號={len(filtered_c2s)} 末筆={last_sig.get('l2_direction')} ({last_sig.get('status')})"
+                f"本3D訊號={len(filtered_c2s)} 末筆={last_sig.get('l2_direction')} ({last_sig.get('status')})"
             )
         elif not l1_valid:
-            logger.info(f"🔎 {symbol} L1 尚未成立 (18D 已收盤 K 棒不足)")
+            logger.info(f"🔎 {symbol} L1 尚未成立 (3D 已收盤 K 棒不足)")
 
         if final_state in ['l1_waiting']:
             # L1 成立等待 L2：幣種必須保留在 watchlist，否則會被掃描器刪掉
@@ -1435,7 +1401,7 @@ def send_triggered_message(item, default_loss):
 
     msg = (
         f"{dir_icon} 💎 <b>交易對:</b> {display_symbol} [{direction}]\n\n"
-        f"📅 <b>L1 (18D) 邊界:</b> <code>{l1_d}</code>\n"
+        f"📅 <b>L1 (3D) 邊界:</b> <code>{l1_d}</code>\n"
         f"📅 <b>L2 (3H) 突破進場:</b> <code>{l2_d}</code>\n"
         f"📍 <b>進場價格:</b> <code>{entry:.{precision}f}</code>\n"
         f"🛡️ <b>保護止損:</b> <code>{sl:.{precision}f}</code>\n"
@@ -1602,7 +1568,8 @@ async def run_scan():
         try:
             rank_mode = config.get('coin_rank_mode', 'hot')
             top_n = int(config.get('top_coins_count', 20))
-            top_symbols = fetch_top_bitget_symbols(limit=top_n, rank_mode=rank_mode)
+            # 多拉 30 檔備用，確保過濾黑名單/無合約後仍有 top_n 個有效標的
+            top_symbols = fetch_top_bitget_symbols(limit=30, rank_mode=rank_mode)
 
             markets = await ex.load_markets()
             custom_blacklist = config.get("blacklist", ["XAUT", "PAXG", "TQQQ", "SQQQ"])
@@ -1612,6 +1579,8 @@ async def run_scan():
             
             skipped_symbols = []
             for raw_sym in top_symbols:
+                if len(coins) >= top_n:
+                    break
                 base = raw_sym.replace('USDT', '')
                 ccxt_sym = f"{base}/USDT:USDT"
                 if base in exclude_bases:
@@ -1621,8 +1590,8 @@ async def run_scan():
                 else:
                     coins.append(ccxt_sym)
             if skipped_symbols:
-                logger.warning(f"⚠️ 榜單有 {len(skipped_symbols)} 個幣無法掃描: {', '.join(skipped_symbols)}")
-            logger.info(f"📊 實際掃描幣種: {len(coins)} 個")
+                logger.warning(f"⚠️ 榜單有 {len(skipped_symbols)} 個幣無法加入: {', '.join(skipped_symbols)}")
+            logger.info(f"📊 實際掃描幣種: {len(coins)} 個 (目標 {top_n})")
 
             # 必須包含目前正在持倉與等待追蹤的幣種
             active_signals = load_active_signals()
@@ -1782,7 +1751,7 @@ async def run_scan():
 
         history_signals = load_history_signals()
 
-        # 清除所有不屬於最新 18D 區間的舊紀錄
+        # 清除所有不屬於最新 3D 區間的舊紀錄
         for base, current_l1_ts in latest_l1_open_ts_map.items():
             if base in history_signals and current_l1_ts > 0:
                 history_signals[base] = [s for s in history_signals[base] if s.get('l1_open_ts', 0) >= current_l1_ts]
@@ -2201,7 +2170,7 @@ HTML_TEMPLATE = """
     });
 
     if (activeSigs.length === 0) {
-      container.innerHTML = `<div class="empty-state"><div class="icon">🔍</div><p>目前最新 18D 區間尚無有效訊號</p></div>`;
+      container.innerHTML = `<div class="empty-state"><div class="icon">🔍</div><p>目前最新 3D 區間尚無有效訊號</p></div>`;
       return;
     }
 
@@ -2236,7 +2205,7 @@ HTML_TEMPLATE = """
         </div>
         <div class="card-grid">
           <div class="detail-block">
-            <div class="detail-label">L1 (18D) 邊界時間</div>
+            <div class="detail-label">L1 (3D) 邊界時間</div>
             <div class="detail-value">${fmt(sig.l1_date)}</div>
           </div>
           <div class="detail-block">
@@ -2274,12 +2243,12 @@ HTML_TEMPLATE = """
   }
 
   function renderMain(sym) {
-    document.getElementById('header-title').textContent = `💎 ${sym}　訊號歷史紀錄 (最新 18D 區間)`;
+    document.getElementById('header-title').textContent = `💎 ${sym}　訊號歷史紀錄 (最新 3D 區間)`;
     const container = document.getElementById('signal-container');
     const signals = allData[sym] || [];
 
     if (signals.length === 0) {
-      container.innerHTML = `<div class="empty-state"><div class="icon">🔍</div><p>此幣種在最新 18D 區間內尚無觸發訊號紀錄</p></div>`;
+      container.innerHTML = `<div class="empty-state"><div class="icon">🔍</div><p>此幣種在最新 3D 區間內尚無觸發訊號紀錄</p></div>`;
       return;
     }
 
@@ -2307,7 +2276,7 @@ HTML_TEMPLATE = """
         </div>
         <div class="card-grid">
           <div class="detail-block">
-            <div class="detail-label">L1 (18D) 邊界時間</div>
+            <div class="detail-label">L1 (3D) 邊界時間</div>
             <div class="detail-value">${fmt(sig.l1_date)}</div>
           </div>
           <div class="detail-block">
