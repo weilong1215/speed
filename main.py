@@ -63,6 +63,7 @@ DATA_DIR = "/app/data"
 WATCHLIST_FILE = os.path.join(DATA_DIR, "watchlist.json")
 ACTIVE_SIGNALS_FILE = os.path.join(DATA_DIR, "active_signals.json")
 HISTORY_SIGNALS_FILE = os.path.join(DATA_DIR, "history_signals.json")
+SCANNED_COINS_FILE = os.path.join(DATA_DIR, "scanned_coins.json")
 
 def ensure_data_dir():
     if not os.path.exists(DATA_DIR):
@@ -76,6 +77,9 @@ def ensure_data_dir():
     if not os.path.exists(HISTORY_SIGNALS_FILE):
         with open(HISTORY_SIGNALS_FILE, 'w') as f:
             json.dump({}, f)
+    if not os.path.exists(SCANNED_COINS_FILE):
+        with open(SCANNED_COINS_FILE, 'w') as f:
+            json.dump([], f)
 
 def load_watchlist():
     ensure_data_dir()
@@ -93,6 +97,24 @@ def save_watchlist(data):
             json.dump(data, f, indent=4, ensure_ascii=False)
     except Exception as e:
         logger.error(f"儲存 watchlist 失敗: {e}")
+
+def save_scanned_coins(coins: list):
+    """持久化本輪掃描的完整幣種清單，供網頁 UI 強制顯示所有名單用"""
+    ensure_data_dir()
+    try:
+        bases = sorted(set(get_base_coin(s) for s in coins))
+        with open(SCANNED_COINS_FILE, 'w', encoding='utf-8') as f:
+            json.dump(bases, f, ensure_ascii=False)
+    except Exception as e:
+        logger.error(f"儲存 scanned_coins 失敗: {e}")
+
+def load_scanned_coins() -> list:
+    ensure_data_dir()
+    try:
+        with open(SCANNED_COINS_FILE, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    except Exception:
+        return []
 
 def load_active_signals():
     ensure_data_dir()
@@ -1151,6 +1173,9 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
         # key = 3D 開盤 ts (ms)，value = row
         list_3d = sorted(df_3d_closed.to_dict('records'), key=lambda r: r['ts'])
 
+        # 最新已收盤 3D 開盤時間；只有落在此區間的 3H K 棒才印出過濾日誌（避免舊歷史雜訊）
+        latest_3d_open_ts = int(list_3d[-1]['ts']) if list_3d else 0
+
         # 狀態變數
         l1_valid = False
         l1_valid_ts = 0
@@ -1252,7 +1277,9 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
                         stop_loss = tmp_sl
                         triggered = True
                     else:
-                        logger.info(f"  🔎 {symbol} 多單止損比例 {sl_pct*100:.1f}% > 10% 視為不成立，繼續尋找")
+                        # 只在最新 3D 區間印出過濾日誌；舊歷史區間靜默，避免日誌雜訊
+                        if l1_open_ts == latest_3d_open_ts:
+                            logger.info(f"  🔎 {symbol} 多單止損比例 {sl_pct*100:.1f}% > 10% 視為不成立，繼續尋找")
                 elif is_short and not is_long:
                     tmp_entry = close_price
                     tmp_sl = float(row['high'])
@@ -1263,7 +1290,9 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
                         stop_loss = tmp_sl
                         triggered = True
                     else:
-                        logger.info(f"  🔎 {symbol} 空單止損比例 {sl_pct*100:.1f}% > 5% 視為不成立，繼續尋找")
+                        # 只在最新 3D 區間印出過濾日誌；舊歷史區間靜默，避免日誌雜訊
+                        if l1_open_ts == latest_3d_open_ts:
+                            logger.info(f"  🔎 {symbol} 空單止損比例 {sl_pct*100:.1f}% > 5% 視為不成立，繼續尋找")
 
                 if triggered:
                     simulated_pos = True
@@ -1623,6 +1652,7 @@ async def run_scan():
             if skipped_symbols:
                 logger.warning(f"⚠️ 榜單有 {len(skipped_symbols)} 個幣無法加入: {', '.join(skipped_symbols)}")
             logger.info(f"📊 實際掃描幣種: {len(coins)} 個 (目標 {top_n})")
+            save_scanned_coins(coins)
 
             # 必須包含目前正在持倉與等待追蹤的幣種
             active_signals = load_active_signals()
@@ -2392,8 +2422,10 @@ def api_data():
                     # 以進場價作為臨時佔位，前端 RR 算出 0，但至少不會崩潰
                     price_map[base] = float(s['entry_price'])
 
-    # 側欄統一用 base coin 顯示
+    # 側欄統一用 base coin 顯示；強制合併最新輪掃描幣種，確保無訊號幣種也能呈現
+    scanned_coins = load_scanned_coins()
     watchlist_coins = sorted(set(
+        scanned_coins +
         [get_base_coin(k) for k in watchlist.keys()] +
         list(cleaned_history.keys())
     ))
