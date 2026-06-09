@@ -1885,7 +1885,7 @@ async def scheduler():
     while True:
         try:
             now = datetime.utcnow()
-            if now.hour % 3 == 0 and now.minute <= 10 and now.hour != last_hour:
+            if now.hour % 1 == 0 and now.minute <= 10 and now.hour != last_hour:
                 try:
                     await run_scan()
                 except Exception as e:
