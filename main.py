@@ -223,6 +223,29 @@ def _bitget_ticker_hot_score(ticker):
     return vol * (1 + chg * 3)
 
 
+_crypto_whitelist_cache = {"timestamp": 0, "symbols": set()}
+
+def _get_crypto_whitelist():
+    """獲取純加密貨幣白名單 (過濾 RWA 傳統金融股票)，快取 1 小時"""
+    now = time.time()
+    if now - _crypto_whitelist_cache["timestamp"] < 3600 and _crypto_whitelist_cache["symbols"]:
+        return _crypto_whitelist_cache["symbols"]
+    try:
+        url = 'https://api.bitget.com/api/v2/mix/market/contracts?productType=USDT-FUTURES'
+        res = requests.get(url, timeout=10).json()
+        if res.get('code') == '00000':
+            data = res.get('data') or []
+            whitelist = {x['symbol'] for x in data if str(x.get('isRwa', 'NO')).upper() == 'NO'}
+            if whitelist:
+                _crypto_whitelist_cache["timestamp"] = now
+                _crypto_whitelist_cache["symbols"] = whitelist
+                logger.info(f"✅ 已更新加密貨幣白名單，共 {len(whitelist)} 個標的 (過濾 RWA)。")
+            return whitelist
+    except Exception as e:
+        logger.warning(f"獲取加密貨幣白名單失敗: {e}")
+    
+    return _crypto_whitelist_cache["symbols"]
+
 def fetch_top_bitget_symbols(limit=20, rank_mode='volume'):
     """從 Bitget USDT 永續 tickers 取 Top N。rank_mode: volume | hot"""
     try:
@@ -231,7 +254,12 @@ def fetch_top_bitget_symbols(limit=20, rank_mode='volume'):
         if res.get('code') != '00000':
             logger.warning(f"拉取 Bitget tickers 失敗: {res.get('msg')}")
             return []
+            
+        whitelist = _get_crypto_whitelist()
         data = res.get('data') or []
+        if whitelist:
+            data = [x for x in data if x.get('symbol') in whitelist]
+            
         if rank_mode == 'hot':
             sorted_data = sorted(data, key=_bitget_ticker_hot_score, reverse=True)
             label = '熱門 (Bitget tickers 成交額×波動)'
@@ -956,7 +984,7 @@ async def monitor_positions(exchange):
                 direction = sig['direction']
                 has_pos = any(p['symbol'] == symbol and p['side'].upper() == direction for p in active_pos)
 
-                has_entry = any(str(signal_id) in get_coid(o) for o in open_orders)
+                has_entry = any(str(signal_id) == get_coid(o) for o in open_orders)
                 
                 if has_pos:
                     sig['has_entered'] = True
@@ -970,7 +998,7 @@ async def monitor_positions(exchange):
                         exchange, symbol, direction, entry_price, sl_price, prec, trigger_ts)
                     if expired:
                         logger.info(f"🚫 掛單過期 [{revoke_reason}] ({symbol})，撤銷未成交單 {signal_id}")
-                        entry_orders = [o for o in open_orders if str(signal_id) in get_coid(o)]
+                        entry_orders = [o for o in open_orders if str(signal_id) == get_coid(o)]
                         for eo in entry_orders:
                             try:
                                 await exchange.cancel_order(eo['id'], symbol)
@@ -2136,9 +2164,7 @@ HTML_TEMPLATE = """
     const q = filter.trim().toUpperCase();
 
     const histKeys = Object.keys(allData);
-    const allSet = [...new Set([...allSymbols, ...histKeys])]
-        .filter(sym => allData[sym] && allData[sym].length > 0)
-        .sort();
+    const allSet = [...new Set([...allSymbols, ...histKeys])].sort();
     const filtered = q ? allSet.filter(s => s.includes(q)) : allSet;
 
     let html = '<div class="symbol-item ' + (currentSymbol === null ? 'active' : '') + '" onclick="goHome()"><span>🏠 有效訊號總覽</span></div>';
