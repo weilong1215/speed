@@ -1263,36 +1263,15 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
                 else:
                     inside_ref = float(row['open'])
 
+                # 僅掃描多單方向；止損距離無百分比限制
                 is_long = bar_high > l1_high and close_price > l1_high and inside_ref <= l1_high
-                is_short = bar_low < l1_low and close_price < l1_low and inside_ref >= l1_low
 
                 triggered = False
-                if is_long and not is_short:
-                    tmp_entry = close_price
-                    tmp_sl = float(row['low'])
-                    sl_pct = abs(tmp_entry - tmp_sl) / tmp_entry if tmp_entry > 0 else 0
-                    if sl_pct <= 0.10:
-                        l2_direction = 'LONG'
-                        entry_price = tmp_entry
-                        stop_loss = tmp_sl
-                        triggered = True
-                    else:
-                        # 只在最新 3D 區間印出過濾日誌；舊歷史區間靜默，避免日誌雜訊
-                        if l1_open_ts == latest_3d_open_ts:
-                            logger.info(f"  🔎 {symbol} 多單止損比例 {sl_pct*100:.1f}% > 10% 視為不成立，繼續尋找")
-                elif is_short and not is_long:
-                    tmp_entry = close_price
-                    tmp_sl = float(row['high'])
-                    sl_pct = abs(tmp_entry - tmp_sl) / tmp_entry if tmp_entry > 0 else 0
-                    if sl_pct <= 0.05:
-                        l2_direction = 'SHORT'
-                        entry_price = tmp_entry
-                        stop_loss = tmp_sl
-                        triggered = True
-                    else:
-                        # 只在最新 3D 區間印出過濾日誌；舊歷史區間靜默，避免日誌雜訊
-                        if l1_open_ts == latest_3d_open_ts:
-                            logger.info(f"  🔎 {symbol} 空單止損比例 {sl_pct*100:.1f}% > 5% 視為不成立，繼續尋找")
+                if is_long:
+                    l2_direction = 'LONG'
+                    entry_price = close_price
+                    stop_loss = float(row['low'])
+                    triggered = True
 
                 if triggered:
                     simulated_pos = True
@@ -1626,32 +1605,32 @@ async def run_scan():
 
     try:
         try:
-            rank_mode = config.get('coin_rank_mode', 'hot')
-            top_n = int(config.get('top_coins_count', 20))
-            # 多拉 100 檔備用，確保過濾黑名單/無合約後仍有 top_n 個有效標的
-            top_symbols = fetch_top_bitget_symbols(limit=100, rank_mode=rank_mode)
-
+            # 抓取全市場 USDT-FUTURES 非 RWA 幣種（跳過股票合約）
+            whitelist = _get_crypto_whitelist()
             markets = await ex.load_markets()
             custom_blacklist = config.get("blacklist", ["XAUT", "PAXG", "TQQQ", "SQQQ"])
             exclude_bases = {"USDC", "FDUSD", "TUSD", "USDP", "BUSD", "EUR", "GBP", "DAI"}
             exclude_bases.update(custom_blacklist)
             coins = []
-            
+
             skipped_symbols = []
-            for raw_sym in top_symbols:
-                if len(coins) >= top_n:
-                    break
-                base = raw_sym.replace('USDT', '')
-                ccxt_sym = f"{base}/USDT:USDT"
+            for ccxt_sym, m in markets.items():
+                # 只取 linear USDT 永續合約
+                if not (m.get('linear') and m.get('quote') == 'USDT' and m.get('settle') == 'USDT'):
+                    continue
+                base = ccxt_sym.split('/')[0]
+                raw_bitget_sym = f"{base}USDT"
                 if base in exclude_bases:
                     skipped_symbols.append(f"{base}(黑名單)")
-                elif ccxt_sym not in markets:
-                    skipped_symbols.append(f"{base}(無合約)")
-                else:
-                    coins.append(ccxt_sym)
+                    continue
+                # 白名單非空時，不在白名單內代表股票/RWA 合約，直接跳過
+                if whitelist and raw_bitget_sym not in whitelist:
+                    skipped_symbols.append(f"{base}(股票合約/RWA)")
+                    continue
+                coins.append(ccxt_sym)
             if skipped_symbols:
-                logger.warning(f"⚠️ 榜單有 {len(skipped_symbols)} 個幣無法加入: {', '.join(skipped_symbols)}")
-            logger.info(f"📊 實際掃描幣種: {len(coins)} 個 (目標 {top_n})")
+                logger.warning(f"⚠️ 過濾掉 {len(skipped_symbols)} 個幣種 (前10): {', '.join(skipped_symbols[:10])}{'...' if len(skipped_symbols) > 10 else ''}")
+            logger.info(f"📊 實際掃描幣種: {len(coins)} 個 (全市場非RWA)")
             save_scanned_coins(coins)
 
             # 必須包含目前正在持倉與等待追蹤的幣種
@@ -1885,7 +1864,7 @@ async def scheduler():
     while True:
         try:
             now = datetime.utcnow()
-            if now.hour % 1 == 0 and now.minute <= 10 and now.hour != last_hour:
+            if now.hour % 3 == 0 and now.minute <= 10 and now.hour != last_hour:
                 try:
                     await run_scan()
                 except Exception as e:
@@ -2193,21 +2172,20 @@ HTML_TEMPLATE = """
     const list = document.getElementById('symbol-list');
     const q = filter.trim().toUpperCase();
 
-    const histKeys = Object.keys(allData);
-    const allSet = [...new Set([...allSymbols, ...histKeys])].sort();
+    // 只顯示有訊號紀錄的幣種（allData 中有非空 signals 的 key）
+    const allSet = Object.keys(allData).filter(k => allData[k].length > 0).sort();
     const filtered = q ? allSet.filter(s => s.includes(q)) : allSet;
 
     let html = '<div class="symbol-item ' + (currentSymbol === null ? 'active' : '') + '" onclick="goHome()"><span>🏠 有效訊號總覽</span></div>';
     filtered.forEach(sym => {
       const sigs = allData[sym] || [];
       const activeClass = sym === currentSymbol ? 'active' : '';
-      const hasClass = sigs.length > 0 ? 'has-signals' : '';
-      html += `<div class="symbol-item ${activeClass} ${hasClass}" onclick="selectSymbol('${sym}')">
+      html += `<div class="symbol-item ${activeClass} has-signals" onclick="selectSymbol('${sym}')">
         <span>${sym}</span>
         <span class="count">${sigs.length}</span>
       </div>`;
     });
-    list.innerHTML = html || '<div style="padding:12px 16px;color:#6e7681;font-size:0.8rem;">無符合結果</div>';
+    list.innerHTML = html || '<div style="padding:12px 16px;color:#6e7681;font-size:0.8rem;">尚無訊號幣種</div>';
   }
 
   function goHome() {
