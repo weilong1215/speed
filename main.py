@@ -1222,8 +1222,12 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
                 l1_18d_direction = "LONG"
                 l1_date_str = pd.to_datetime(int(_curr['ts']), unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d')
             elif _c_close < _p_body_low:
-                l1_18d_direction = "SHORT"
+                # 策略僅做多，遇到黑吞則強制重置
+                l1_18d_direction = ""
                 l1_date_str = pd.to_datetime(int(_curr['ts']), unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d')
+
+        if l1_18d_direction != "LONG":
+            return None
 
         # 單一時間軸事件推進：從舊往新找，即時監控失效條件
         list_3d = sorted(df_3d_closed.to_dict('records'), key=lambda r: r['ts'])
@@ -1279,8 +1283,8 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
             # 2. 止損檢查
             sl_hit_this_bar = False
             if simulated_pos:
-                is_sl = (l3_direction == 'LONG' and float(row['low']) <= stop_loss) or \
-                        (l3_direction == 'SHORT' and float(row['high']) >= stop_loss)
+                # 僅掃描多單，只需判斷多單止損
+                is_sl = (l3_direction == 'LONG' and float(row['low']) <= stop_loss)
                 if is_sl:
                     sl_hit_this_bar = True
                     simulated_pos = False
@@ -1319,13 +1323,6 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
                         l3_direction = 'LONG'
                         entry_price = close_price
                         stop_loss = float(row['low'])
-                        triggered = True
-                elif l1_18d_direction == 'SHORT':
-                    is_short = bar_low < l2_low and close_price < l2_low and inside_ref >= l2_low
-                    if is_short:
-                        l3_direction = 'SHORT'
-                        entry_price = close_price
-                        stop_loss = float(row['high'])
                         triggered = True
 
                 if triggered:
