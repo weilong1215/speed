@@ -337,6 +337,41 @@ def compose_3d_bars(ohlcv_1d):
 
 
 
+def compose_18d_bars(ohlcv_1d):
+    """將 1D OHLCV 合成 18D K 棒 (按每年 1/1 起算)"""
+    if not ohlcv_1d or len(ohlcv_1d) < 3:
+        return []
+
+    from datetime import datetime, timezone
+    PERIOD_MS = 18 * 24 * 3600 * 1000
+    groups = {}
+    for bar in ohlcv_1d:
+        ts = bar[0]
+        dt = datetime.fromtimestamp(ts / 1000, tz=timezone.utc)
+        year_start_dt = datetime(dt.year, 1, 1, tzinfo=timezone.utc)
+        year_epoch_ms = int(year_start_dt.timestamp() * 1000)
+
+        group_idx = (ts - year_epoch_ms) // PERIOD_MS
+        group_key = year_epoch_ms + group_idx * PERIOD_MS
+
+        if group_key not in groups:
+            groups[group_key] = []
+        groups[group_key].append(bar)
+
+    result = []
+    for gts in sorted(groups.keys()):
+        bars = sorted(groups[gts], key=lambda x: x[0])
+        result.append([
+            gts,
+            bars[0][1],
+            max(b[2] for b in bars),
+            min(b[3] for b in bars),
+            bars[-1][4],
+            sum(b[5] for b in bars),
+            gts + PERIOD_MS
+        ])
+    return result
+
 def compose_3h_bars(ohlcv_1h):
     """將 1H OHLCV 合成 3H K棒 (從每天 00:00 UTC 起算，每 3 根 1H 合一根)
     輸入: [[ts, open, high, low, close, vol], ...]
@@ -385,41 +420,41 @@ async def check_signal_expired(exchange, symbol, direction, entry, sl, precision
     if risk_per_unit == 0:
         return False, "", ""
 
-    # 動態計算 1D 吞噬保護止損
+    # 動態計算 3D 吞噬保護止損
     dynamic_sl = sl
     if trigger_ts > 0:
         try:
             _ohlcv_1d = await exchange.fetch_ohlcv(symbol, '1d', limit=200)
             if _ohlcv_1d:
-                _df_1d = pd.DataFrame(_ohlcv_1d, columns=['ts', 'open', 'high', 'low', 'close', 'vol'])
-                _now_ms = int(time.time() * 1000)
-                # 1D K 棒收盤時間 = 開盤時間 + 1D，用此篩選已收盤
-                _df_1d['close_ts'] = _df_1d['ts'] + 24 * 3600 * 1000
-                _closed_1d = _df_1d[_df_1d['close_ts'] <= _now_ms].reset_index(drop=True)
-                
-                if len(_closed_1d) >= 2:
-                    _current_sl = sl
-                    for i in range(1, len(_closed_1d)):
-                        _last = _closed_1d.iloc[i]
-                        _prev = _closed_1d.iloc[i-1]
-                        if int(_last['close_ts']) > trigger_ts:
-                            _new_close = float(_last['close'])
-                            _new_high = float(_last['high'])
-                            _new_low = float(_last['low'])
-                            _prev_open = float(_prev['open'])
-                            _prev_close = float(_prev['close'])
-                            
-                            if direction.upper() == 'LONG':
-                                _prev_body_high = max(_prev_open, _prev_close)
-                                if _new_close > _prev_body_high and _new_low > _current_sl:
-                                    _current_sl = _new_low
-                            elif direction.upper() == 'SHORT':
-                                _prev_body_low = min(_prev_open, _prev_close)
-                                if _new_close < _prev_body_low and (_new_high < _current_sl or _current_sl == 0):
-                                    _current_sl = _new_high
-                    dynamic_sl = _current_sl
+                _ohlcv_3d = compose_3d_bars(_ohlcv_1d)
+                if _ohlcv_3d:
+                    _df_3d = pd.DataFrame(_ohlcv_3d, columns=['ts', 'open', 'high', 'low', 'close', 'vol', 'close_ts'])
+                    _now_ms = int(time.time() * 1000)
+                    _closed_3d = _df_3d[_df_3d['close_ts'] <= _now_ms].reset_index(drop=True)
+                    
+                    if len(_closed_3d) >= 2:
+                        _current_sl = sl
+                        for i in range(1, len(_closed_3d)):
+                            _last = _closed_3d.iloc[i]
+                            _prev = _closed_3d.iloc[i-1]
+                            if int(_last['close_ts']) > trigger_ts:
+                                _new_close = float(_last['close'])
+                                _new_high = float(_last['high'])
+                                _new_low = float(_last['low'])
+                                _prev_open = float(_prev['open'])
+                                _prev_close = float(_prev['close'])
+                                
+                                if direction.upper() == 'LONG':
+                                    _prev_body_high = max(_prev_open, _prev_close)
+                                    if _new_close > _prev_body_high and _new_low > _current_sl:
+                                        _current_sl = _new_low
+                                elif direction.upper() == 'SHORT':
+                                    _prev_body_low = min(_prev_open, _prev_close)
+                                    if _new_close < _prev_body_low and (_new_high < _current_sl or _current_sl == 0):
+                                        _current_sl = _new_high
+                        dynamic_sl = _current_sl
         except Exception as e:
-            logger.warning(f"  過期檢查(1D止損)異常 ({symbol}): {e}")
+            logger.warning(f"  過期檢查(3D止損)異常 ({symbol}): {e}")
 
     if dynamic_sl != sl:
         return True, f"已產生移動保護止損 (原: {sl:.{precision}f} -> 新: {dynamic_sl:.{precision}f})", 'PSL'
@@ -466,7 +501,7 @@ async def check_signal_expired(exchange, symbol, direction, entry, sl, precision
 
 
 async def place_order(exchange, symbol, direction, entry, sl, precision, fixed_loss_usdt, trigger_ts,
-                      l1_high=0.0, l1_low=0.0, l1_open_ts=0, l1_date='', l2_date=''):
+                      l2_high=0.0, l2_low=0.0, l2_open_ts=0, l1_18d_direction='', l2_date='', l3_date=''):
     """
     執行下單：Limit Order + 分層槓桿策略 (MAX → 20x → 10x)
 
@@ -640,16 +675,16 @@ async def place_order(exchange, symbol, direction, entry, sl, precision, fixed_l
                     'quantity': qty, 'entry_price': entry, 'sl_price': sl,
                     'original_sl_price': sl,
                     'status': 'active', 'precision': precision, 'tp_stage': 0,
-                    'l1_high': l1_high, 'l1_low': l1_low, 'l1_open_ts': l1_open_ts,
-                    'l1_date': l1_date, 'l2_date': l2_date,
+                    'l2_high': l2_high, 'l2_low': l2_low, 'l2_open_ts': l2_open_ts,
+                    'l1_18d_direction': l1_18d_direction, 'l2_date': l2_date, 'l3_date': l3_date,
                     'timestamp': trigger_ts if trigger_ts > 0 else int(time.time() * 1000)
                 })
                 save_active_signals(signals)
-                l2_display = l2_date or (pd.to_datetime(trigger_ts, unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d %H:%M:%S') if trigger_ts > 0 else '未知')
+                l3_display = l3_date or (pd.to_datetime(trigger_ts, unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d %H:%M:%S') if trigger_ts > 0 else '未知')
                 send_telegram_message(
                     f"<b>🤖 自動下單 ({leverage}x)</b>\n\n"
                     f"💎 {get_base_coin(symbol)} [{direction}]\n"
-                    f"📅 L2 (3H): <code>{l2_display}</code>\n"
+                    f"📅 L3 (3H): <code>{l3_display}</code>\n"
                     f"🎯 進場: <code>{entry:.{precision}f}</code>\n"
                     f"🛡️ 保護止損: <code>{sl:.{precision}f}</code>"
                 )
@@ -937,63 +972,64 @@ async def monitor_positions(exchange):
                             if '40786' not in str(e):
                                 logger.error(f"掛止損失敗: {e}")
 
-                    # 1D 移動止損：最新 1D 棒吞噬前棒實體 → 止損移至該棒低/高點
+                    # 3D 移動止損：最新 3D 棒吞噬前棒實體 → 止損移至該棒低/高點
                     _entry_ts = int(sig.get('timestamp', 0))
                     if _entry_ts > 0:
                         try:
                             _ohlcv_1d_mon = await exchange.fetch_ohlcv(symbol, '1d', limit=200)
                             if _ohlcv_1d_mon:
-                                _df_1d_mon = pd.DataFrame(_ohlcv_1d_mon, columns=['ts', 'open', 'high', 'low', 'close', 'vol'])
-                                _now_ms_mon = int(time.time() * 1000)
-                                _df_1d_mon['close_ts'] = _df_1d_mon['ts'] + 24 * 3600 * 1000
-                                _closed_1d_pos = _df_1d_mon[_df_1d_mon['close_ts'] <= _now_ms_mon].reset_index(drop=True)
+                                _ohlcv_3d_mon = compose_3d_bars(_ohlcv_1d_mon)
+                                if _ohlcv_3d_mon:
+                                    _df_3d_mon = pd.DataFrame(_ohlcv_3d_mon, columns=['ts', 'open', 'high', 'low', 'close', 'vol', 'close_ts'])
+                                    _now_ms_mon = int(time.time() * 1000)
+                                    _closed_3d_pos = _df_3d_mon[_df_3d_mon['close_ts'] <= _now_ms_mon].reset_index(drop=True)
 
-                                if len(_closed_1d_pos) >= 2:
-                                    _last_1d = _closed_1d_pos.iloc[-1]
-                                    _prev_1d = _closed_1d_pos.iloc[-2]
-                                    _last_1d_close_ts = int(_last_1d['close_ts'])
+                                    if len(_closed_3d_pos) >= 2:
+                                        _last_3d = _closed_3d_pos.iloc[-1]
+                                        _prev_3d = _closed_3d_pos.iloc[-2]
+                                        _last_3d_close_ts = int(_last_3d['close_ts'])
 
-                                    if _last_1d_close_ts > _entry_ts:
-                                        _new_close = float(_last_1d['close'])
-                                        _new_high = float(_last_1d['high'])
-                                        _new_low = float(_last_1d['low'])
-                                        _prev_open = float(_prev_1d['open'])
-                                        _prev_close = float(_prev_1d['close'])
-                                        _current_sl = float(sig['sl_price'])
-                                        _new_sl = _current_sl
-                                        _move_sl = False
+                                        if _last_3d_close_ts > _entry_ts:
+                                            _new_close = float(_last_3d['close'])
+                                            _new_high = float(_last_3d['high'])
+                                            _new_low = float(_last_3d['low'])
+                                            _prev_open = float(_prev_3d['open'])
+                                            _prev_close = float(_prev_3d['close'])
+                                            _current_sl = float(sig['sl_price'])
+                                            _new_sl = _current_sl
+                                            _move_sl = False
 
-                                        if side.lower() == 'long':
-                                            _prev_body_high = max(_prev_open, _prev_close)
-                                            if _new_close > _prev_body_high and _new_low > _current_sl:
-                                                _new_sl = _new_low
-                                                _move_sl = True
-                                        elif side.lower() == 'short':
-                                            _prev_body_low = min(_prev_open, _prev_close)
-                                            if _new_close < _prev_body_low and (_new_high < _current_sl or _current_sl == 0):
-                                                _new_sl = _new_high
-                                                _move_sl = True
+                                            if side.lower() == 'long':
+                                                _prev_body_high = max(_prev_open, _prev_close)
+                                                if _new_close > _prev_body_high and _new_low > _current_sl:
+                                                    _new_sl = _new_low
+                                                    _move_sl = True
+                                            elif side.lower() == 'short':
+                                                _prev_body_low = min(_prev_open, _prev_close)
+                                                if _new_close < _prev_body_low and (_new_high < _current_sl or _current_sl == 0):
+                                                    _new_sl = _new_high
+                                                    _move_sl = True
 
-                                        if _move_sl:
-                                            _1d_dt = pd.to_datetime(int(_last_1d['ts']), unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d')
-                                            logger.info(f"🔄 1D 吞噬 ({symbol} {_1d_dt})，止損移至 {_new_sl}")
-                                            sig['sl_price'] = _new_sl
-                                            save_active_signals(saved_signals)
-                                            history_signals = load_history_signals()
-                                            base_coin = get_base_coin(symbol)
-                                            if base_coin in history_signals:
-                                                for hs in history_signals[base_coin]:
-                                                    if hs.get('trigger_ts') == _entry_ts:
-                                                        hs['stop_loss'] = _new_sl
-                                            save_history_signals(history_signals)
-                                            send_telegram_message(
-                                                f"<b>🔄 1D 移動止損觸發</b>\n\n"
-                                                f"💎 <b>交易對:</b> {get_base_coin(symbol)} [{side.upper()}]\n"
-                                                f"📅 <b>觸發 K 線:</b> {_1d_dt}\n"
-                                                f"🛡️ <b>新止損價:</b> <code>{_new_sl:.4f}</code>"
-                                            )
-                        except Exception as _e1d:
-                            logger.warning(f"1D 移動止損監控異常 ({symbol}): {_e1d}")
+                                            if _move_sl:
+                                                _3d_dt = pd.to_datetime(int(_last_3d['ts']), unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d')
+                                                logger.info(f"🔄 3D 吞噬 ({symbol} {_3d_dt})，止損移至 {_new_sl}")
+                                                sig['sl_price'] = _new_sl
+                                                save_active_signals(saved_signals)
+                                                history_signals = load_history_signals()
+                                                base_coin = get_base_coin(symbol)
+                                                if base_coin in history_signals:
+                                                    for hs in history_signals[base_coin]:
+                                                        if hs.get('trigger_ts') == _entry_ts:
+                                                            hs['stop_loss'] = _new_sl
+                                                save_history_signals(history_signals)
+                                                send_telegram_message(
+                                                    f"<b>🔄 3D 移動止損觸發</b>\n\n"
+                                                    f"💎 <b>交易對:</b> {get_base_coin(symbol)} [{side.upper()}]\n"
+                                                    f"📅 <b>觸發 K 線:</b> {_3d_dt}\n"
+                                                    f"🛡️ <b>新止損價:</b> <code>{_new_sl:.4f}</code>"
+                                                )
+                        except Exception as _e3d:
+                            logger.warning(f"3D 移動止損監控異常 ({symbol}): {_e3d}")
 
                     await manage_tp_ladder(exchange, symbol, side, sig, size, saved_signals, open_orders)
         # 2. 孤兒訊號清理 (倉位消失但訊號仍 active)
@@ -1382,14 +1418,14 @@ def send_grouped_message(item_list, title):
 
     filtered_items = []
     for item in item_list:
-        l2 = item.get('l2_date', '')
-        if not l2 or l2 in ('未知', '未知日期', ''):
+        l3 = item.get('l3_date', item.get('l2_date', ''))
+        if not l3 or l3 in ('未知', '未知日期', ''):
             ts = item.get('trigger_ts', 0)
             if ts > 0:
-                l2 = pd.to_datetime(ts, unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d %H:%M:%S')
-        if l2 and l2 not in ('未知', '未知日期', '', '外部建倉', '持續追蹤'):
+                l3 = pd.to_datetime(ts, unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d %H:%M:%S')
+        if l3 and l3 not in ('未知', '未知日期', '', '外部建倉', '持續追蹤'):
             item = dict(item)
-            item['l2_date'] = l2
+            item['l3_date'] = l3
             filtered_items.append(item)
 
     if not filtered_items:
@@ -1397,7 +1433,7 @@ def send_grouped_message(item_list, title):
 
     date_groups = {}
     for item in filtered_items:
-        raw_date = item.get('l2_date', '')
+        raw_date = item.get('l3_date', '')
         d = raw_date[:10] if len(raw_date) >= 10 else raw_date
         if d not in date_groups:
             date_groups[d] = []
@@ -1408,7 +1444,7 @@ def send_grouped_message(item_list, title):
         coin_strs = []
         for item in date_groups[date_key]:
             base = get_base_coin(item['symbol'])
-            direction = item.get('l2_direction', '')
+            direction = item.get('l3_direction', item.get('l2_direction', ''))
             dir_str = " 🟢" if direction == "LONG" else " 🔴" if direction == "SHORT" else ""
             
             if item.get('missed') and title != '🛑 <b>加密貨幣[未上車]</b>':
@@ -1428,11 +1464,12 @@ def send_triggered_message(item, default_loss):
     precision = item['precision']
     entry = item['entry_price']
     sl = item['stop_loss']
-    l1_d = item.get('l1_date', '未知')
-    l2_d = item.get('l2_date', '未知')
-    if (not l2_d or l2_d == '未知') and item.get('trigger_ts', 0) > 0:
-        l2_d = pd.to_datetime(item['trigger_ts'], unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d %H:%M:%S')
-    direction = item.get('l2_direction', '')
+    l1_dir = item.get('l1_18d_direction', '未知')
+    l2_d = item.get('l2_date', item.get('l1_date', '未知'))
+    l3_d = item.get('l3_date', item.get('l2_date', '未知'))
+    if (not l3_d or l3_d == '未知') and item.get('trigger_ts', 0) > 0:
+        l3_d = pd.to_datetime(item['trigger_ts'], unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d %H:%M:%S')
+    direction = item.get('l3_direction', item.get('l2_direction', ''))
     dir_icon = "🟢" if direction == "LONG" else "🔴" if direction == "SHORT" else ""
 
     loss_pct = abs((entry - sl) / entry) if entry != 0 else 0
@@ -1440,8 +1477,9 @@ def send_triggered_message(item, default_loss):
 
     msg = (
         f"{dir_icon} 💎 <b>交易對:</b> {display_symbol} [{direction}]\n\n"
-        f"📅 <b>L1 (3D) 邊界:</b> <code>{l1_d}</code>\n"
-        f"📅 <b>L2 (3H) 突破進場:</b> <code>{l2_d}</code>\n"
+        f"📅 <b>L1 (18D) 吞噬方向:</b> <code>{l1_dir}</code>\n"
+        f"📅 <b>L2 (3D) 邊界:</b> <code>{l2_d}</code>\n"
+        f"📅 <b>L3 (3H) 突破進場:</b> <code>{l3_d}</code>\n"
         f"📍 <b>進場價格:</b> <code>{entry:.{precision}f}</code>\n"
         f"🛡️ <b>保護止損:</b> <code>{sl:.{precision}f}</code>\n"
         f"💰 <b>倉位價值:</b> <code>{position_value:.2f} USDT</code>"
@@ -1709,19 +1747,20 @@ async def run_scan():
                 if s['status'] == 'active':
                     sym = s['symbol']
                     ts = s.get('timestamp', 0)
-                    l2_date = s.get('l2_date', '')
-                    if not l2_date and ts > 0:
-                        l2_date = pd.to_datetime(ts, unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d %H:%M:%S')
+                    l3_date = s.get('l3_date', s.get('l2_date', ''))
+                    if not l3_date and ts > 0:
+                        l3_date = pd.to_datetime(ts, unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d %H:%M:%S')
                     holding_map[sym] = {
                         'symbol':        sym,
-                        'l2_direction':  s.get('direction', ''),
+                        'l3_direction':  s.get('direction', ''),
                         'entry_price':   s.get('entry_price', 0.0),
                         'stop_loss':     s.get('original_sl_price', s.get('sl_price', 0.0)),
                         'precision':     s.get('precision', 4),
                         'trigger_ts':    ts,
-                        'l1_open_ts':    s.get('l1_open_ts', 0),
-                        'l1_date':       s.get('l1_date', ''),
-                        'l2_date':       l2_date,
+                        'l2_open_ts':    s.get('l2_open_ts', s.get('l1_open_ts', 0)),
+                        'l1_18d_direction': s.get('l1_18d_direction', ''),
+                        'l2_date':       s.get('l2_date', s.get('l1_date', '')),
+                        'l3_date':       l3_date,
                         'status':        'active',
                     }
 
@@ -1768,10 +1807,10 @@ async def run_scan():
             sym = item['symbol']
             if BITGET_API_KEY:
                 order = await place_order(
-                    ex, sym, item.get('l2_direction', 'LONG'), item['entry_price'], item['stop_loss'],
+                    ex, sym, item.get('l3_direction', item.get('l2_direction', 'LONG')), item['entry_price'], item['stop_loss'],
                     item['precision'], default_loss, item.get('trigger_ts', 0),
-                    l1_high=item.get('l1_high', 0.0), l1_low=item.get('l1_low', 0.0), l1_open_ts=item.get('l1_open_ts', 0),
-                    l1_date=item.get('l1_date', ''), l2_date=item.get('l2_date', '')
+                    l2_high=item.get('l2_high', 0.0), l2_low=item.get('l2_low', 0.0), l2_open_ts=item.get('l2_open_ts', 0),
+                    l1_18d_direction=item.get('l1_18d_direction', ''), l2_date=item.get('l2_date', ''), l3_date=item.get('l3_date', '')
                 )
                 if order == 'skipped':
                     # 標記為錯失並更新 last_trigger_ts，防止重複下單與警報
@@ -1792,9 +1831,9 @@ async def run_scan():
         history_signals = load_history_signals()
 
         # 清除所有不屬於最新 3D 區間的舊紀錄
-        for base, current_l1_ts in latest_l1_open_ts_map.items():
-            if base in history_signals and current_l1_ts > 0:
-                history_signals[base] = [s for s in history_signals[base] if s.get('l1_open_ts', 0) >= current_l1_ts]
+        for base, current_l2_ts in latest_l1_open_ts_map.items():
+            if base in history_signals and current_l2_ts > 0:
+                history_signals[base] = [s for s in history_signals[base] if s.get('l2_open_ts', s.get('l1_open_ts', 0)) >= current_l2_ts]
 
         # 只記錄掃描器推演出的 C2 事件，與實際倉位無關
         all_triggered = real_new_triggers + missed_items + all_past_events
@@ -2138,8 +2177,9 @@ HTML_TEMPLATE = """
               if (entry > 0 && sl > 0 && Math.abs(entry - sl) > 0 && (s.status === 'active' || s.status === 'missed')) {
                   const risk = Math.abs(entry - sl);
                   let rr = 0;
-                  if (s.l2_direction === 'LONG') rr = (cp - entry) / risk;
-                  if (s.l2_direction === 'SHORT') rr = (entry - cp) / risk;
+                  const sdir = s.l3_direction || s.l2_direction || 'LONG';
+                  if (sdir === 'LONG') rr = (cp - entry) / risk;
+                  if (sdir === 'SHORT') rr = (entry - cp) / risk;
                   totalRR += rr;
               }
           });
@@ -2215,7 +2255,7 @@ HTML_TEMPLATE = """
 
     let html = '';
     activeSigs.forEach((sig, idx) => {
-      const dir = sig.l2_direction || 'LONG';
+      const dir = sig.l3_direction || sig.l2_direction || 'LONG';
       const dirText = dir === 'LONG' ? '▲ LONG' : '▼ SHORT';
       const prec = sig.precision || 4;
       const entry = parseFloat(sig.entry_price);
@@ -2238,16 +2278,20 @@ HTML_TEMPLATE = """
             <span class="status-badge active">有效</span>
             <span style="font-size:0.85rem;font-weight:700;color:${rrCol};margin-left:auto;">${rrStr}</span>
           </div>
-          <div class="card-time">突破進場：${fmt(sig.l2_date)}</div>
+          <div class="card-time">突破進場：${fmt(sig.l3_date || sig.l2_date)}</div>
         </div>
         <div class="card-grid">
           <div class="detail-block">
-            <div class="detail-label">L1 (3D) 邊界時間</div>
-            <div class="detail-value">${fmt(sig.l1_date)}</div>
+            <div class="detail-label">L1 (18D) 吞噬方向</div>
+            <div class="detail-value">${sig.l1_18d_direction || '—'}</div>
           </div>
           <div class="detail-block">
-            <div class="detail-label">L2 (3H) 突破進場時間</div>
-            <div class="detail-value">${fmt(sig.l2_date)}</div>
+            <div class="detail-label">L2 (3D) 邊界時間</div>
+            <div class="detail-value">${fmt(sig.l2_date || sig.l1_date)}</div>
+          </div>
+          <div class="detail-block">
+            <div class="detail-label">L3 (3H) 突破進場時間</div>
+            <div class="detail-value">${fmt(sig.l3_date || sig.l2_date)}</div>
           </div>
           <div class="detail-block">
             <div class="detail-label">進場價格</div>
@@ -2294,7 +2338,7 @@ HTML_TEMPLATE = """
 
     let html = '';
     sorted.forEach((sig, idx) => {
-      const dir = sig.l2_direction || 'LONG';
+      const dir = sig.l3_direction || sig.l2_direction || 'LONG';
       const status = sig.status || 'unknown';
       const dirText = dir === 'LONG' ? '▲ LONG' : '▼ SHORT';
       const statusMap = { active: '有效', closed: '已失效/止損', missed: '有效', triggered: '歷史紀錄' };
@@ -2309,16 +2353,20 @@ HTML_TEMPLATE = """
             <span class="dir-badge ${dir}">${dirText}</span>
             <span class="status-badge ${status}">${statusText}</span>
           </div>
-          <div class="card-time">突破進場：${fmt(sig.l2_date)}</div>
+          <div class="card-time">突破進場：${fmt(sig.l3_date || sig.l2_date)}</div>
         </div>
         <div class="card-grid">
           <div class="detail-block">
-            <div class="detail-label">L1 (3D) 邊界時間</div>
-            <div class="detail-value">${fmt(sig.l1_date)}</div>
+            <div class="detail-label">L1 (18D) 吞噬方向</div>
+            <div class="detail-value">${sig.l1_18d_direction || '—'}</div>
           </div>
           <div class="detail-block">
-            <div class="detail-label">L2 (3H) 突破進場時間</div>
-            <div class="detail-value">${fmt(sig.l2_date)}</div>
+            <div class="detail-label">L2 (3D) 邊界時間</div>
+            <div class="detail-value">${fmt(sig.l2_date || sig.l1_date)}</div>
+          </div>
+          <div class="detail-block">
+            <div class="detail-label">L3 (3H) 突破進場時間</div>
+            <div class="detail-value">${fmt(sig.l3_date || sig.l2_date)}</div>
           </div>
           <div class="detail-block">
             <div class="detail-label">進場價格</div>
