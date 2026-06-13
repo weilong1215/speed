@@ -538,7 +538,7 @@ async def check_signal_expired(exchange, symbol, direction, entry, sl, precision
 
 
 async def place_order(exchange, symbol, direction, entry, sl, precision, fixed_loss_usdt, trigger_ts,
-                      l2_high=0.0, l2_low=0.0, l2_open_ts=0, l1_18d_direction='', l2_date='', l3_date=''):
+                      l2_high=0.0, l2_low=0.0, l2_open_ts=0, l1_18d_direction='', l1_date='', l2_date='', l3_date=''):
     """
     執行下單：Limit Order + 分層槓桿策略 (MAX → 20x → 10x)
 
@@ -713,7 +713,7 @@ async def place_order(exchange, symbol, direction, entry, sl, precision, fixed_l
                     'original_sl_price': sl,
                     'status': 'active', 'precision': precision, 'tp_stage': 0,
                     'l2_high': l2_high, 'l2_low': l2_low, 'l2_open_ts': l2_open_ts,
-                    'l1_18d_direction': l1_18d_direction, 'l2_date': l2_date, 'l3_date': l3_date,
+                    'l1_18d_direction': l1_18d_direction, 'l1_date': l1_date, 'l2_date': l2_date, 'l3_date': l3_date,
                     'timestamp': trigger_ts if trigger_ts > 0 else int(time.time() * 1000)
                 })
                 save_active_signals(signals)
@@ -1848,7 +1848,7 @@ async def run_scan():
                     ex, sym, item.get('l3_direction', item.get('l2_direction', 'LONG')), item['entry_price'], item['stop_loss'],
                     item['precision'], default_loss, item.get('trigger_ts', 0),
                     l2_high=item.get('l2_high', 0.0), l2_low=item.get('l2_low', 0.0), l2_open_ts=item.get('l2_open_ts', 0),
-                    l1_18d_direction=item.get('l1_18d_direction', ''), l2_date=item.get('l2_date', ''), l3_date=item.get('l3_date', '')
+                    l1_18d_direction=item.get('l1_18d_direction', ''), l1_date=item.get('l1_date', ''), l2_date=item.get('l2_date', ''), l3_date=item.get('l3_date', '')
                 )
                 if order == 'skipped':
                     # 標記為錯失並更新 last_trigger_ts，防止重複下單與警報
@@ -2451,14 +2451,7 @@ HTML_TEMPLATE = """
             <div class="detail-label">止損價格</div>
             <div class="detail-value sl">${fmt(sig.stop_loss, prec)}</div>
           </div>
-          <div class="detail-block">
-            <div class="detail-label">即時價格</div>
-            <div class="detail-value" style="color:#58a6ff;">${fmt(cp, prec)}</div>
-          </div>
-          <div class="detail-block">
-            <div class="detail-label">即時 RR</div>
-            <div class="detail-value" style="color:${rrCol};font-weight:700;">${rrStr}</div>
-          </div>
+
         </div>
       </div>`;
     });
@@ -2545,14 +2538,7 @@ HTML_TEMPLATE = """
             <div class="detail-label">止損價格</div>
             <div class="detail-value sl">${fmt(sig.stop_loss, prec)}</div>
           </div>
-          <div class="detail-block">
-            <div class="detail-label">即時價格</div>
-            <div class="detail-value" style="color:#58a6ff;">${fmt(cp, prec)}</div>
-          </div>
-          <div class="detail-block">
-            <div class="detail-label">即時 RR</div>
-            <div class="detail-value" style="color:${rrCol};font-weight:700;">${rrStr}</div>
-          </div>
+
         </div>
       </div>`;
     });
@@ -2617,14 +2603,7 @@ HTML_TEMPLATE = """
             <div class="detail-label">止損價格</div>
             <div class="detail-value sl">${fmt(sig.sl_price, prec)}</div>
           </div>
-          <div class="detail-block">
-            <div class="detail-label">即時價格</div>
-            <div class="detail-value" style="color:#58a6ff;">${fmt(cp, prec)}</div>
-          </div>
-          <div class="detail-block">
-            <div class="detail-label">即時 RR</div>
-            <div class="detail-value" style="color:${rrCol};font-weight:700;">${rrStr}</div>
-          </div>
+
         </div>
       </div>`;
     });
