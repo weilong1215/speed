@@ -2412,21 +2412,20 @@ HTML_TEMPLATE = """
         rrStr = (rr >= 0 ? '+' : '') + rr.toFixed(2) + 'R';
         rrCol = rr >= 0 ? '#3fb950' : '#f85149';
       }
-      const badge = (sig.status === 'active') ? (allHoldings.includes(sig._base) ? '<span class="status-badge" style="background-color:#1f6feb;color:#fff;">持倉中</span>' : '<span class="status-badge" style="background-color:#9e6a03;color:#fff;">掛單中</span>') : '';
+      const badge = (sig.status === 'active') ? (allHoldings.includes(sig._base) ? '<span class="dir-badge LONG">持倉中</span>' : '<span class="dir-badge" style="color: #d29922; background: rgba(210,153,34,0.1); border-color: rgba(210,153,34,0.4);">掛單中</span>') : '';
       html += `
       <div class="signal-card ${dir} active" style="cursor:pointer" onclick="selectSymbol('${sig._base}')">
         <div class="card-header">
           <div class="card-title">
             <span style="color:#58a6ff;font-weight:600;font-size:0.95rem;">${sig._base}</span>
-            <span class="dir-badge ${dir}">${dirText}</span>
             ${badge}
             <span style="font-size:0.85rem;font-weight:700;color:${rrCol};margin-left:auto;">${rrStr}</span>
           </div>
         </div>
         <div class="card-grid">
           <div class="detail-block">
-            <div class="detail-label">L1 (18D) 吞噬方向 (日期)</div>
-            <div class="detail-value">${sig.l1_18d_direction || '—'} (${sig.l1_date || '—'})</div>
+            <div class="detail-label">L1 (18D) 吞噬時間</div>
+            <div class="detail-value">${sig.l1_date || '—'}</div>
           </div>
           <div class="detail-block">
             <div class="detail-label">L2 (3D) 邊界時間</div>
@@ -2489,22 +2488,21 @@ HTML_TEMPLATE = """
       const statusMap = { active: '有效', closed: '止損', missed: '有效', triggered: '歷史紀錄' };
       const statusText = statusMap[status] || status;
       const prec = sig.precision || 4;
-      const badge = (status === 'active') ? (allHoldings.includes(sym) ? '<span class="status-badge" style="background-color:#1f6feb;color:#fff;">持倉中</span>' : '<span class="status-badge" style="background-color:#9e6a03;color:#fff;">掛單中</span>') : '';
+      const badge = (status === 'active') ? (allHoldings.includes(sym) ? '<span class="dir-badge LONG">持倉中</span>' : '<span class="dir-badge" style="color: #d29922; background: rgba(210,153,34,0.1); border-color: rgba(210,153,34,0.4);">掛單中</span>') : '';
 
       html += `
       <div class="signal-card ${dir} ${status}">
         <div class="card-header">
           <div class="card-title">
             <span style="color:#6e7681;font-size:0.75rem;">#${idx + 1}</span>
-            <span class="dir-badge ${dir}">${dirText}</span>
             ${(status === 'closed' || status === 'triggered') ? `<span class="status-badge ${status}">${statusText}</span>` : ''}
             ${badge}
           </div>
         </div>
         <div class="card-grid">
           <div class="detail-block">
-            <div class="detail-label">L1 (18D) 吞噬方向 (日期)</div>
-            <div class="detail-value">${sig.l1_18d_direction || '—'} (${sig.l1_date || '—'})</div>
+            <div class="detail-label">L1 (18D) 吞噬時間</div>
+            <div class="detail-value">${sig.l1_date || '—'}</div>
           </div>
           <div class="detail-block">
             <div class="detail-label">L2 (3D) 邊界時間</div>
@@ -2553,23 +2551,22 @@ HTML_TEMPLATE = """
       }
       const isH = allHoldings.includes(base);
       const badge = isH
-        ? '<span class="status-badge" style="background-color:#1f6feb;color:#fff;">持倉中</span>'
-        : '<span class="status-badge" style="background-color:#9e6a03;color:#fff;">掛單中</span>';
+        ? '<span class="dir-badge LONG">持倉中</span>'
+        : '<span class="dir-badge" style="color: #d29922; background: rgba(210,153,34,0.1); border-color: rgba(210,153,34,0.4);">掛單中</span>';
       const l3 = sig.l3_date || sig.l2_date || '—';
       html += `
       <div class="signal-card ${dir} active">
         <div class="card-header">
           <div class="card-title">
             <span style="color:#58a6ff;font-weight:600;font-size:0.95rem;">${base}</span>
-            <span class="dir-badge ${dir}">${dirText}</span>
             ${badge}
             <span style="font-size:0.85rem;font-weight:700;color:${rrCol};margin-left:auto;">${rrStr}</span>
           </div>
         </div>
         <div class="card-grid">
           <div class="detail-block">
-            <div class="detail-label">L1 (18D) 吞噬方向 (日期)</div>
-            <div class="detail-value">${sig.l1_18d_direction || '—'} (${sig.l1_date || '—'})</div>
+            <div class="detail-label">L1 (18D) 吞噬時間</div>
+            <div class="detail-value">${sig.l1_date || '—'}</div>
           </div>
           <div class="detail-block">
             <div class="detail-label">L2 (3D) 邊界時間</div>
