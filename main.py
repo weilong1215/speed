@@ -2452,6 +2452,10 @@ HTML_TEMPLATE = """
             <div class="detail-value sl">${fmt(sig.stop_loss, prec)}</div>
           </div>
           <div class="detail-block">
+            <div class="detail-label">即時價格</div>
+            <div class="detail-value" style="color:#58a6ff;">${fmt(cp, prec)}</div>
+          </div>
+          <div class="detail-block">
             <div class="detail-label">即時 RR</div>
             <div class="detail-value" style="color:${rrCol};font-weight:700;">${rrStr}</div>
           </div>
@@ -2497,6 +2501,18 @@ HTML_TEMPLATE = """
       const statusText = statusMap[status] || status;
       const prec = sig.precision || 4;
       const badge = (status === 'active') ? (allHoldings.includes(sym) ? '<span class="dir-badge LONG">持倉中</span>' : '<span class="dir-badge" style="color: #d29922; background: rgba(210,153,34,0.1); border-color: rgba(210,153,34,0.4);">掛單中</span>') : '';
+      const entry = parseFloat(sig.entry_price);
+      const sl = parseFloat(sig.stop_loss);
+      const cp = parseFloat(sig.current_price || entry);
+      let rrStr = '—', rrCol = '#8b949e';
+      if (status === 'closed') {
+        rrStr = '-1.00R'; rrCol = '#f85149';
+      } else if (entry > 0 && sl > 0 && Math.abs(entry - sl) > 0) {
+        const risk = Math.abs(entry - sl);
+        let rr = dir === 'LONG' ? (cp - entry) / risk : (entry - cp) / risk;
+        rrStr = (rr >= 0 ? '+' : '') + rr.toFixed(2) + 'R';
+        rrCol = rr >= 0 ? '#3fb950' : '#f85149';
+      }
 
       html += `
       <div class="signal-card ${dir} ${status}">
@@ -2505,6 +2521,7 @@ HTML_TEMPLATE = """
             <span style="color:#6e7681;font-size:0.75rem;">#${idx + 1}</span>
             ${(status === 'closed' || status === 'triggered') ? `<span class="status-badge ${status}">${statusText}</span>` : ''}
             ${badge}
+            <span style="font-size:0.85rem;font-weight:700;color:${rrCol};margin-left:auto;">${rrStr}</span>
           </div>
         </div>
         <div class="card-grid">
@@ -2527,6 +2544,14 @@ HTML_TEMPLATE = """
           <div class="detail-block">
             <div class="detail-label">止損價格</div>
             <div class="detail-value sl">${fmt(sig.stop_loss, prec)}</div>
+          </div>
+          <div class="detail-block">
+            <div class="detail-label">即時價格</div>
+            <div class="detail-value" style="color:#58a6ff;">${fmt(cp, prec)}</div>
+          </div>
+          <div class="detail-block">
+            <div class="detail-label">即時 RR</div>
+            <div class="detail-value" style="color:${rrCol};font-weight:700;">${rrStr}</div>
           </div>
         </div>
       </div>`;
