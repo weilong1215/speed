@@ -2422,7 +2422,6 @@ HTML_TEMPLATE = """
             ${badge}
             <span style="font-size:0.85rem;font-weight:700;color:${rrCol};margin-left:auto;">${rrStr}</span>
           </div>
-          <div class="card-time">突破進場：${fmt(sig.l3_date || sig.l2_date)}</div>
         </div>
         <div class="card-grid">
           <div class="detail-block">
@@ -2501,7 +2500,6 @@ HTML_TEMPLATE = """
             ${(status === 'closed' || status === 'triggered') ? `<span class="status-badge ${status}">${statusText}</span>` : ''}
             ${badge}
           </div>
-          <div class="card-time">突破進場：${fmt(sig.l3_date || sig.l2_date)}</div>
         </div>
         <div class="card-grid">
           <div class="detail-block">
@@ -2567,9 +2565,20 @@ HTML_TEMPLATE = """
             ${badge}
             <span style="font-size:0.85rem;font-weight:700;color:${rrCol};margin-left:auto;">${rrStr}</span>
           </div>
-          <div class="card-time">突破進場：${fmt(l3)}</div>
         </div>
         <div class="card-grid">
+          <div class="detail-block">
+            <div class="detail-label">L1 (18D) 吞噬方向 (日期)</div>
+            <div class="detail-value">${sig.l1_18d_direction || '—'} (${sig.l1_date || '—'})</div>
+          </div>
+          <div class="detail-block">
+            <div class="detail-label">L2 (3D) 邊界時間</div>
+            <div class="detail-value">${fmt(sig.l2_date || '—')}</div>
+          </div>
+          <div class="detail-block">
+            <div class="detail-label">L3 (3H) 突破進場時間</div>
+            <div class="detail-value">${fmt(l3)}</div>
+          </div>
           <div class="detail-block">
             <div class="detail-label">進場價格</div>
             <div class="detail-value price">${fmt(sig.entry_price, prec)}</div>
@@ -2595,13 +2604,73 @@ HTML_TEMPLATE = """
   function renderPerfHome() {
     document.getElementById('header-title').textContent = '📈 歷史績效 (3D區間)';
     const container = document.getElementById('signal-container');
+    
+    let curTot = 0, curCls = 0, curRR = 0;
+    let currentL2Date = '';
+    
+    Object.values(allData).forEach(sigs => {
+      sigs.forEach(s => {
+        curTot++;
+        if (s.l2_date && currentL2Date === '') currentL2Date = s.l2_date;
+        
+        if (s.status === 'closed') { 
+          curCls++; 
+          curRR -= 1; 
+        } else if (s.status === 'active' || s.status === 'missed') {
+          const entry = parseFloat(s.entry_price), sl = parseFloat(s.stop_loss);
+          const cp = parseFloat(s.current_price || entry);
+          if (entry > 0 && sl > 0 && Math.abs(entry - sl) > 0) {
+            const risk = Math.abs(entry - sl);
+            const sdir = s.l3_direction || s.l2_direction || 'LONG';
+            curRR += sdir === 'LONG' ? (cp - entry) / risk : (entry - cp) / risk;
+          }
+        }
+      });
+    });
+
+    let html = '';
+
+    if (curTot > 0) {
+      const curWinRate = curTot > 0 ? ((curTot - curCls) / curTot * 100).toFixed(1) : 0;
+      const rrStr = (curRR >= 0 ? '+' : '') + curRR.toFixed(2) + 'R';
+      const rrCol = curRR >= 0 ? '#3fb950' : '#f85149';
+      
+      html += `
+      <div class="signal-card active" style="border: 1px solid #58a6ff; margin-bottom: 24px;">
+        <div class="card-header">
+          <div class="card-title">
+            <span style="color:#58a6ff;font-weight:600;font-size:0.95rem;">區間：${currentL2Date || '未定'} (進行中)</span>
+            <span class="status-badge" style="background-color:#1f6feb;color:#fff;">即時計算</span>
+            <span style="font-size:0.85rem;font-weight:700;color:${rrCol};margin-left:auto;">${rrStr}</span>
+          </div>
+        </div>
+        <div class="card-grid">
+          <div class="detail-block">
+            <div class="detail-label">總訊號數</div>
+            <div class="detail-value" style="color:#e6edf3;">${curTot}</div>
+          </div>
+          <div class="detail-block">
+            <div class="detail-label">止損數量</div>
+            <div class="detail-value" style="color:#f85149;">${curCls}</div>
+          </div>
+          <div class="detail-block">
+            <div class="detail-label">勝率</div>
+            <div class="detail-value" style="color:#3fb950;">${curWinRate}%</div>
+          </div>
+          <div class="detail-block">
+            <div class="detail-label">區間總 RR</div>
+            <div class="detail-value" style="color:${rrCol};font-weight:700;">${rrStr}</div>
+          </div>
+        </div>
+      </div>`;
+    }
+
     const dates = Object.keys(allPerfHistory).sort((a, b) => new Date(b) - new Date(a));
-    if (dates.length === 0) {
+    if (dates.length === 0 && curTot === 0) {
       container.innerHTML = `<div class="empty-state"><div class="icon">📈</div><p>尚無歷史績效紀錄</p></div>`;
       return;
     }
     
-    let html = '';
     dates.forEach(date => {
       const stats = allPerfHistory[date];
       const rr = parseFloat(stats.total_rr);
@@ -2728,6 +2797,7 @@ def api_data():
                     'sl_price': s.get('sl_price', 0),
                     'original_sl_price': s.get('original_sl_price', 0),
                     'precision': s.get('precision', 4),
+                    'l1_date': s.get('l1_date', ''),
                     'l2_date': s.get('l2_date', ''),
                     'l3_date': s.get('l3_date', ''),
                     'l1_18d_direction': s.get('l1_18d_direction', ''),
