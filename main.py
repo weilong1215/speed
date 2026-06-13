@@ -1783,11 +1783,18 @@ async def run_scan():
                 holding_map[sym] = {'symbol': sym, 'l2_direction': p['side'].upper(), 'status': 'active'}
 
         holding_items = []
+        real_holding_items = []
+        pending_items = []
+        existing_pos_syms = set(p['symbol'] for p in existing_positions)
         real_new_triggers = []
         missed_items = []
 
         for sym, data in holding_map.items():
             holding_items.append(data)
+            if sym in existing_pos_syms:
+                real_holding_items.append(data)
+            else:
+                pending_items.append(data)
         
         holding_items_dict = {item['symbol']: item for item in holding_items}
 
@@ -1885,11 +1892,13 @@ async def run_scan():
 
         signals = load_active_signals()
         
-        if holding_items:
-            send_grouped_message(holding_items, "💼 <b>加密貨幣[持倉中]</b>")
+        if real_holding_items:
+            send_grouped_message(real_holding_items, "💼 <b>加密貨幣[持倉中]</b>")
+        if pending_items:
+            send_grouped_message(pending_items, "⏳ <b>加密貨幣[掛單中]</b>")
 
         active_count = len(watchlist)
-        logger.info(f"✅ 掃描完成。新觸發: {len(real_new_triggers)} / 持倉: {len(holding_items)} / 持倉新訊號: {len(real_holding_new_triggers)} / 未上車: {len(missed_items)} / 追蹤總數: {active_count}")
+        logger.info(f"✅ 掃描完成。新觸發: {len(real_new_triggers)} / 持倉: {len(real_holding_items)} / 掛單: {len(pending_items)} / 持倉新訊號: {len(real_holding_new_triggers)} / 未上車: {len(missed_items)} / 追蹤總數: {active_count}")
 
         if not real_new_triggers and not holding_items and not missed_items:
             send_telegram_message(f"✅ <b>條件掃描完成</b>\n本次共掃描 {total_coins} 個幣種，無滿足條件標的。\n(當前追蹤觸發訊號: {active_count} 個)")
@@ -2167,11 +2176,14 @@ HTML_TEMPLATE = """
       // 把 current_price 補回歷史紀錄
       Object.entries(allData).forEach(([base, sigs]) => {
         const cp = priceMap[base];
-        if (cp) sigs.forEach(s => { if (!s.current_price) s.current_price = cp; });
+        if (cp) sigs.forEach(s => { if (!s.current_price) s.current_price = cp; s._base = base; });
+        else sigs.forEach(s => { s._base = base; });
       });
       
       let activeSigs = 0;
       let closedSigs = 0;
+      let holdingSigs = 0;
+      let pendingSigs = 0;
       let totalRR = 0;
       Object.values(allData).forEach(sigs => {
           sigs.forEach(s => {
@@ -2179,6 +2191,13 @@ HTML_TEMPLATE = """
                   closedSigs++;
               } else if (s.status === 'active' || s.status === 'missed') {
                   activeSigs++;
+                  if (s.status === 'active') {
+                      if (allHoldings.includes(s._base)) {
+                          holdingSigs++;
+                      } else {
+                          pendingSigs++;
+                      }
+                  }
               }
               const entry = parseFloat(s.entry_price);
               const sl = parseFloat(s.stop_loss);
@@ -2199,8 +2218,10 @@ HTML_TEMPLATE = """
       const rrColor = totalRR >= 0 ? '#3fb950' : '#f85149';
       
       document.getElementById('global-stats').innerHTML = `
-        <span>📊 有效訊號：<strong style="color:#3fb950">${activeSigs}</strong></span>
-        <span>❌ 已止損/失效：<strong style="color:#f85149">${closedSigs}</strong></span>
+        <span>📊 訊號：<strong style="color:#3fb950">${activeSigs}</strong></span>
+        <span>💼 持倉中：<strong style="color:#9e6a03">${holdingSigs}</strong></span>
+        <span>⏳ 掛單中：<strong style="color:#e3b341">${pendingSigs}</strong></span>
+        <span>❌ 止損：<strong style="color:#f85149">${closedSigs}</strong></span>
         <span>🏆 勝率：<strong style="color:#3fb950">${winRate}%</strong></span>
         <span>💰 有效總 RR：<strong style="color:${rrColor}">${rrText}</strong></span>
       `;
@@ -2285,7 +2306,6 @@ HTML_TEMPLATE = """
           <div class="card-title">
             <span style="color:#58a6ff;font-weight:600;font-size:0.95rem;">${sig._base}</span>
             <span class="dir-badge ${dir}">${dirText}</span>
-            <span class="status-badge active">有效</span>
             ${isHolding ? '<span class="status-badge" style="background-color:#9e6a03;color:#fff;">持倉中</span>' : ''}
             <span style="font-size:0.85rem;font-weight:700;color:${rrCol};margin-left:auto;">${rrStr}</span>
           </div>
@@ -2363,7 +2383,7 @@ HTML_TEMPLATE = """
           <div class="card-title">
             <span style="color:#6e7681;font-size:0.75rem;">#${idx + 1}</span>
             <span class="dir-badge ${dir}">${dirText}</span>
-            <span class="status-badge ${status}">${statusText}</span>
+            ${(status === 'closed' || status === 'triggered') ? `<span class="status-badge ${status}">${statusText}</span>` : ''}
             ${isHolding ? '<span class="status-badge" style="background-color:#9e6a03;color:#fff;">持倉中</span>' : ''}
           </div>
           <div class="card-time">突破進場：${fmt(sig.l3_date || sig.l2_date)}</div>
