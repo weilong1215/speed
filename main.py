@@ -2269,7 +2269,7 @@ HTML_TEMPLATE = """
         <span>🏆 勝率：<strong style="color:#3fb950">${winRate}%</strong></span>
         <span>💰 訊號總 RR：<strong style="color:${rrColor}">${rrText}</strong></span>
       `;
-    } else {
+    } else if (currentView === 'holdings') {
       let hCount = 0, pCount = 0, hRR = 0;
       allActiveSignals.forEach(s => {
         const base = s._base;
