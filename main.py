@@ -64,6 +64,7 @@ WATCHLIST_FILE = os.path.join(DATA_DIR, "watchlist.json")
 ACTIVE_SIGNALS_FILE = os.path.join(DATA_DIR, "active_signals.json")
 HISTORY_SIGNALS_FILE = os.path.join(DATA_DIR, "history_signals.json")
 SCANNED_COINS_FILE = os.path.join(DATA_DIR, "scanned_coins.json")
+HOLDINGS_FILE = os.path.join(DATA_DIR, "holdings.json")
 
 def ensure_data_dir():
     if not os.path.exists(DATA_DIR):
@@ -79,6 +80,9 @@ def ensure_data_dir():
             json.dump({}, f)
     if not os.path.exists(SCANNED_COINS_FILE):
         with open(SCANNED_COINS_FILE, 'w') as f:
+            json.dump([], f)
+    if not os.path.exists(HOLDINGS_FILE):
+        with open(HOLDINGS_FILE, 'w') as f:
             json.dump([], f)
 
 def load_watchlist():
@@ -112,6 +116,22 @@ def load_scanned_coins() -> list:
     ensure_data_dir()
     try:
         with open(SCANNED_COINS_FILE, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    except Exception:
+        return []
+
+def save_holdings(bases: list):
+    ensure_data_dir()
+    try:
+        with open(HOLDINGS_FILE, 'w', encoding='utf-8') as f:
+            json.dump(list(set(bases)), f, ensure_ascii=False)
+    except Exception as e:
+        logger.error(f"儲存 holdings 失敗: {e}")
+
+def load_holdings() -> list:
+    ensure_data_dir()
+    try:
+        with open(HOLDINGS_FILE, 'r', encoding='utf-8') as f:
             return json.load(f)
     except Exception:
         return []
@@ -681,9 +701,10 @@ async def place_order(exchange, symbol, direction, entry, sl, precision, fixed_l
                 })
                 save_active_signals(signals)
                 l3_display = l3_date or (pd.to_datetime(trigger_ts, unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d %H:%M:%S') if trigger_ts > 0 else '未知')
+                dir_str = "🟢 LONG" if direction == "LONG" else "🔴 SHORT" if direction == "SHORT" else direction
                 send_telegram_message(
                     f"<b>🤖 自動下單 ({leverage}x)</b>\n\n"
-                    f"💎 {get_base_coin(symbol)} [{direction}]\n"
+                    f"💎 {get_base_coin(symbol)} [{dir_str}]\n"
                     f"📅 L3 (3H): <code>{l3_display}</code>\n"
                     f"🎯 進場: <code>{entry:.{precision}f}</code>\n"
                     f"🛡️ 保護止損: <code>{sl:.{precision}f}</code>"
@@ -897,6 +918,7 @@ async def monitor_positions(exchange):
         saved_signals = load_active_signals()
 
         pos_symbols = [p['symbol'] for p in active_pos]
+        save_holdings([get_base_coin(s) for s in pos_symbols])
         logger.info(f"--- 倉位監控檢查 | 交易所持倉: {len(active_pos)} 個 ({', '.join(pos_symbols) if pos_symbols else '無'}) ---")
 
         # 1. 監控已成交倉位，確保 TP 與 SL 掛單存在
@@ -1474,33 +1496,7 @@ def send_grouped_message(item_list, title):
 
     send_telegram_message("\n".join(lines))
 
-def send_triggered_message(item, default_loss):
-    """3H 已成立的幣種，獨立一則訊息，含倉位價值與 L2 日期"""
-    display_symbol = get_base_coin(item['symbol'])
-    precision = item['precision']
-    entry = item['entry_price']
-    sl = item['stop_loss']
-    l1_dir = item.get('l1_18d_direction', '未知')
-    l2_d = item.get('l2_date', item.get('l1_date', '未知'))
-    l3_d = item.get('l3_date', item.get('l2_date', '未知'))
-    if (not l3_d or l3_d == '未知') and item.get('trigger_ts', 0) > 0:
-        l3_d = pd.to_datetime(item['trigger_ts'], unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d %H:%M:%S')
-    direction = item.get('l3_direction', item.get('l2_direction', ''))
-    dir_icon = "🟢" if direction == "LONG" else "🔴" if direction == "SHORT" else ""
 
-    loss_pct = abs((entry - sl) / entry) if entry != 0 else 0
-    position_value = default_loss / loss_pct if loss_pct > 0 else 0
-
-    msg = (
-        f"{dir_icon} 💎 <b>交易對:</b> {display_symbol} [{direction}]\n\n"
-        f"📅 <b>L1 (18D) 吞噬方向:</b> <code>{l1_dir}</code> (<code>{l1_d}</code>)\n"
-        f"📅 <b>L2 (3D) 邊界:</b> <code>{l2_d}</code>\n"
-        f"📅 <b>L3 (3H) 突破進場:</b> <code>{l3_d}</code>\n"
-        f"📍 <b>進場價格:</b> <code>{entry:.{precision}f}</code>\n"
-        f"🛡️ <b>保護止損:</b> <code>{sl:.{precision}f}</code>\n"
-        f"💰 <b>倉位價值:</b> <code>{position_value:.2f} USDT</code>"
-    )
-    send_telegram_message(msg)
 
 def send_system_settings_message(config):
     """獨立一則系統設定訊息"""
@@ -1717,6 +1713,7 @@ async def run_scan():
             try:
                 positions = await ex.fetch_positions()
                 existing_positions = [p for p in positions if float(p.get('contracts', 0) or p.get('size', 0)) > 0]
+                save_holdings([get_base_coin(p['symbol']) for p in existing_positions])
             except Exception as e:
                 logger.warning(f"拉取持倉列表失敗 (下單防重複查詢): {e}")
 
@@ -1888,14 +1885,8 @@ async def run_scan():
 
         signals = load_active_signals()
         
-        for item in real_new_triggers:
-            send_triggered_message(item, default_loss)
-            
         if holding_items:
             send_grouped_message(holding_items, "💼 <b>加密貨幣[持倉中]</b>")
-
-        if missed_items:
-            send_grouped_message(missed_items, "🛑 <b>加密貨幣[未上車]</b>")
 
         active_count = len(watchlist)
         logger.info(f"✅ 掃描完成。新觸發: {len(real_new_triggers)} / 持倉: {len(holding_items)} / 持倉新訊號: {len(real_holding_new_triggers)} / 未上車: {len(missed_items)} / 追蹤總數: {active_count}")
@@ -2145,7 +2136,7 @@ HTML_TEMPLATE = """
 
   <div class="main">
     <div class="main-header">
-      <h2 id="header-title">📡 目前有效訊號總覽</h2>
+      <h2 id="header-title">📡 訊號總覽</h2>
       <div id="global-stats" style="margin-top: 10px; font-size: 0.85rem; color: #8b949e; display: flex; gap: 15px; flex-wrap: wrap;"></div>
       <div class="meta"><span class="refresh-dot"></span>每 10 秒自動更新</div>
     </div>
@@ -2162,6 +2153,7 @@ HTML_TEMPLATE = """
   let allData = {};
   let allSymbols = [];
   let priceMap = {};  // base -> current_price
+  let allHoldings = [];
 
   async function fetchData() {
     try {
@@ -2170,6 +2162,7 @@ HTML_TEMPLATE = """
       allData = json.history || {};
       allSymbols = json.watchlist || [];
       priceMap = json.price_map || {};
+      allHoldings = json.holdings || [];
 
       // 把 current_price 補回歷史紀錄
       Object.entries(allData).forEach(([base, sigs]) => {
@@ -2232,7 +2225,7 @@ HTML_TEMPLATE = """
     const allSet = Object.keys(allData).filter(k => allData[k].length > 0).sort();
     const filtered = q ? allSet.filter(s => s.includes(q)) : allSet;
 
-    let html = '<div class="symbol-item ' + (currentSymbol === null ? 'active' : '') + '" onclick="goHome()"><span>🏠 有效訊號總覽</span></div>';
+    let html = '<div class="symbol-item ' + (currentSymbol === null ? 'active' : '') + '" onclick="goHome()"><span>🏠 訊號總覽</span></div>';
     filtered.forEach(sym => {
       const sigs = allData[sym] || [];
       const activeClass = sym === currentSymbol ? 'active' : '';
@@ -2251,7 +2244,7 @@ HTML_TEMPLATE = """
   }
 
   function renderHome() {
-    document.getElementById('header-title').textContent = '📡 目前有效訊號總覽';
+    document.getElementById('header-title').textContent = '📡 訊號總覽';
     const container = document.getElementById('signal-container');
 
     // 收集所有 active 的訊號，每筆帶上幣種名
@@ -2285,6 +2278,7 @@ HTML_TEMPLATE = """
         rrStr = (rr >= 0 ? '+' : '') + rr.toFixed(2) + 'R';
         rrCol = rr >= 0 ? '#3fb950' : '#f85149';
       }
+      const isHolding = allHoldings.includes(sig._base) && sig.status === 'active';
       html += `
       <div class="signal-card ${dir} active" style="cursor:pointer" onclick="selectSymbol('${sig._base}')">
         <div class="card-header">
@@ -2292,6 +2286,7 @@ HTML_TEMPLATE = """
             <span style="color:#58a6ff;font-weight:600;font-size:0.95rem;">${sig._base}</span>
             <span class="dir-badge ${dir}">${dirText}</span>
             <span class="status-badge active">有效</span>
+            ${isHolding ? '<span class="status-badge" style="background-color:#9e6a03;color:#fff;">持倉中</span>' : ''}
             <span style="font-size:0.85rem;font-weight:700;color:${rrCol};margin-left:auto;">${rrStr}</span>
           </div>
           <div class="card-time">突破進場：${fmt(sig.l3_date || sig.l2_date)}</div>
@@ -2357,9 +2352,10 @@ HTML_TEMPLATE = """
       const dir = sig.l3_direction || sig.l2_direction || 'LONG';
       const status = sig.status || 'unknown';
       const dirText = dir === 'LONG' ? '▲ LONG' : '▼ SHORT';
-      const statusMap = { active: '有效', closed: '已失效/止損', missed: '有效', triggered: '歷史紀錄' };
+      const statusMap = { active: '有效', closed: '止損', missed: '有效', triggered: '歷史紀錄' };
       const statusText = statusMap[status] || status;
       const prec = sig.precision || 4;
+      const isHolding = allHoldings.includes(sym) && status === 'active';
 
       html += `
       <div class="signal-card ${dir} ${status}">
@@ -2368,6 +2364,7 @@ HTML_TEMPLATE = """
             <span style="color:#6e7681;font-size:0.75rem;">#${idx + 1}</span>
             <span class="dir-badge ${dir}">${dirText}</span>
             <span class="status-badge ${status}">${statusText}</span>
+            ${isHolding ? '<span class="status-badge" style="background-color:#9e6a03;color:#fff;">持倉中</span>' : ''}
           </div>
           <div class="card-time">突破進場：${fmt(sig.l3_date || sig.l2_date)}</div>
         </div>
@@ -2471,7 +2468,8 @@ def api_data():
         [get_base_coin(k) for k in watchlist.keys()] +
         list(cleaned_history.keys())
     ))
-    return jsonify({"watchlist": watchlist_coins, "history": cleaned_history, "price_map": price_map})
+    holdings = load_holdings()
+    return jsonify({"watchlist": watchlist_coins, "history": cleaned_history, "price_map": price_map, "holdings": holdings})
 
 def run_flask():
     port = int(os.environ.get("PORT", 8080))
