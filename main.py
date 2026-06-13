@@ -1789,6 +1789,7 @@ async def run_scan():
                         'trigger_ts':    ts,
                         'l2_open_ts':    s.get('l2_open_ts', s.get('l1_open_ts', 0)),
                         'l1_18d_direction': s.get('l1_18d_direction', ''),
+                        'l1_date':       s.get('l1_date', ''),
                         'l2_date':       s.get('l2_date', s.get('l1_date', '')),
                         'l3_date':       l3_date,
                         'status':        'active',
@@ -1886,9 +1887,16 @@ async def run_scan():
                                 "total_signals": 0,
                                 "closed_signals": 0,
                                 "total_rr": 0.0,
-                                "win_rate": "0.0"
+                                "win_rate": "0.0",
+                                "l3_date": ""
                             }
                         
+                        s_l3_date = s.get('l3_date', '').split(' ')[0]
+                        if s_l3_date:
+                            curr_l3 = perf_history[interval_date].get("l3_date", "")
+                            if not curr_l3 or s_l3_date < curr_l3:
+                                perf_history[interval_date]["l3_date"] = s_l3_date
+                                
                         perf_history[interval_date]["total_signals"] += 1
                         
                         status = s.get('status', 'active')
@@ -2603,12 +2611,13 @@ HTML_TEMPLATE = """
     const container = document.getElementById('signal-container');
     
     let curTot = 0, curCls = 0, curRR = 0;
-    let currentL2Date = '';
+    let currentL3Date = '';
     
     Object.values(allData).forEach(sigs => {
       sigs.forEach(s => {
         curTot++;
-        if (s.l2_date && currentL2Date === '') currentL2Date = s.l2_date;
+        let sL3 = (s.l3_date || '').split(' ')[0];
+        if (sL3 && (currentL3Date === '' || sL3 < currentL3Date)) currentL3Date = sL3;
         
         if (s.status === 'closed') { 
           curCls++; 
@@ -2636,7 +2645,7 @@ HTML_TEMPLATE = """
       <div class="signal-card active" style="border: 1px solid #58a6ff; margin-bottom: 24px;">
         <div class="card-header">
           <div class="card-title">
-            <span style="color:#58a6ff;font-weight:600;font-size:0.95rem;">區間：${currentL2Date || '未定'} (進行中)</span>
+            <span style="color:#58a6ff;font-weight:600;font-size:0.95rem;">區間：${currentL3Date || '未定'} (進行中)</span>
             <span class="status-badge" style="background-color:#1f6feb;color:#fff;">即時計算</span>
             <span style="font-size:0.85rem;font-weight:700;color:${rrCol};margin-left:auto;">${rrStr}</span>
           </div>
@@ -2673,12 +2682,13 @@ HTML_TEMPLATE = """
       const rr = parseFloat(stats.total_rr);
       const rrStr = (rr >= 0 ? '+' : '') + rr.toFixed(2) + 'R';
       const rrCol = rr >= 0 ? '#3fb950' : '#f85149';
+      const dispDate = stats.l3_date || date;
       
       html += `
       <div class="signal-card active">
         <div class="card-header">
           <div class="card-title">
-            <span style="color:#58a6ff;font-weight:600;font-size:0.95rem;">區間：${date}</span>
+            <span style="color:#58a6ff;font-weight:600;font-size:0.95rem;">區間：${dispDate}</span>
             <span style="font-size:0.85rem;font-weight:700;color:${rrCol};margin-left:auto;">${rrStr}</span>
           </div>
         </div>
