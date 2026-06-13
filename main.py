@@ -2010,6 +2010,14 @@ HTML_TEMPLATE = """
   }
   .symbol-item:hover { background: #161b22; color: #c9d1d9; }
   .symbol-item.active { background: #161b22; color: #f0f6fc; border-left-color: #58a6ff; }
+  .tab-bar { display: flex; gap: 0; margin-bottom: 6px; }
+  .tab-btn {
+    padding: 8px 18px; font-size: 0.82rem; font-weight: 600; cursor: pointer;
+    background: transparent; color: #8b949e; border: 1px solid #30363d;
+    border-bottom: none; border-radius: 8px 8px 0 0; transition: all 0.2s;
+  }
+  .tab-btn:hover { color: #c9d1d9; background: #161b22; }
+  .tab-btn.active { color: #f0f6fc; background: #161b22; border-color: #58a6ff; border-bottom: 2px solid #161b22; }
   .symbol-item .count {
     font-size: 0.7rem;
     background: #21262d;
@@ -2145,7 +2153,10 @@ HTML_TEMPLATE = """
 
   <div class="main">
     <div class="main-header">
-      <h2 id="header-title">📡 訊號總覽</h2>
+      <div class="tab-bar">
+        <div class="tab-btn active" id="tab-signals" onclick="switchTab('signals')">📡 訊號總覽</div>
+        <div class="tab-btn" id="tab-holdings" onclick="switchTab('holdings')">💼 持倉總覽</div>
+      </div>
       <div id="global-stats" style="margin-top: 10px; font-size: 0.85rem; color: #8b949e; display: flex; gap: 15px; flex-wrap: wrap;"></div>
       <div class="meta"><span class="refresh-dot"></span>每 10 秒自動更新</div>
     </div>
@@ -2159,10 +2170,83 @@ HTML_TEMPLATE = """
 
 <script>
   let currentSymbol = null;
+  let currentView = 'signals';
   let allData = {};
   let allSymbols = [];
-  let priceMap = {};  // base -> current_price
+  let priceMap = {};
   let allHoldings = [];
+  let allActiveSignals = [];
+
+  function switchTab(tab) {
+    currentView = tab;
+    currentSymbol = null;
+    document.getElementById('tab-signals').className = 'tab-btn' + (tab === 'signals' ? ' active' : '');
+    document.getElementById('tab-holdings').className = 'tab-btn' + (tab === 'holdings' ? ' active' : '');
+    updateStats();
+    renderSidebar(document.getElementById('search-input').value);
+    if (tab === 'signals') renderHome();
+    else renderHoldingsHome();
+  }
+
+  function updateStats() {
+    if (currentView === 'signals') {
+      let activeSigs = 0, closedSigs = 0, holdingSigs = 0, pendingSigs = 0, totalRR = 0;
+      Object.values(allData).forEach(sigs => {
+        sigs.forEach(s => {
+          if (s.status === 'closed') { closedSigs++; }
+          else if (s.status === 'active' || s.status === 'missed') {
+            activeSigs++;
+            if (s.status === 'active') {
+              if (allHoldings.includes(s._base)) holdingSigs++;
+              else pendingSigs++;
+            }
+          }
+          const entry = parseFloat(s.entry_price), sl = parseFloat(s.stop_loss);
+          const cp = parseFloat(s.current_price || entry);
+          if (entry > 0 && sl > 0 && Math.abs(entry - sl) > 0 && (s.status === 'active' || s.status === 'missed')) {
+            const risk = Math.abs(entry - sl);
+            const sdir = s.l3_direction || s.l2_direction || 'LONG';
+            totalRR += sdir === 'LONG' ? (cp - entry) / risk : (entry - cp) / risk;
+          }
+        });
+      });
+      const totalSigs = activeSigs + closedSigs;
+      const winRate = totalSigs > 0 ? ((totalSigs - closedSigs) / totalSigs * 100).toFixed(1) : 0;
+      const rrText = totalRR >= 0 ? `+${totalRR.toFixed(2)}` : `${totalRR.toFixed(2)}`;
+      const rrColor = totalRR >= 0 ? '#3fb950' : '#f85149';
+      document.getElementById('global-stats').innerHTML = `
+        <span>📊 訊號：<strong style="color:#3fb950">${activeSigs}</strong></span>
+        <span>💼 持倉中：<strong style="color:#9e6a03">${holdingSigs}</strong></span>
+        <span>⏳ 掛單中：<strong style="color:#e3b341">${pendingSigs}</strong></span>
+        <span>❌ 止損：<strong style="color:#f85149">${closedSigs}</strong></span>
+        <span>🏆 勝率：<strong style="color:#3fb950">${winRate}%</strong></span>
+        <span>💰 訊號總 RR：<strong style="color:${rrColor}">${rrText}</strong></span>
+      `;
+    } else {
+      let hCount = 0, pCount = 0, hRR = 0;
+      allActiveSignals.forEach(s => {
+        const base = s._base;
+        const isH = allHoldings.includes(base);
+        if (isH) hCount++; else pCount++;
+        const entry = parseFloat(s.entry_price), sl = parseFloat(s.sl_price);
+        const cp = parseFloat(priceMap[base] || entry);
+        if (entry > 0 && sl > 0 && Math.abs(entry - sl) > 0) {
+          const risk = Math.abs(entry - sl);
+          const sdir = s.direction || 'LONG';
+          hRR += sdir === 'LONG' ? (cp - entry) / risk : (entry - cp) / risk;
+        }
+      });
+      const total = hCount + pCount;
+      const hrrText = hRR >= 0 ? `+${hRR.toFixed(2)}` : `${hRR.toFixed(2)}`;
+      const hrrColor = hRR >= 0 ? '#3fb950' : '#f85149';
+      document.getElementById('global-stats').innerHTML = `
+        <span>📋 部位總數：<strong style="color:#58a6ff">${total}</strong></span>
+        <span>💼 持倉中：<strong style="color:#9e6a03">${hCount}</strong></span>
+        <span>⏳ 掛單中：<strong style="color:#e3b341">${pCount}</strong></span>
+        <span>💰 持倉總 RR：<strong style="color:${hrrColor}">${hrrText}</strong></span>
+      `;
+    }
+  }
 
   async function fetchData() {
     try {
@@ -2172,62 +2256,18 @@ HTML_TEMPLATE = """
       allSymbols = json.watchlist || [];
       priceMap = json.price_map || {};
       allHoldings = json.holdings || [];
+      allActiveSignals = json.active_signals || [];
 
-      // 把 current_price 補回歷史紀錄
       Object.entries(allData).forEach(([base, sigs]) => {
         const cp = priceMap[base];
         if (cp) sigs.forEach(s => { if (!s.current_price) s.current_price = cp; s._base = base; });
         else sigs.forEach(s => { s._base = base; });
       });
-      
-      let activeSigs = 0;
-      let closedSigs = 0;
-      let holdingSigs = 0;
-      let pendingSigs = 0;
-      let totalRR = 0;
-      Object.values(allData).forEach(sigs => {
-          sigs.forEach(s => {
-              if (s.status === 'closed') {
-                  closedSigs++;
-              } else if (s.status === 'active' || s.status === 'missed') {
-                  activeSigs++;
-                  if (s.status === 'active') {
-                      if (allHoldings.includes(s._base)) {
-                          holdingSigs++;
-                      } else {
-                          pendingSigs++;
-                      }
-                  }
-              }
-              const entry = parseFloat(s.entry_price);
-              const sl = parseFloat(s.stop_loss);
-              const cp = parseFloat(s.current_price || entry);
-              if (entry > 0 && sl > 0 && Math.abs(entry - sl) > 0 && (s.status === 'active' || s.status === 'missed')) {
-                  const risk = Math.abs(entry - sl);
-                  let rr = 0;
-                  const sdir = s.l3_direction || s.l2_direction || 'LONG';
-                  if (sdir === 'LONG') rr = (cp - entry) / risk;
-                  if (sdir === 'SHORT') rr = (entry - cp) / risk;
-                  totalRR += rr;
-              }
-          });
-      });
-      const totalSigs = activeSigs + closedSigs;
-      const winRate = totalSigs > 0 ? ((totalSigs - closedSigs) / totalSigs * 100).toFixed(1) : 0;
-      const rrText = totalRR >= 0 ? `+${totalRR.toFixed(2)}` : `${totalRR.toFixed(2)}`;
-      const rrColor = totalRR >= 0 ? '#3fb950' : '#f85149';
-      
-      document.getElementById('global-stats').innerHTML = `
-        <span>📊 訊號：<strong style="color:#3fb950">${activeSigs}</strong></span>
-        <span>💼 持倉中：<strong style="color:#9e6a03">${holdingSigs}</strong></span>
-        <span>⏳ 掛單中：<strong style="color:#e3b341">${pendingSigs}</strong></span>
-        <span>❌ 止損：<strong style="color:#f85149">${closedSigs}</strong></span>
-        <span>🏆 勝率：<strong style="color:#3fb950">${winRate}%</strong></span>
-        <span>💰 有效總 RR：<strong style="color:${rrColor}">${rrText}</strong></span>
-      `;
-      
+
+      updateStats();
       renderSidebar(document.getElementById('search-input').value);
       if (currentSymbol) renderMain(currentSymbol);
+      else if (currentView === 'holdings') renderHoldingsHome();
       else renderHome();
     } catch (e) {
       console.error('Fetch error:', e);
@@ -2246,7 +2286,8 @@ HTML_TEMPLATE = """
     const allSet = Object.keys(allData).filter(k => allData[k].length > 0).sort();
     const filtered = q ? allSet.filter(s => s.includes(q)) : allSet;
 
-    let html = '<div class="symbol-item ' + (currentSymbol === null ? 'active' : '') + '" onclick="goHome()"><span>🏠 訊號總覽</span></div>';
+    const homeLabel = currentView === 'signals' ? '🏠 訊號總覽' : '🏠 持倉總覽';
+    let html = '<div class="symbol-item ' + (currentSymbol === null ? 'active' : '') + '" onclick="goHome()"><span>' + homeLabel + '</span></div>';
     filtered.forEach(sym => {
       const sigs = allData[sym] || [];
       const activeClass = sym === currentSymbol ? 'active' : '';
@@ -2261,7 +2302,8 @@ HTML_TEMPLATE = """
   function goHome() {
     currentSymbol = null;
     renderSidebar(document.getElementById('search-input').value);
-    renderHome();
+    if (currentView === 'holdings') renderHoldingsHome();
+    else renderHome();
   }
 
   function renderHome() {
@@ -2415,6 +2457,67 @@ HTML_TEMPLATE = """
     container.innerHTML = html;
   }
 
+  function renderHoldingsHome() {
+    const container = document.getElementById('signal-container');
+    if (allActiveSignals.length === 0) {
+      container.innerHTML = `<div class="empty-state"><div class="icon">💼</div><p>目前無任何持倉或掛單</p></div>`;
+      return;
+    }
+    let html = '';
+    allActiveSignals.forEach(sig => {
+      const base = sig._base;
+      const dir = sig.direction || 'LONG';
+      const dirText = dir === 'LONG' ? '▲ LONG' : '▼ SHORT';
+      const prec = sig.precision || 4;
+      const entry = parseFloat(sig.entry_price);
+      const sl = parseFloat(sig.sl_price);
+      const cp = parseFloat(priceMap[base] || entry);
+      let rrStr = '—', rrCol = '#8b949e';
+      if (entry > 0 && sl > 0 && Math.abs(entry - sl) > 0) {
+        const risk = Math.abs(entry - sl);
+        const rr = dir === 'LONG' ? (cp - entry) / risk : (entry - cp) / risk;
+        rrStr = (rr >= 0 ? '+' : '') + rr.toFixed(2) + 'R';
+        rrCol = rr >= 0 ? '#3fb950' : '#f85149';
+      }
+      const isH = allHoldings.includes(base);
+      const badge = isH
+        ? '<span class="status-badge" style="background-color:#9e6a03;color:#fff;">持倉中</span>'
+        : '<span class="status-badge" style="background-color:#e3b341;color:#000;">掛單中</span>';
+      const l3 = sig.l3_date || sig.l2_date || '—';
+      html += `
+      <div class="signal-card ${dir} active">
+        <div class="card-header">
+          <div class="card-title">
+            <span style="color:#58a6ff;font-weight:600;font-size:0.95rem;">${base}</span>
+            <span class="dir-badge ${dir}">${dirText}</span>
+            ${badge}
+            <span style="font-size:0.85rem;font-weight:700;color:${rrCol};margin-left:auto;">${rrStr}</span>
+          </div>
+          <div class="card-time">突破進場：${fmt(l3)}</div>
+        </div>
+        <div class="card-grid">
+          <div class="detail-block">
+            <div class="detail-label">進場價格</div>
+            <div class="detail-value price">${fmt(sig.entry_price, prec)}</div>
+          </div>
+          <div class="detail-block">
+            <div class="detail-label">止損價格</div>
+            <div class="detail-value sl">${fmt(sig.sl_price, prec)}</div>
+          </div>
+          <div class="detail-block">
+            <div class="detail-label">即時價格</div>
+            <div class="detail-value" style="color:#58a6ff;">${fmt(cp, prec)}</div>
+          </div>
+          <div class="detail-block">
+            <div class="detail-label">即時 RR</div>
+            <div class="detail-value" style="color:${rrCol};font-weight:700;">${rrStr}</div>
+          </div>
+        </div>
+      </div>`;
+    });
+    container.innerHTML = html;
+  }
+
   fetchData();
   setInterval(fetchData, 10000);
 </script>
@@ -2489,7 +2592,28 @@ def api_data():
         list(cleaned_history.keys())
     ))
     holdings = load_holdings()
-    return jsonify({"watchlist": watchlist_coins, "history": cleaned_history, "price_map": price_map, "holdings": holdings})
+
+    # 整理 active_signals 供前端持倉總覽使用
+    active_list = []
+    for slist in active_sigs.values():
+        for s in slist:
+            if s.get('status') == 'active':
+                base = get_base_coin(s['symbol'])
+                active_list.append({
+                    '_base': base,
+                    'symbol': s['symbol'],
+                    'direction': s.get('direction', ''),
+                    'entry_price': s.get('entry_price', 0),
+                    'sl_price': s.get('sl_price', 0),
+                    'original_sl_price': s.get('original_sl_price', 0),
+                    'precision': s.get('precision', 4),
+                    'l2_date': s.get('l2_date', ''),
+                    'l3_date': s.get('l3_date', ''),
+                    'l1_18d_direction': s.get('l1_18d_direction', ''),
+                    'timestamp': s.get('timestamp', 0),
+                })
+
+    return jsonify({"watchlist": watchlist_coins, "history": cleaned_history, "price_map": price_map, "holdings": holdings, "active_signals": active_list})
 
 def run_flask():
     port = int(os.environ.get("PORT", 8080))
