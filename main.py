@@ -171,6 +171,23 @@ def save_history_signals(data):
 # ============================================================================
 # 系統設定持久化
 # ============================================================================
+PERF_HISTORY_FILE = os.path.join(DATA_DIR, "performance_history.json")
+
+def load_perf_history():
+    ensure_data_dir()
+    try:
+        with open(PERF_HISTORY_FILE, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+def save_perf_history(data):
+    ensure_data_dir()
+    try:
+        with open(PERF_HISTORY_FILE, 'w', encoding='utf-8') as f:
+            json.dump(data, f, indent=2)
+    except Exception as e:
+        logger.error(f"儲存歷史績效失敗: {e}")
 
 CONFIG_FILE = os.path.join(DATA_DIR, "system_config.json")
 
@@ -1849,11 +1866,55 @@ async def run_scan():
         real_new_triggers = real_new_triggers_final
 
         history_signals = load_history_signals()
+        perf_history = load_perf_history()
+        perf_updated = False
 
-        # 清除所有不屬於最新 3D 區間的舊紀錄
+        # 清除所有不屬於最新 3D 區間的舊紀錄，並將它們結算至歷史績效
         for base, current_l2_ts in latest_l1_open_ts_map.items():
             if base in history_signals and current_l2_ts > 0:
-                history_signals[base] = [s for s in history_signals[base] if s.get('l2_open_ts', s.get('l1_open_ts', 0)) >= current_l2_ts]
+                keep_sigs = []
+                for s in history_signals[base]:
+                    s_l2_ts = s.get('l2_open_ts', s.get('l1_open_ts', 0))
+                    if s_l2_ts >= current_l2_ts:
+                        keep_sigs.append(s)
+                    else:
+                        interval_date = s.get('l2_date', '')
+                        if not interval_date:
+                            continue
+                        if interval_date not in perf_history:
+                            perf_history[interval_date] = {
+                                "total_signals": 0,
+                                "closed_signals": 0,
+                                "total_rr": 0.0,
+                                "win_rate": "0.0"
+                            }
+                        
+                        perf_history[interval_date]["total_signals"] += 1
+                        
+                        status = s.get('status', 'active')
+                        if status == 'closed':
+                            perf_history[interval_date]["closed_signals"] += 1
+                            perf_history[interval_date]["total_rr"] -= 1.0
+                        elif status in ['active', 'missed']:
+                            entry = float(s.get('entry_price', 0))
+                            sl = float(s.get('stop_loss', 0))
+                            cp = float(s.get('current_price', entry))
+                            if entry > 0 and sl > 0 and abs(entry - sl) > 0:
+                                risk = abs(entry - sl)
+                                sdir = s.get('l3_direction', s.get('l2_direction', 'LONG'))
+                                rr = (cp - entry) / risk if sdir == 'LONG' else (entry - cp) / risk
+                                perf_history[interval_date]["total_rr"] += rr
+                        perf_updated = True
+                
+                history_signals[base] = keep_sigs
+
+        if perf_updated:
+            for date_key, stats in perf_history.items():
+                tot = stats["total_signals"]
+                cls = stats["closed_signals"]
+                if tot > 0:
+                    stats["win_rate"] = f"{((tot - cls) / tot * 100):.1f}"
+            save_perf_history(perf_history)
 
         # 只記錄掃描器推演出的 C2 事件，與實際倉位無關
         all_triggered = real_new_triggers + missed_items + all_past_events
@@ -2165,6 +2226,7 @@ HTML_TEMPLATE = """
   let priceMap = {};
   let allHoldings = [];
   let allActiveSignals = [];
+  let allPerfHistory = {};
 
   function switchTab(tab) {
     currentView = tab;
@@ -2172,7 +2234,8 @@ HTML_TEMPLATE = """
     updateStats();
     renderSidebar(document.getElementById('search-input').value);
     if (tab === 'signals') renderHome();
-    else renderHoldingsHome();
+    else if (tab === 'holdings') renderHoldingsHome();
+    else if (tab === 'perf') renderPerfHome();
   }
 
   function updateStats() {
@@ -2227,6 +2290,22 @@ HTML_TEMPLATE = """
         <span>⏳ 掛單中：<strong style="color:#e3b341">${pCount}</strong></span>
         <span>💰 持倉總 RR：<strong style="color:${hrrColor}">${hrrText}</strong></span>
       `;
+    } else if (currentView === 'perf') {
+      let tot = 0, cls = 0, totRR = 0;
+      Object.values(allPerfHistory).forEach(s => {
+          tot += s.total_signals;
+          cls += s.closed_signals;
+          totRR += s.total_rr;
+      });
+      const winRate = tot > 0 ? ((tot - cls) / tot * 100).toFixed(1) : 0;
+      const rrText = totRR >= 0 ? \`+\${totRR.toFixed(2)}\` : \`\${totRR.toFixed(2)}\`;
+      const rrColor = totRR >= 0 ? '#3fb950' : '#f85149';
+      document.getElementById('global-stats').innerHTML = \`
+        <span>📊 歷史總訊號：<strong style="color:#58a6ff">\${tot}</strong></span>
+        <span>❌ 歷史總止損：<strong style="color:#f85149">\${cls}</strong></span>
+        <span>🏆 歷史總勝率：<strong style="color:#3fb950">\${winRate}%</strong></span>
+        <span>💰 歷史總 RR：<strong style="color:\${rrColor}">\${rrText}</strong></span>
+      \`;
     }
   }
 
@@ -2239,6 +2318,7 @@ HTML_TEMPLATE = """
       priceMap = json.price_map || {};
       allHoldings = json.holdings || [];
       allActiveSignals = json.active_signals || [];
+      allPerfHistory = json.perf_history || {};
 
       Object.entries(allData).forEach(([base, sigs]) => {
         const cp = priceMap[base];
@@ -2250,6 +2330,7 @@ HTML_TEMPLATE = """
       renderSidebar(document.getElementById('search-input').value);
       if (currentSymbol) renderMain(currentSymbol);
       else if (currentView === 'holdings') renderHoldingsHome();
+      else if (currentView === 'perf') renderPerfHome();
       else renderHome();
     } catch (e) {
       console.error('Fetch error:', e);
@@ -2271,8 +2352,10 @@ HTML_TEMPLATE = """
     if (!q) {
       const sigsActive = currentView === 'signals' && currentSymbol === null ? 'active' : '';
       const holdsActive = currentView === 'holdings' && currentSymbol === null ? 'active' : '';
+      const perfActive = currentView === 'perf' && currentSymbol === null ? 'active' : '';
       html += `<div class="symbol-item ${sigsActive}" onclick="switchTab('signals')"><span>📡 訊號總覽</span></div>`;
       html += `<div class="symbol-item ${holdsActive}" onclick="switchTab('holdings')"><span>💼 持倉總覽</span></div>`;
+      html += `<div class="symbol-item ${perfActive}" onclick="switchTab('perf')"><span>📈 歷史績效</span></div>`;
       html += `<div style="height: 1px; background: #21262d; margin: 8px 0;"></div>`;
     }
 
@@ -2329,7 +2412,7 @@ HTML_TEMPLATE = """
         rrStr = (rr >= 0 ? '+' : '') + rr.toFixed(2) + 'R';
         rrCol = rr >= 0 ? '#3fb950' : '#f85149';
       }
-      const badge = (sig.status === 'active') ? (allHoldings.includes(sig._base) ? '<span class="status-badge" style="background-color:#9e6a03;color:#fff;">持倉中</span>' : '<span class="status-badge" style="background-color:#e3b341;color:#000;">掛單中</span>') : '';
+      const badge = (sig.status === 'active') ? (allHoldings.includes(sig._base) ? '<span class="status-badge" style="background-color:#1f6feb;color:#fff;">持倉中</span>' : '<span class="status-badge" style="background-color:#9e6a03;color:#fff;">掛單中</span>') : '';
       html += `
       <div class="signal-card ${dir} active" style="cursor:pointer" onclick="selectSymbol('${sig._base}')">
         <div class="card-header">
@@ -2407,7 +2490,7 @@ HTML_TEMPLATE = """
       const statusMap = { active: '有效', closed: '止損', missed: '有效', triggered: '歷史紀錄' };
       const statusText = statusMap[status] || status;
       const prec = sig.precision || 4;
-      const badge = (status === 'active') ? (allHoldings.includes(sym) ? '<span class="status-badge" style="background-color:#9e6a03;color:#fff;">持倉中</span>' : '<span class="status-badge" style="background-color:#e3b341;color:#000;">掛單中</span>') : '';
+      const badge = (status === 'active') ? (allHoldings.includes(sym) ? '<span class="status-badge" style="background-color:#1f6feb;color:#fff;">持倉中</span>' : '<span class="status-badge" style="background-color:#9e6a03;color:#fff;">掛單中</span>') : '';
 
       html += `
       <div class="signal-card ${dir} ${status}">
@@ -2472,8 +2555,8 @@ HTML_TEMPLATE = """
       }
       const isH = allHoldings.includes(base);
       const badge = isH
-        ? '<span class="status-badge" style="background-color:#9e6a03;color:#fff;">持倉中</span>'
-        : '<span class="status-badge" style="background-color:#e3b341;color:#000;">掛單中</span>';
+        ? '<span class="status-badge" style="background-color:#1f6feb;color:#fff;">持倉中</span>'
+        : '<span class="status-badge" style="background-color:#9e6a03;color:#fff;">掛單中</span>';
       const l3 = sig.l3_date || sig.l2_date || '—';
       html += `
       <div class="signal-card ${dir} active">
@@ -2501,6 +2584,53 @@ HTML_TEMPLATE = """
           </div>
           <div class="detail-block">
             <div class="detail-label">即時 RR</div>
+            <div class="detail-value" style="color:${rrCol};font-weight:700;">${rrStr}</div>
+          </div>
+        </div>
+      </div>`;
+    });
+    container.innerHTML = html;
+  }
+
+  function renderPerfHome() {
+    document.getElementById('header-title').textContent = '📈 歷史績效 (3D區間)';
+    const container = document.getElementById('signal-container');
+    const dates = Object.keys(allPerfHistory).sort((a, b) => new Date(b) - new Date(a));
+    if (dates.length === 0) {
+      container.innerHTML = `<div class="empty-state"><div class="icon">📈</div><p>尚無歷史績效紀錄</p></div>`;
+      return;
+    }
+    
+    let html = '';
+    dates.forEach(date => {
+      const stats = allPerfHistory[date];
+      const rr = parseFloat(stats.total_rr);
+      const rrStr = (rr >= 0 ? '+' : '') + rr.toFixed(2) + 'R';
+      const rrCol = rr >= 0 ? '#3fb950' : '#f85149';
+      
+      html += `
+      <div class="signal-card active">
+        <div class="card-header">
+          <div class="card-title">
+            <span style="color:#58a6ff;font-weight:600;font-size:0.95rem;">區間：${date}</span>
+            <span style="font-size:0.85rem;font-weight:700;color:${rrCol};margin-left:auto;">${rrStr}</span>
+          </div>
+        </div>
+        <div class="card-grid">
+          <div class="detail-block">
+            <div class="detail-label">總訊號數</div>
+            <div class="detail-value" style="color:#e6edf3;">${stats.total_signals}</div>
+          </div>
+          <div class="detail-block">
+            <div class="detail-label">止損數量</div>
+            <div class="detail-value" style="color:#f85149;">${stats.closed_signals}</div>
+          </div>
+          <div class="detail-block">
+            <div class="detail-label">勝率</div>
+            <div class="detail-value" style="color:#3fb950;">${stats.win_rate}%</div>
+          </div>
+          <div class="detail-block">
+            <div class="detail-label">區間總 RR</div>
             <div class="detail-value" style="color:${rrCol};font-weight:700;">${rrStr}</div>
           </div>
         </div>
@@ -2604,7 +2734,8 @@ def api_data():
                     'timestamp': s.get('timestamp', 0),
                 })
 
-    return jsonify({"watchlist": watchlist_coins, "history": cleaned_history, "price_map": price_map, "holdings": holdings, "active_signals": active_list})
+    perf_history = load_perf_history()
+    return jsonify({"watchlist": watchlist_coins, "history": cleaned_history, "price_map": price_map, "holdings": holdings, "active_signals": active_list, "perf_history": perf_history})
 
 def run_flask():
     port = int(os.environ.get("PORT", 8080))
