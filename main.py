@@ -197,7 +197,7 @@ def load_config():
             with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
                 config = json.load(f)
             if "blacklist" not in config:
-                config["blacklist"] = ["XAUT", "PAXG", "TQQQ", "SQQQ"]
+                config["blacklist"] = []
             config.setdefault("coin_rank_mode", "hot")
             config.setdefault("top_coins_count", 20)
             return config
@@ -206,7 +206,7 @@ def load_config():
     return {
         "total_capital": 300,
         "loss_pct": 2,
-        "blacklist": ["XAUT", "PAXG", "TQQQ", "SQQQ"],
+        "blacklist": [],
         "coin_rank_mode": "hot",
         "top_coins_count": 20,
     }
@@ -2298,14 +2298,14 @@ HTML_TEMPLATE = """
           totRR += s.total_rr;
       });
       const winRate = tot > 0 ? ((tot - cls) / tot * 100).toFixed(1) : 0;
-      const rrText = totRR >= 0 ? \`+\${totRR.toFixed(2)}\` : \`\${totRR.toFixed(2)}\`;
+      const rrText = totRR >= 0 ? `+${totRR.toFixed(2)}` : `${totRR.toFixed(2)}`;
       const rrColor = totRR >= 0 ? '#3fb950' : '#f85149';
-      document.getElementById('global-stats').innerHTML = \`
-        <span>📊 歷史總訊號：<strong style="color:#58a6ff">\${tot}</strong></span>
-        <span>❌ 歷史總止損：<strong style="color:#f85149">\${cls}</strong></span>
-        <span>🏆 歷史總勝率：<strong style="color:#3fb950">\${winRate}%</strong></span>
-        <span>💰 歷史總 RR：<strong style="color:\${rrColor}">\${rrText}</strong></span>
-      \`;
+      document.getElementById('global-stats').innerHTML = `
+        <span>📊 歷史總訊號：<strong style="color:#58a6ff">${tot}</strong></span>
+        <span>❌ 歷史總止損：<strong style="color:#f85149">${cls}</strong></span>
+        <span>🏆 歷史總勝率：<strong style="color:#3fb950">${winRate}%</strong></span>
+        <span>💰 歷史總 RR：<strong style="color:${rrColor}">${rrText}</strong></span>
+      `;
     }
   }
 
