@@ -2010,14 +2010,6 @@ HTML_TEMPLATE = """
   }
   .symbol-item:hover { background: #161b22; color: #c9d1d9; }
   .symbol-item.active { background: #161b22; color: #f0f6fc; border-left-color: #58a6ff; }
-  .tab-bar { display: flex; gap: 0; margin-bottom: 6px; }
-  .tab-btn {
-    padding: 8px 18px; font-size: 0.82rem; font-weight: 600; cursor: pointer;
-    background: transparent; color: #8b949e; border: 1px solid #30363d;
-    border-bottom: none; border-radius: 8px 8px 0 0; transition: all 0.2s;
-  }
-  .tab-btn:hover { color: #c9d1d9; background: #161b22; }
-  .tab-btn.active { color: #f0f6fc; background: #161b22; border-color: #58a6ff; border-bottom: 2px solid #161b22; }
   .symbol-item .count {
     font-size: 0.7rem;
     background: #21262d;
@@ -2153,10 +2145,7 @@ HTML_TEMPLATE = """
 
   <div class="main">
     <div class="main-header">
-      <div class="tab-bar">
-        <div class="tab-btn active" id="tab-signals" onclick="switchTab('signals')">📡 訊號總覽</div>
-        <div class="tab-btn" id="tab-holdings" onclick="switchTab('holdings')">💼 持倉總覽</div>
-      </div>
+      <h2 id="header-title">📡 訊號總覽</h2>
       <div id="global-stats" style="margin-top: 10px; font-size: 0.85rem; color: #8b949e; display: flex; gap: 15px; flex-wrap: wrap;"></div>
       <div class="meta"><span class="refresh-dot"></span>每 10 秒自動更新</div>
     </div>
@@ -2180,8 +2169,6 @@ HTML_TEMPLATE = """
   function switchTab(tab) {
     currentView = tab;
     currentSymbol = null;
-    document.getElementById('tab-signals').className = 'tab-btn' + (tab === 'signals' ? ' active' : '');
-    document.getElementById('tab-holdings').className = 'tab-btn' + (tab === 'holdings' ? ' active' : '');
     updateStats();
     renderSidebar(document.getElementById('search-input').value);
     if (tab === 'signals') renderHome();
@@ -2190,23 +2177,22 @@ HTML_TEMPLATE = """
 
   function updateStats() {
     if (currentView === 'signals') {
-      let activeSigs = 0, closedSigs = 0, holdingSigs = 0, pendingSigs = 0, totalRR = 0;
+      let activeSigs = 0, closedSigs = 0, totalRR = 0;
       Object.values(allData).forEach(sigs => {
         sigs.forEach(s => {
-          if (s.status === 'closed') { closedSigs++; }
+          if (s.status === 'closed') { 
+            closedSigs++; 
+            totalRR -= 1; 
+          }
           else if (s.status === 'active' || s.status === 'missed') {
             activeSigs++;
-            if (s.status === 'active') {
-              if (allHoldings.includes(s._base)) holdingSigs++;
-              else pendingSigs++;
+            const entry = parseFloat(s.entry_price), sl = parseFloat(s.stop_loss);
+            const cp = parseFloat(s.current_price || entry);
+            if (entry > 0 && sl > 0 && Math.abs(entry - sl) > 0) {
+              const risk = Math.abs(entry - sl);
+              const sdir = s.l3_direction || s.l2_direction || 'LONG';
+              totalRR += sdir === 'LONG' ? (cp - entry) / risk : (entry - cp) / risk;
             }
-          }
-          const entry = parseFloat(s.entry_price), sl = parseFloat(s.stop_loss);
-          const cp = parseFloat(s.current_price || entry);
-          if (entry > 0 && sl > 0 && Math.abs(entry - sl) > 0 && (s.status === 'active' || s.status === 'missed')) {
-            const risk = Math.abs(entry - sl);
-            const sdir = s.l3_direction || s.l2_direction || 'LONG';
-            totalRR += sdir === 'LONG' ? (cp - entry) / risk : (entry - cp) / risk;
           }
         });
       });
@@ -2215,9 +2201,7 @@ HTML_TEMPLATE = """
       const rrText = totalRR >= 0 ? `+${totalRR.toFixed(2)}` : `${totalRR.toFixed(2)}`;
       const rrColor = totalRR >= 0 ? '#3fb950' : '#f85149';
       document.getElementById('global-stats').innerHTML = `
-        <span>📊 訊號：<strong style="color:#3fb950">${activeSigs}</strong></span>
-        <span>💼 持倉中：<strong style="color:#9e6a03">${holdingSigs}</strong></span>
-        <span>⏳ 掛單中：<strong style="color:#e3b341">${pendingSigs}</strong></span>
+        <span>📊 總訊號數：<strong style="color:#58a6ff">${totalSigs}</strong></span>
         <span>❌ 止損：<strong style="color:#f85149">${closedSigs}</strong></span>
         <span>🏆 勝率：<strong style="color:#3fb950">${winRate}%</strong></span>
         <span>💰 訊號總 RR：<strong style="color:${rrColor}">${rrText}</strong></span>
@@ -2236,11 +2220,9 @@ HTML_TEMPLATE = """
           hRR += sdir === 'LONG' ? (cp - entry) / risk : (entry - cp) / risk;
         }
       });
-      const total = hCount + pCount;
       const hrrText = hRR >= 0 ? `+${hRR.toFixed(2)}` : `${hRR.toFixed(2)}`;
       const hrrColor = hRR >= 0 ? '#3fb950' : '#f85149';
       document.getElementById('global-stats').innerHTML = `
-        <span>📋 部位總數：<strong style="color:#58a6ff">${total}</strong></span>
         <span>💼 持倉中：<strong style="color:#9e6a03">${hCount}</strong></span>
         <span>⏳ 掛單中：<strong style="color:#e3b341">${pCount}</strong></span>
         <span>💰 持倉總 RR：<strong style="color:${hrrColor}">${hrrText}</strong></span>
@@ -2282,12 +2264,18 @@ HTML_TEMPLATE = """
     const list = document.getElementById('symbol-list');
     const q = filter.trim().toUpperCase();
 
-    // 只顯示有訊號紀錄的幣種（allData 中有非空 signals 的 key）
     const allSet = Object.keys(allData).filter(k => allData[k].length > 0).sort();
     const filtered = q ? allSet.filter(s => s.includes(q)) : allSet;
 
-    const homeLabel = currentView === 'signals' ? '🏠 訊號總覽' : '🏠 持倉總覽';
-    let html = '<div class="symbol-item ' + (currentSymbol === null ? 'active' : '') + '" onclick="goHome()"><span>' + homeLabel + '</span></div>';
+    let html = '';
+    if (!q) {
+      const sigsActive = currentView === 'signals' && currentSymbol === null ? 'active' : '';
+      const holdsActive = currentView === 'holdings' && currentSymbol === null ? 'active' : '';
+      html += `<div class="symbol-item ${sigsActive}" onclick="switchTab('signals')"><span>📡 訊號總覽</span></div>`;
+      html += `<div class="symbol-item ${holdsActive}" onclick="switchTab('holdings')"><span>💼 持倉總覽</span></div>`;
+      html += `<div style="height: 1px; background: #21262d; margin: 8px 0;"></div>`;
+    }
+
     filtered.forEach(sym => {
       const sigs = allData[sym] || [];
       const activeClass = sym === currentSymbol ? 'active' : '';
@@ -2341,14 +2329,14 @@ HTML_TEMPLATE = """
         rrStr = (rr >= 0 ? '+' : '') + rr.toFixed(2) + 'R';
         rrCol = rr >= 0 ? '#3fb950' : '#f85149';
       }
-      const isHolding = allHoldings.includes(sig._base) && sig.status === 'active';
+      const badge = (sig.status === 'active') ? (allHoldings.includes(sig._base) ? '<span class="status-badge" style="background-color:#9e6a03;color:#fff;">持倉中</span>' : '<span class="status-badge" style="background-color:#e3b341;color:#000;">掛單中</span>') : '';
       html += `
       <div class="signal-card ${dir} active" style="cursor:pointer" onclick="selectSymbol('${sig._base}')">
         <div class="card-header">
           <div class="card-title">
             <span style="color:#58a6ff;font-weight:600;font-size:0.95rem;">${sig._base}</span>
             <span class="dir-badge ${dir}">${dirText}</span>
-            ${isHolding ? '<span class="status-badge" style="background-color:#9e6a03;color:#fff;">持倉中</span>' : ''}
+            ${badge}
             <span style="font-size:0.85rem;font-weight:700;color:${rrCol};margin-left:auto;">${rrStr}</span>
           </div>
           <div class="card-time">突破進場：${fmt(sig.l3_date || sig.l2_date)}</div>
@@ -2385,7 +2373,9 @@ HTML_TEMPLATE = """
   }
 
   function selectSymbol(sym) {
+    currentView = 'signals';
     currentSymbol = sym;
+    updateStats();
     renderSidebar(document.getElementById('search-input').value);
     renderMain(sym);
   }
@@ -2417,7 +2407,7 @@ HTML_TEMPLATE = """
       const statusMap = { active: '有效', closed: '止損', missed: '有效', triggered: '歷史紀錄' };
       const statusText = statusMap[status] || status;
       const prec = sig.precision || 4;
-      const isHolding = allHoldings.includes(sym) && status === 'active';
+      const badge = (status === 'active') ? (allHoldings.includes(sym) ? '<span class="status-badge" style="background-color:#9e6a03;color:#fff;">持倉中</span>' : '<span class="status-badge" style="background-color:#e3b341;color:#000;">掛單中</span>') : '';
 
       html += `
       <div class="signal-card ${dir} ${status}">
@@ -2426,7 +2416,7 @@ HTML_TEMPLATE = """
             <span style="color:#6e7681;font-size:0.75rem;">#${idx + 1}</span>
             <span class="dir-badge ${dir}">${dirText}</span>
             ${(status === 'closed' || status === 'triggered') ? `<span class="status-badge ${status}">${statusText}</span>` : ''}
-            ${isHolding ? '<span class="status-badge" style="background-color:#9e6a03;color:#fff;">持倉中</span>' : ''}
+            ${badge}
           </div>
           <div class="card-time">突破進場：${fmt(sig.l3_date || sig.l2_date)}</div>
         </div>
@@ -2458,6 +2448,7 @@ HTML_TEMPLATE = """
   }
 
   function renderHoldingsHome() {
+    document.getElementById('header-title').textContent = '💼 持倉總覽';
     const container = document.getElementById('signal-container');
     if (allActiveSignals.length === 0) {
       container.innerHTML = `<div class="empty-state"><div class="icon">💼</div><p>目前無任何持倉或掛單</p></div>`;
