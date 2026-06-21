@@ -1303,11 +1303,16 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
             return valid, date_str
 
         # ================= L3 (1D) =================
-        l3_top = -1.0
-        l3_bottom = float('inf')
-        l3_top_date = "未知"
-        l3_bottom_date = "未知"
         l3_state = 'NONE'
+        temp_top = -1.0
+        temp_bottom = float('inf')
+        temp_top_date = "未知"
+        temp_bottom_date = "未知"
+        
+        confirmed_top = -1.0
+        confirmed_bottom = float('inf')
+        confirmed_top_date = "未知"
+        confirmed_bottom_date = "未知"
 
         all_historical_c2s = []
         
@@ -1326,25 +1331,43 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
 
             sw = get_swallow(c_close, _prev['open'], _prev['close'])
             
+            prev_state = l3_state
             if sw == 'RED':
                 l3_state = 'RED'
             elif sw == 'BLACK':
                 l3_state = 'BLACK'
                 
-            if l3_state == 'RED':
-                if c_high > l3_top:
-                    l3_top = c_high
-                    l3_top_date = c_date
-            elif l3_state == 'BLACK':
-                if c_low < l3_bottom:
-                    l3_bottom = c_low
-                    l3_bottom_date = c_date
+            if prev_state != l3_state:
+                if l3_state == 'RED':
+                    # 黑轉紅：確立底
+                    if prev_state == 'BLACK':
+                        confirmed_bottom = temp_bottom
+                        confirmed_bottom_date = temp_bottom_date
+                    # 開啟新紅吞
+                    temp_top = c_high
+                    temp_top_date = c_date
+                elif l3_state == 'BLACK':
+                    # 紅轉黑：確立頂
+                    if prev_state == 'RED':
+                        confirmed_top = temp_top
+                        confirmed_top_date = temp_top_date
+                    # 開啟新黑吞
+                    temp_bottom = c_low
+                    temp_bottom_date = c_date
+            else:
+                if l3_state == 'RED':
+                    if c_high > temp_top:
+                        temp_top = c_high
+                        temp_top_date = c_date
+                elif l3_state == 'BLACK':
+                    if c_low < temp_bottom:
+                        temp_bottom = c_low
+                        temp_bottom_date = c_date
 
-            if l3_bottom != float('inf') and c_close < l3_bottom:
-                l3_top = -1.0
-                l3_top_date = "未知"
+            if confirmed_bottom != float('inf') and c_close < confirmed_bottom:
+                confirmed_top = -1.0
 
-            if l3_top > 0 and c_close > l3_top:
+            if confirmed_top > 0 and c_close > confirmed_top:
                 l2_is_valid, l2_date_val = is_l2_valid_at(c_close_ts)
                 has_active = any(s['status'] == 'active' for s in all_historical_c2s)
                 
@@ -1364,10 +1387,10 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
                         'l2_open_ts': 0,
                         'status': 'active', 
                         'has_entered': True,
-                        'l3_top': l3_top, 
-                        'l3_top_date': l3_top_date,
-                        'l3_bottom': l3_bottom, 
-                        'l3_bottom_date': l3_bottom_date
+                        'l3_top': confirmed_top, 
+                        'l3_top_date': confirmed_top_date,
+                        'l3_bottom': confirmed_bottom, 
+                        'l3_bottom_date': confirmed_bottom_date
                     })
 
             for sig in all_historical_c2s:
