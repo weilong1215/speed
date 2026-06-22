@@ -48,9 +48,9 @@ BITGET_API_KEY = os.getenv("BITGET_API_KEY", "")
 BITGET_SECRET_KEY = os.getenv("BITGET_API_SECRET", "") or os.getenv("BITGET_SECRET_KEY", "")
 BITGET_PASSWORD = os.getenv("BITGET_API_PASSWORD", "") or os.getenv("BITGET_PASSWORD", "")
 
-# 階梯停利：每階平倉剩餘倉位的 50%
-TP_LADDER = [(5, 0.5), (20, 0.5), (50, 0.5), (100, 1.0)]
-TP_EXPIRE_R = 5  # 下單前/掛單中過期檢查用（首階 10R）
+# 停利：單一目標 100R，全倉平倉
+TP_LADDER = [(100, 1.0)]
+TP_EXPIRE_R = 5  # 下單前/掛單中過期檢查用（首階 100R）
 
 logger.info(f"✅ 系統配置檢查: TG_TOKEN={'已設定' if TG_BOT_TOKEN else '未設定'}, TG_CHAT_ID={'已設定' if TG_CHAT_ID else '未設定'}")
 logger.info(f"✅ 交易所配置檢查: API_KEY={'已設定' if BITGET_API_KEY else '未設定'}")
@@ -833,7 +833,7 @@ async def _query_plan_order_status(exchange, symbol, client_oid):
 
 
 async def manage_tp_ladder(exchange, symbol, side, sig, size, saved_signals, open_orders):
-    """階梯停利：10R/20R/30R 各平倉剩餘倉位 50%。"""
+    """單一停利目標：100R 全倉平倉。"""
     try:
         tp_stage = sig.get('tp_stage', 0)
         if tp_stage >= len(TP_LADDER):
@@ -1043,6 +1043,76 @@ async def monitor_positions(exchange):
                                 logger.error(f"掛止損失敗: {e}")
 
 
+                    # 18D 移動止損：最新 18D 棒吞噬前棒實體 → 止損移至該棒低/高點
+                    # 若 sl_price 已不等於 original_sl_price 代表已觸發過，跳過避免反覆移動
+                    _original_sl = float(sig.get('original_sl_price', sig['sl_price']))
+                    _current_sl = float(sig['sl_price'])
+                    _entry_ts = int(sig.get('timestamp', 0))
+                    if _entry_ts > 0 and abs(_current_sl - _original_sl) < 1e-8:
+                        try:
+                            _ohlcv_1d_mon = []
+                            _end_time_mon = int(time.time() * 1000)
+                            for _pg in range(30):
+                                _b_mon = await exchange.fetch_ohlcv(symbol, '1d', limit=100, params={'endTime': _end_time_mon})
+                                if not _b_mon:
+                                    break
+                                _ohlcv_1d_mon.extend(_b_mon)
+                                _end_time_mon = _b_mon[0][0] - 1
+                                if len(_ohlcv_1d_mon) >= 360:
+                                    break
+                            _ohlcv_1d_mon = sorted({b[0]: b for b in _ohlcv_1d_mon}.values(), key=lambda x: x[0])
+                            if _ohlcv_1d_mon:
+                                _ohlcv_18d_mon = compose_18d_bars(_ohlcv_1d_mon)
+                                if _ohlcv_18d_mon:
+                                    _df_18d_mon = pd.DataFrame(_ohlcv_18d_mon, columns=['ts', 'open', 'high', 'low', 'close', 'vol', 'close_ts'])
+                                    _now_ms_mon = int(time.time() * 1000)
+                                    _closed_18d_pos = _df_18d_mon[_df_18d_mon['close_ts'] <= _now_ms_mon].reset_index(drop=True)
+
+                                    if len(_closed_18d_pos) >= 2:
+                                        _last_18d = _closed_18d_pos.iloc[-1]
+                                        _prev_18d = _closed_18d_pos.iloc[-2]
+                                        _last_18d_close_ts = int(_last_18d['close_ts'])
+
+                                        if _last_18d_close_ts > _entry_ts:
+                                            _new_close = float(_last_18d['close'])
+                                            _new_high  = float(_last_18d['high'])
+                                            _new_low   = float(_last_18d['low'])
+                                            _prev_open  = float(_prev_18d['open'])
+                                            _prev_close = float(_prev_18d['close'])
+                                            _new_sl = _current_sl
+                                            _move_sl = False
+
+                                            if side.lower() == 'long':
+                                                _prev_body_high = max(_prev_open, _prev_close)
+                                                if _new_close > _prev_body_high and _new_low > _current_sl:
+                                                    _new_sl = _new_low
+                                                    _move_sl = True
+                                            elif side.lower() == 'short':
+                                                _prev_body_low = min(_prev_open, _prev_close)
+                                                if _new_close < _prev_body_low and (_new_high < _current_sl or _current_sl == 0):
+                                                    _new_sl = _new_high
+                                                    _move_sl = True
+
+                                            if _move_sl:
+                                                _18d_dt = pd.to_datetime(int(_last_18d['ts']), unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d')
+                                                logger.info(f"🔄 18D 吞噬 ({symbol} {_18d_dt})，移動止損至 {_new_sl}")
+                                                sig['sl_price'] = _new_sl
+                                                save_active_signals(saved_signals)
+                                                history_signals = load_history_signals()
+                                                base_coin = get_base_coin(symbol)
+                                                if base_coin in history_signals:
+                                                    for hs in history_signals[base_coin]:
+                                                        if hs.get('trigger_ts') == _entry_ts:
+                                                            hs['stop_loss'] = _new_sl
+                                                save_history_signals(history_signals)
+                                                send_telegram_message(
+                                                    f"<b>🔄 18D 移動止損觸發</b>\n\n"
+                                                    f"💎 <b>交易對:</b> {get_base_coin(symbol)} [{side.upper()}]\n"
+                                                    f"📅 <b>觸發 K 線:</b> {_18d_dt}\n"
+                                                    f"🛡️ <b>新止損價:</b> <code>{_new_sl:.4f}</code>"
+                                                )
+                        except Exception as _e18d:
+                            logger.warning(f"18D 移動止損監控異常 ({symbol}): {_e18d}")
 
                     await manage_tp_ladder(exchange, symbol, side, sig, size, saved_signals, open_orders)
         # 2. 孤兒訊號清理 (倉位消失但訊號仍 active)
@@ -1428,21 +1498,21 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
 
 
 
-            # 止損檢查：必須是進場日「之後」的K棒盤中跌破止損，避免被進場當日的最低價同日自殺
+            # 止損 / 100R 止盈檢查
             for sig in all_historical_c2s:
                 if sig['status'] == 'active' and c_ts > sig['trigger_ts']:
                     risk = abs(sig['entry_price'] - sig['stop_loss'])
                     if risk > 0:
-                        current_r = (c_high - sig['entry_price']) / risk
-                        for i, target_r in enumerate([5, 20, 50, 100]):
-                            if current_r >= target_r and sig.get('max_tp_stage', -1) < i:
-                                sig['max_tp_stage'] = i
-                                
-                    if c_low <= sig['stop_loss'] or sig.get('max_tp_stage', -1) == 3:
+                        # 100R 止盈
+                        tp_price = sig['entry_price'] + 100 * risk
+                        if c_high >= tp_price:
+                            sig['status'] = 'closed'
+                            sig['real_rr'] = 100.0
+                            continue
+                    # 止損
+                    if c_low <= sig['stop_loss']:
                         sig['status'] = 'closed'
-                        stage = sig.get('max_tp_stage', -1)
-                        rr_map = {-1: -1.0, 0: 2.0, 1: 7.25, 2: 13.625, 3: 26.25}
-                        sig['real_rr'] = rr_map.get(stage, -1.0)
+                        sig['real_rr'] = -1.0
 
         current_price = float(df_1d['close'].iloc[-1]) if not df_1d.empty else 0.0
         
