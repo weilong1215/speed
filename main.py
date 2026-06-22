@@ -1332,11 +1332,13 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
             
             if sw == 'RED' and not current_l2_valid:
                 current_l2_valid = True
-                current_l2_date_str = pd.to_datetime(_open_ts, unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d')
-                l2_status_timeline.append({'ts': _c_ts, 'valid': True, 'date': current_l2_date_str})
             elif sw == 'BLACK' and current_l2_valid:
                 current_l2_valid = False
                 l2_status_timeline.append({'ts': _c_ts, 'valid': False, 'date': "未知"})
+                
+            if current_l2_valid:
+                current_l2_date_str = pd.to_datetime(_open_ts, unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d')
+                l2_status_timeline.append({'ts': _c_ts, 'valid': True, 'date': current_l2_date_str})
                 
         def is_l2_valid_at(ts):
             valid = False
