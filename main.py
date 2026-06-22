@@ -65,6 +65,7 @@ ACTIVE_SIGNALS_FILE = os.path.join(DATA_DIR, "active_signals.json")
 HISTORY_SIGNALS_FILE = os.path.join(DATA_DIR, "history_signals.json")
 SCANNED_COINS_FILE = os.path.join(DATA_DIR, "scanned_coins.json")
 HOLDINGS_FILE = os.path.join(DATA_DIR, "holdings.json")
+WAITING_SIGNALS_FILE = os.path.join(DATA_DIR, "waiting_signals.json")
 
 def ensure_data_dir():
     if not os.path.exists(DATA_DIR):
@@ -84,6 +85,24 @@ def ensure_data_dir():
     if not os.path.exists(HOLDINGS_FILE):
         with open(HOLDINGS_FILE, 'w') as f:
             json.dump([], f)
+
+def load_waiting_signals():
+    ensure_data_dir()
+    try:
+        if os.path.exists(WAITING_SIGNALS_FILE):
+            with open(WAITING_SIGNALS_FILE, 'r', encoding='utf-8') as f:
+                return json.load(f)
+    except:
+        pass
+    return {}
+
+def save_waiting_signals(data):
+    ensure_data_dir()
+    try:
+        with open(WAITING_SIGNALS_FILE, 'w', encoding='utf-8') as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+    except:
+        pass
 
 def load_watchlist():
     ensure_data_dir()
@@ -1857,6 +1876,22 @@ async def run_scan():
                 real_new_triggers_final.append(item)
         real_new_triggers = real_new_triggers_final
 
+        waiting_signals = {}
+        for res in all_results:
+            if res.get('is_watchlist_eligible'):
+                base = get_base_coin(res['symbol'])
+                waiting_signals[base] = {
+                    'symbol': res['symbol'],
+                    'l1_date': res.get('l1_date'),
+                    'l2_date': res.get('l2_date'),
+                    'l3_top': res.get('l3_top', 0),
+                    'l3_top_date': res.get('l3_top_date', ''),
+                    'l3_bottom': res.get('l3_bottom', 0),
+                    'l3_bottom_date': res.get('l3_bottom_date', ''),
+                    'current_price': res.get('current_price', 0)
+                }
+        save_waiting_signals(waiting_signals)
+        
         history_signals = load_history_signals()
 
         # 清除所有不屬於最新 L1 區間的舊紀錄
@@ -2180,6 +2215,7 @@ HTML_TEMPLATE = """
   let allHoldings = [];
   let allActiveSignals = [];
   let allPerfHistory = {};
+  let allWaitingSignals = {};
 
   function switchTab(tab) {
     currentView = tab;
@@ -2188,6 +2224,7 @@ HTML_TEMPLATE = """
     renderSidebar(document.getElementById('search-input').value);
     if (tab === 'signals') renderHome();
     else if (tab === 'holdings') renderHoldingsHome();
+    else if (tab === 'watchlist') renderWatchlistHome();
     
   }
 
@@ -2255,6 +2292,7 @@ HTML_TEMPLATE = """
       allHoldings = json.holdings || [];
       allActiveSignals = json.active_signals || [];
       allPerfHistory = json.perf_history || {};
+      allWaitingSignals = json.waiting_signals || {};
 
       Object.entries(allData).forEach(([base, sigs]) => {
         const cp = priceMap[base];
@@ -2266,6 +2304,7 @@ HTML_TEMPLATE = """
       renderSidebar(document.getElementById('search-input').value);
       if (currentSymbol) renderMain(currentSymbol);
       else if (currentView === 'holdings') renderHoldingsHome();
+      else if (currentView === 'watchlist') renderWatchlistHome();
       
       else renderHome();
     } catch (e) {
@@ -2292,6 +2331,8 @@ HTML_TEMPLATE = """
       html += `<div class="symbol-item ${sigsActive}" onclick="switchTab('signals')"><span>📡 訊號總覽</span></div>`;
       html += `<div class="symbol-item ${holdsActive}" onclick="switchTab('holdings')"><span>💼 持倉總覽</span></div>`;
 
+      const watchActive = currentView === 'watchlist' && currentSymbol === null ? 'active' : '';
+      html += `<div class="symbol-item ${watchActive}" onclick="switchTab('watchlist')"><span>👀 追蹤名單</span></div>`;
       html += `<div style="height: 1px; background: #21262d; margin: 8px 0;"></div>`;
     }
 
@@ -2538,7 +2579,60 @@ HTML_TEMPLATE = """
     container.innerHTML = html;
   }
 
-  </script>
+  
+  function renderWatchlistHome() {
+    document.getElementById('header-title').textContent = '👀 追蹤中名單 (等待突破)';
+    document.getElementById('global-stats').innerHTML = `<span>⏳ 總計：<strong style="color:#58a6ff">${Object.keys(allWaitingSignals).length}</strong></span>`;
+    const container = document.getElementById('signal-container');
+
+    if (Object.keys(allWaitingSignals).length === 0) {
+      container.innerHTML = `<div class="empty-state"><div class="icon">👀</div><p>目前無追蹤中幣種</p></div>`;
+      return;
+    }
+
+    let html = '';
+    // 將 waitingSignals 轉換為陣列，過濾掉沒有 L1 date 的（雖然不該發生），然後依據 L1 date 由近到遠排序
+    let sortedSigs = Object.values(allWaitingSignals).sort((a, b) => {
+        let da = new Date(a.l1_date || 0);
+        let db = new Date(b.l1_date || 0);
+        return db - da; // 新的在上面
+    });
+    
+    sortedSigs.forEach(sig => {
+      const base = sig.symbol.split('/')[0];
+      const topStr = sig.l3_top > 0 ? `${fmt(sig.l3_top, 4)} (${sig.l3_top_date})` : '—';
+      const botStr = sig.l3_bottom !== null && sig.l3_bottom !== 'inf' && sig.l3_bottom < 9999999 ? `${fmt(sig.l3_bottom, 4)} (${sig.l3_bottom_date})` : '—';
+      html += `
+      <div class="signal-card LONG active">
+        <div class="card-header">
+          <div class="card-title">
+            <span style="color:#58a6ff;font-weight:600;font-size:0.95rem;">${base}</span>
+          </div>
+        </div>
+        <div class="card-grid">
+          <div class="detail-block">
+            <div class="detail-label">L1 成立時間</div>
+            <div class="detail-value">${sig.l1_date || '—'}</div>
+          </div>
+          <div class="detail-block">
+            <div class="detail-label">L2 狀態</div>
+            <div class="detail-value">${sig.l2_date !== "未知" ? "✅ "+sig.l2_date : "❌"}</div>
+          </div>
+          <div class="detail-block">
+            <div class="detail-label">L3 確立頂點</div>
+            <div class="detail-value">${topStr}</div>
+          </div>
+          <div class="detail-block">
+            <div class="detail-label">L3 確立底點</div>
+            <div class="detail-value">${botStr}</div>
+          </div>
+        </div>
+      </div>`;
+    });
+    container.innerHTML = html;
+  }
+  
+</script>
 </body>
 </html>
 """
@@ -2633,7 +2727,8 @@ def api_data():
                 })
 
     perf_history = load_perf_history()
-    return jsonify({"watchlist": watchlist_coins, "history": cleaned_history, "price_map": price_map, "holdings": holdings, "active_signals": active_list, "perf_history": perf_history})
+    waiting_signals = load_waiting_signals()
+    return jsonify({"watchlist": watchlist_coins, "history": cleaned_history, "price_map": price_map, "holdings": holdings, "active_signals": active_list, "perf_history": perf_history, "waiting_signals": waiting_signals})
 
 def run_flask():
     port = int(os.environ.get("PORT", 8080))
