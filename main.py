@@ -564,7 +564,7 @@ async def check_signal_expired(exchange, symbol, direction, entry, sl, precision
 
 
 async def place_order(exchange, symbol, direction, entry, sl, precision, fixed_loss_usdt, trigger_ts,
-                      l2_high=0.0, l2_low=0.0, l2_open_ts=0, l1_18d_direction='', l1_date='', l2_date='', l3_date='', l3_top_date='', l3_bottom_date=''):
+                      l1_18d_direction='', l1_date='', l2_date='', l2_top_date='', l2_bottom_date=''):
     """
     執行下單：Limit Order + 分層槓桿策略 (MAX → 20x → 10x)
 
@@ -734,20 +734,18 @@ async def place_order(exchange, symbol, direction, entry, sl, precision, fixed_l
                     'quantity': qty, 'entry_price': entry, 'sl_price': sl,
                     'original_sl_price': sl,
                     'status': 'active', 'precision': precision, 'tp_stage': 0,
-                    'l2_high': l2_high, 'l2_low': l2_low, 'l2_open_ts': l2_open_ts,
-                    'l1_18d_direction': l1_18d_direction, 'l1_date': l1_date, 'l2_date': l2_date, 'l3_date': l3_date,
+                    'l1_18d_direction': l1_18d_direction, 'l1_date': l1_date, 'l2_date': l2_date,
                     'timestamp': trigger_ts if trigger_ts > 0 else int(time.time() * 1000)
                 })
                 save_active_signals(signals)
-                l3_display = l3_date or (pd.to_datetime(trigger_ts, unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d %H:%M:%S') if trigger_ts > 0 else '未知')
+                l2_display = l2_date or (pd.to_datetime(trigger_ts, unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d %H:%M:%S') if trigger_ts > 0 else '未知')
                 dir_str = "🟢 LONG" if direction == "LONG" else "🔴 SHORT" if direction == "SHORT" else direction
                 send_telegram_message(
                     f"<b>🤖 自動下單 ({leverage}x)</b>\n\n"
                     f"💎 {get_base_coin(symbol)} [{dir_str}]\n"
                     f"📅 L1(18D): <code>{l1_date}</code>\n"
-                    f"📅 L2(3D): <code>{l2_date}</code>\n"
-                    f"📅 L3訊號: <code>{l3_display}</code>\n"
-                    f"🏔️ 頂點時間: <code>{l3_top_date}</code> / 🕳️ 底點時間: <code>{l3_bottom_date}</code>\n"
+                    f"📅 L2訊號: <code>{l2_display}</code>\n"
+                    f"🏔️ 頂點時間: <code>{l2_top_date}</code> / 🕳️ 底點時間: <code>{l2_bottom_date}</code>\n"
                     f"🎯 進場: <code>{entry:.{precision}f}</code>\n"
                     f"🛡️ 保護止損: <code>{sl:.{precision}f}</code>"
                 )
@@ -1319,33 +1317,8 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
         if not l1_valid or l1_valid_ts == -1:
             return None
 
-        # ================= 計算 L2 (3D) 狀態 =================
-        l2_status_timeline = []
-        current_l2_valid = False
-        current_l2_date_str = ""
-
-        for i in range(1, len(df_3d_closed)):
-            _prev = df_3d_closed.iloc[i-1]
-            _curr = df_3d_closed.iloc[i]
-            _c_ts = int(_curr['close_ts'])
-            _open_ts = int(_curr['ts'])
-            sw = get_swallow(_curr['close'], _prev['open'], _prev['close'])
-            
-            if sw == 'RED' and not current_l2_valid:
-                current_l2_valid = True
-            elif sw == 'BLACK' and current_l2_valid:
-                current_l2_valid = False
-                l2_status_timeline.append({'ts': _c_ts, 'valid': False, 'date': "未知"})
-                
-            if current_l2_valid:
-                current_l2_date_str = pd.to_datetime(_open_ts, unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d')
-                l2_status_timeline.append({'ts': _c_ts, 'valid': True, 'date': current_l2_date_str})
-                
-        def is_l2_valid_at(ts):
-            return True, "免判斷"
-
-        # ================= L3 (1D) =================
-        l3_state = 'NONE'
+        # ================= L2 (1D) 頂底突破 =================
+        l2_state = 'NONE'
         temp_top = -1.0
         temp_bottom = float('inf')
         temp_top_date = "未知"
@@ -1376,14 +1349,14 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
 
             sw = get_swallow(c_close, _prev['open'], _prev['close'])
             
-            prev_state = l3_state
+            prev_state = l2_state
             if sw == 'RED':
-                l3_state = 'RED'
+                l2_state = 'RED'
             elif sw == 'BLACK':
-                l3_state = 'BLACK'
+                l2_state = 'BLACK'
                 
-            if prev_state != l3_state:
-                if l3_state == 'RED':
+            if prev_state != l2_state:
+                if l2_state == 'RED':
                     # 黑轉紅：產生了一個新的底部
                     # 必須先把「紅吞當根」的最低點納入考慮
                     if c_low < temp_bottom:
@@ -1417,7 +1390,7 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
                     temp_top = c_high
                     temp_top_date = c_date
                     
-                elif l3_state == 'BLACK':
+                elif l2_state == 'BLACK':
                     # 紅轉黑：產生了一個新的頂部
                     # 必須先把「黑吞當根」的最高點納入考慮
                     if c_high > temp_top:
@@ -1451,11 +1424,11 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
                     temp_bottom = c_low
                     temp_bottom_date = c_date
             else:
-                if l3_state == 'RED':
+                if l2_state == 'RED':
                     if c_high > temp_top:
                         temp_top = c_high
                         temp_top_date = c_date
-                elif l3_state == 'BLACK':
+                elif l2_state == 'BLACK':
                     if c_low < temp_bottom:
                         temp_bottom = c_low
                         temp_bottom_date = c_date
@@ -1464,30 +1437,27 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
             if confirmed_top > 0 and c_open < confirmed_top and c_close > confirmed_top:
                 # 只有在 L1 成立之後的突破，才算是有效的進場訊號
                 if l1_valid_ts != -1 and c_close_ts >= l1_valid_ts:
-                    l2_is_valid, l2_date_val = is_l2_valid_at(c_close_ts)
                     has_active = any(s['status'] == 'active' for s in all_historical_c2s)
                     
-                    if l2_is_valid and not has_active:
+                    if not has_active:
                         all_historical_c2s.append({
                             'symbol': symbol, 
                             'l1_18d_direction': 'LONG',
                             'l1_date': l1_date_str, 
                             'l1_open_ts': l1_valid_ts,
-                            'l2_date': l2_date_val, 
-                            'l3_date': c_date,
+                            'l2_date': c_date,
                             'entry_price': c_close, 
                             'stop_loss': c_low, 
                             'initial_sl': c_low,
                             'trigger_ts': c_ts,
-                            'l3_direction': 'LONG', 
+                            'l2_direction': 'LONG', 
                             'precision': precision, 
-                            'l2_open_ts': 0,
                             'status': 'active', 
                             'has_entered': True,
-                            'l3_top': confirmed_top, 
-                            'l3_top_date': confirmed_top_date,
-                            'l3_bottom': confirmed_bottom, 
-                            'l3_bottom_date': confirmed_bottom_date,
+                            'l2_top': confirmed_top, 
+                            'l2_top_date': confirmed_top_date,
+                            'l2_bottom': confirmed_bottom, 
+                            'l2_bottom_date': confirmed_bottom_date,
                             'max_tp_stage': -1,
                             'real_rr': 0.0
                         })
@@ -1549,7 +1519,7 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
                     _init_sl_for_tp = sig.get('initial_sl', sig['stop_loss'])
                     _base_risk = abs(sig['entry_price'] - _init_sl_for_tp)
                     
-                    if sig['l3_direction'] == 'LONG':
+                    if sig['l2_direction'] == 'LONG':
                         if c_low <= _effective_sl:
                             _is_sl = True
                         if _base_risk > 0:
@@ -1570,7 +1540,7 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
                         _init_sl = sig.get('initial_sl', sig['stop_loss'])
                         _risk = abs(sig['entry_price'] - _init_sl)
                         if _risk > 0:
-                            if sig['l3_direction'] == 'LONG':
+                            if sig['l2_direction'] == 'LONG':
                                 sig['real_rr'] = (_effective_sl - sig['entry_price']) / _risk
                             else:
                                 sig['real_rr'] = (sig['entry_price'] - _effective_sl) / _risk
@@ -1597,42 +1567,36 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
         entry_price = last_active['entry_price'] if last_active else 0.0
         stop_loss = last_active['stop_loss'] if last_active else 0.0
         trigger_ts = last_active['trigger_ts'] if last_active else 0
-        l3_date_str = last_active['l3_date'] if last_active else "未知"
-        l3_direction = 'LONG' if last_active else ""
+        l2_date_str = last_active['l2_date'] if last_active else "未知"
+        l2_direction = 'LONG' if last_active else ""
 
         for c2 in all_historical_c2s:
             c2['current_price'] = current_price
 
         cache_ts = trigger_ts if is_trigger_met else l1_valid_ts
         action = 'update' if (not cached_info or cached_info.get('ts') != cache_ts) else 'keep'
-        
-        curr_l2_valid, curr_l2_date = is_l2_valid_at(now_utc)
 
         return {
             'symbol':             symbol,
             'action':             action,
             'data':               {'ts': cache_ts},
             'is_trigger_met':     is_trigger_met,
-            'is_watchlist_eligible': (l1_valid_ts != -1 and curr_l2_valid),
+            'is_watchlist_eligible': (l1_valid_ts != -1),
             'entry_price':        entry_price,
             'stop_loss':          stop_loss,
             'trigger_ts':         trigger_ts,
             'precision':          precision,
             'l1_18d_direction':   "LONG",
             'l1_date':            l1_date_str,
-            'l2_date':            curr_l2_date,
-            'l3_date':            l3_date_str,
-            'l3_direction':       l3_direction,
+            'l2_date':            l2_date_str,
+            'l2_direction':       l2_direction,
             'scan_state':         final_state,
-            'l2_high':            0.0,
-            'l2_low':             0.0,
-            'l2_open_ts':         0,
             'l1_open_ts':         l1_valid_ts,
             'historical_c2s':     all_historical_c2s,
-            'l3_top':             confirmed_top,
-            'l3_bottom':          confirmed_bottom,
-            'l3_top_date':        confirmed_top_date,
-            'l3_bottom_date':     confirmed_bottom_date,
+            'l2_top':             confirmed_top,
+            'l2_bottom':          confirmed_bottom,
+            'l2_top_date':        confirmed_top_date,
+            'l2_bottom_date':     confirmed_bottom_date,
         }
 
     except Exception as e:
@@ -1644,20 +1608,20 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
 # ============================================================================
 
 def send_grouped_message(item_list, title):
-    """合併傳入的幣種清單為一則群組訊息，按 L2 (3H 突破) 日期排列"""
+    """合併傳入的幣種清單為一則群組訊息，按 L2 (1D 突破) 日期排列"""
     if not item_list:
         return
 
     filtered_items = []
     for item in item_list:
-        l3 = item.get('l3_date', item.get('l2_date', ''))
-        if not l3 or l3 in ('未知', '未知日期', ''):
+        l2_dt = item.get('l2_date', '')
+        if not l2_dt or l2_dt in ('未知', '未知日期', ''):
             ts = item.get('trigger_ts', 0)
             if ts > 0:
-                l3 = pd.to_datetime(ts, unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d %H:%M:%S')
-        if l3 and l3 not in ('未知', '未知日期', '', '外部建倉', '持續追蹤'):
+                l2_dt = pd.to_datetime(ts, unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d %H:%M:%S')
+        if l2_dt and l2_dt not in ('未知', '未知日期', '', '外部建倉', '持續追蹤'):
             item = dict(item)
-            item['l3_date'] = l3
+            item['l2_date'] = l2_dt
             filtered_items.append(item)
 
     if not filtered_items:
@@ -1665,7 +1629,7 @@ def send_grouped_message(item_list, title):
 
     date_groups = {}
     for item in filtered_items:
-        raw_date = item.get('l3_date', '')
+        raw_date = item.get('l2_date', '')
         d = raw_date[:10] if len(raw_date) >= 10 else raw_date
         if d not in date_groups:
             date_groups[d] = []
@@ -1676,7 +1640,7 @@ def send_grouped_message(item_list, title):
         coin_strs = []
         for item in date_groups[date_key]:
             base = get_base_coin(item['symbol'])
-            direction = item.get('l3_direction', item.get('l2_direction', ''))
+            direction = item.get('l2_direction', '')
             dir_str = " 🟢" if direction == "LONG" else " 🔴" if direction == "SHORT" else ""
             
             if item.get('missed') and title != '🛑 <b>加密貨幣[未上車]</b>':
@@ -2022,10 +1986,9 @@ async def run_scan():
             sym = item['symbol']
             if BITGET_API_KEY:
                 order = await place_order(
-                    ex, sym, item.get('l3_direction', item.get('l2_direction', 'LONG')), item['entry_price'], item['stop_loss'],
+                    ex, sym, item.get('l2_direction', 'LONG'), item['entry_price'], item['stop_loss'],
                     item['precision'], default_loss, item.get('trigger_ts', 0),
-                    l2_high=item.get('l2_high', 0.0), l2_low=item.get('l2_low', 0.0), l2_open_ts=item.get('l2_open_ts', 0),
-                    l1_18d_direction=item.get('l1_18d_direction', ''), l1_date=item.get('l1_date', ''), l2_date=item.get('l2_date', ''), l3_date=item.get('l3_date', '')
+                    l1_18d_direction=item.get('l1_18d_direction', ''), l1_date=item.get('l1_date', ''), l2_date=item.get('l2_date', '')
                 )
                 if order == 'skipped':
                     # 標記為錯失並更新 last_trigger_ts，防止重複下單與警報
@@ -2047,19 +2010,19 @@ async def run_scan():
         for res in all_results:
             if res.get('is_watchlist_eligible'):
                 base = get_base_coin(res['symbol'])
-                l3_top_val = res.get('l3_top', 0)
-                l3_bot_val = res.get('l3_bottom', 0)
-                if l3_bot_val == float('inf'): l3_bot_val = 'inf'
-                if l3_top_val == float('inf'): l3_top_val = 'inf'
+                l2_top_val = res.get('l2_top', 0)
+                l2_bot_val = res.get('l2_bottom', 0)
+                if l2_bot_val == float('inf'): l2_bot_val = 'inf'
+                if l2_top_val == float('inf'): l2_top_val = 'inf'
                 
                 waiting_signals[base] = {
                     'symbol': res['symbol'],
                     'l1_date': res.get('l1_date'),
                     'l2_date': res.get('l2_date'),
-                    'l3_top': l3_top_val,
-                    'l3_top_date': res.get('l3_top_date', ''),
-                    'l3_bottom': l3_bot_val,
-                    'l3_bottom_date': res.get('l3_bottom_date', ''),
+                    'l2_top': l2_top_val,
+                    'l2_top_date': res.get('l2_top_date', ''),
+                    'l2_bottom': l2_bot_val,
+                    'l2_bottom_date': res.get('l2_bottom_date', ''),
                     'current_price': res.get('current_price', 0)
                 }
         save_waiting_signals(waiting_signals)
@@ -2556,7 +2519,7 @@ HTML_TEMPLATE = """
 
     let html = '';
     activeSigs.forEach((sig, idx) => {
-      const dir = sig.l3_direction || sig.l2_direction || 'LONG';
+      const dir = sig.l2_direction || 'LONG';
       const dirText = dir === 'LONG' ? '▲ LONG' : '▼ SHORT';
       const prec = sig.precision || 4;
       const entry = parseFloat(sig.entry_price);
@@ -2586,20 +2549,16 @@ HTML_TEMPLATE = """
             <div class="detail-value">${sig.l1_date || '—'}</div>
           </div>
           <div class="detail-block">
-            <div class="detail-label">L2 邊界時間</div>
-            <div class="detail-value">${fmt(sig.l2_date || sig.l1_date)}</div>
+            <div class="detail-label">L2 確立頂點</div>
+            <div class="detail-value">${sig.l2_top > 0 ? fmt(sig.l2_top, prec) + ' (' + (sig.l2_top_date||'—') + ')' : '—'}</div>
           </div>
           <div class="detail-block">
-            <div class="detail-label">L3 確立頂點</div>
-            <div class="detail-value">${sig.l3_top > 0 ? fmt(sig.l3_top, prec) + ' (' + (sig.l3_top_date||'—') + ')' : '—'}</div>
+            <div class="detail-label">L2 確立底點</div>
+            <div class="detail-value">${sig.l2_bottom !== null && sig.l2_bottom !== 'inf' && sig.l2_bottom !== 'Infinity' && sig.l2_bottom < 9999999 ? fmt(sig.l2_bottom, prec) + ' (' + (sig.l2_bottom_date||'—') + ')' : '—'}</div>
           </div>
           <div class="detail-block">
-            <div class="detail-label">L3 確立底點</div>
-            <div class="detail-value">${sig.l3_bottom !== null && sig.l3_bottom !== 'inf' && sig.l3_bottom !== 'Infinity' && sig.l3_bottom < 9999999 ? fmt(sig.l3_bottom, prec) + ' (' + (sig.l3_bottom_date||'—') + ')' : '—'}</div>
-          </div>
-          <div class="detail-block">
-            <div class="detail-label">L3 突破進場時間</div>
-            <div class="detail-value">${fmt(sig.l3_date || sig.l2_date)}</div>
+            <div class="detail-label">L2 突破進場時間</div>
+            <div class="detail-value">${fmt(sig.l2_date)}</div>
           </div>
           <div class="detail-block">
             <div class="detail-label">進場價格</div>
@@ -2650,7 +2609,7 @@ HTML_TEMPLATE = """
 
     let html = '';
     sorted.forEach((sig, idx) => {
-      const dir = sig.l3_direction || sig.l2_direction || 'LONG';
+      const dir = sig.l2_direction || 'LONG';
       const status = sig.status || 'unknown';
       const dirText = dir === 'LONG' ? '▲ LONG' : '▼ SHORT';
       const statusMap = { active: '有效', closed: '止損', missed: '有效', triggered: '歷史紀錄' };
@@ -2694,20 +2653,16 @@ HTML_TEMPLATE = """
             <div class="detail-value">${sig.l1_date || '—'}</div>
           </div>
           <div class="detail-block">
-            <div class="detail-label">L2 邊界時間</div>
-            <div class="detail-value">${fmt(sig.l2_date || sig.l1_date)}</div>
+            <div class="detail-label">L2 確立頂點</div>
+            <div class="detail-value">${sig.l2_top > 0 ? fmt(sig.l2_top, prec) + ' (' + (sig.l2_top_date||'—') + ')' : '—'}</div>
           </div>
           <div class="detail-block">
-            <div class="detail-label">L3 確立頂點</div>
-            <div class="detail-value">${sig.l3_top > 0 ? fmt(sig.l3_top, prec) + ' (' + (sig.l3_top_date||'—') + ')' : '—'}</div>
+            <div class="detail-label">L2 確立底點</div>
+            <div class="detail-value">${sig.l2_bottom !== null && sig.l2_bottom !== 'inf' && sig.l2_bottom !== 'Infinity' && sig.l2_bottom < 9999999 ? fmt(sig.l2_bottom, prec) + ' (' + (sig.l2_bottom_date||'—') + ')' : '—'}</div>
           </div>
           <div class="detail-block">
-            <div class="detail-label">L3 確立底點</div>
-            <div class="detail-value">${sig.l3_bottom !== null && sig.l3_bottom !== 'inf' && sig.l3_bottom !== 'Infinity' && sig.l3_bottom < 9999999 ? fmt(sig.l3_bottom, prec) + ' (' + (sig.l3_bottom_date||'—') + ')' : '—'}</div>
-          </div>
-          <div class="detail-block">
-            <div class="detail-label">L3 突破進場時間</div>
-            <div class="detail-value">${fmt(sig.l3_date || sig.l2_date)}</div>
+            <div class="detail-label">L2 突破進場時間</div>
+            <div class="detail-value">${fmt(sig.l2_date)}</div>
           </div>
           <div class="detail-block">
             <div class="detail-label">進場價格</div>
@@ -2756,7 +2711,6 @@ HTML_TEMPLATE = """
       const badge = isH
         ? '<span class="dir-badge LONG">持倉中</span>'
         : '<span class="dir-badge" style="color: #d29922; background: rgba(210,153,34,0.1); border-color: rgba(210,153,34,0.4);">掛單中</span>';
-      const l3 = sig.l3_date || sig.l2_date || '—';
       html += `
       <div class="signal-card ${dir} active">
         <div class="card-header">
@@ -2772,12 +2726,8 @@ HTML_TEMPLATE = """
             <div class="detail-value">${sig.l1_date || '—'}</div>
           </div>
           <div class="detail-block">
-            <div class="detail-label">L2 邊界時間</div>
-            <div class="detail-value">${fmt(sig.l2_date || '—')}</div>
-          </div>
-          <div class="detail-block">
-            <div class="detail-label">L3 突破進場時間</div>
-            <div class="detail-value">${fmt(l3)}</div>
+            <div class="detail-label">L2 突破進場時間</div>
+            <div class="detail-value">${fmt(sig.l2_date)}</div>
           </div>
           <div class="detail-block">
             <div class="detail-label">進場價格</div>
@@ -2820,8 +2770,8 @@ HTML_TEMPLATE = """
     
     sortedSigs.forEach(sig => {
       const base = sig.symbol.split('/')[0];
-      const topStr = sig.l3_top > 0 ? `${fmt(sig.l3_top, 4)} (${sig.l3_top_date})` : '—';
-      const botStr = sig.l3_bottom !== null && sig.l3_bottom !== 'inf' && sig.l3_bottom !== 'Infinity' && sig.l3_bottom < 9999999 ? `${fmt(sig.l3_bottom, 4)} (${sig.l3_bottom_date})` : '—';
+      const topStr = sig.l2_top > 0 ? `${fmt(sig.l2_top, 4)} (${sig.l2_top_date})` : '—';
+      const botStr = sig.l2_bottom !== null && sig.l2_bottom !== 'inf' && sig.l2_bottom !== 'Infinity' && sig.l2_bottom < 9999999 ? `${fmt(sig.l2_bottom, 4)} (${sig.l2_bottom_date})` : '—';
       html += `
       <div class="signal-card LONG active">
         <div class="card-header">
@@ -2835,15 +2785,11 @@ HTML_TEMPLATE = """
             <div class="detail-value">${sig.l1_date || '—'}</div>
           </div>
           <div class="detail-block">
-            <div class="detail-label">L2 狀態</div>
-            <div class="detail-value">${sig.l2_date !== "未知" ? "✅ "+sig.l2_date : "❌"}</div>
-          </div>
-          <div class="detail-block">
-            <div class="detail-label">L3 確立頂點</div>
+            <div class="detail-label">L2 確立頂點</div>
             <div class="detail-value">${topStr}</div>
           </div>
           <div class="detail-block">
-            <div class="detail-label">L3 確立底點</div>
+            <div class="detail-label">L2 確立底點</div>
             <div class="detail-value">${botStr}</div>
           </div>
         </div>
