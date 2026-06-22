@@ -1527,20 +1527,22 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
                     _is_sl = False
                     _is_tp = False
                     
+                    # 100R 停利點永遠使用 initial_sl 計算，防止移動止損推進後壓縮 tp_price
+                    _init_sl_for_tp = sig.get('initial_sl', sig['stop_loss'])
+                    _base_risk = abs(sig['entry_price'] - _init_sl_for_tp)
+                    
                     if sig['l3_direction'] == 'LONG':
                         if c_low <= sig['stop_loss']:
                             _is_sl = True
-                        risk = abs(sig['entry_price'] - sig['stop_loss'])
-                        if risk > 0:
-                            tp_price = sig['entry_price'] + 100 * risk
+                        if _base_risk > 0:
+                            tp_price = sig['entry_price'] + 100 * _base_risk
                             if c_high >= tp_price:
                                 _is_tp = True
                     else: # SHORT
                         if c_high >= sig['stop_loss']:
                             _is_sl = True
-                        risk = abs(sig['entry_price'] - sig['stop_loss'])
-                        if risk > 0:
-                            tp_price = sig['entry_price'] - 100 * risk
+                        if _base_risk > 0:
+                            tp_price = sig['entry_price'] - 100 * _base_risk
                             if c_low <= tp_price:
                                 _is_tp = True
 
