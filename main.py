@@ -1474,6 +1474,7 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
                             'l3_date': c_date,
                             'entry_price': c_close, 
                             'stop_loss': c_low, 
+                            'initial_sl': c_low,
                             'trigger_ts': c_ts,
                             'l3_direction': 'LONG', 
                             'precision': precision, 
@@ -1545,7 +1546,15 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
 
                     if _is_sl:
                         sig['status'] = 'closed'
-                        sig['real_rr'] = -1.0
+                        _init_sl = sig.get('initial_sl', sig['entry_price'])
+                        _risk = abs(sig['entry_price'] - _init_sl)
+                        if _risk > 0:
+                            if sig['l3_direction'] == 'LONG':
+                                sig['real_rr'] = (sig['stop_loss'] - sig['entry_price']) / _risk
+                            else:
+                                sig['real_rr'] = (sig['entry_price'] - sig['stop_loss']) / _risk
+                        else:
+                            sig['real_rr'] = 0.0
                     elif _is_tp:
                         sig['status'] = 'closed'
                         sig['real_rr'] = 100.0
@@ -2072,6 +2081,13 @@ async def run_scan():
                     existing['status'] = 'closed'
                 elif new_status == 'active' and existing.get('status') in ['triggered', 'missed']:
                     existing['status'] = 'active'
+                
+                # 同步歷史推演的動態數值 (止損被推升時，RR 與 SL 需要更新)
+                if 'real_rr' in item:
+                    existing['real_rr'] = item['real_rr']
+                if 'stop_loss' in item:
+                    existing['stop_loss'] = item['stop_loss']
+                    
                 # 每輪掃描都刷新 current_price，確保 RR 計算準確
                 existing['has_entered'] = True
                 cp = item.get('current_price')
