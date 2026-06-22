@@ -49,7 +49,7 @@ BITGET_SECRET_KEY = os.getenv("BITGET_API_SECRET", "") or os.getenv("BITGET_SECR
 BITGET_PASSWORD = os.getenv("BITGET_API_PASSWORD", "") or os.getenv("BITGET_PASSWORD", "")
 
 # 階梯停利：每階平倉剩餘倉位的 50%
-TP_LADDER = [(5, 0.5), (10, 0.5), (20, 0.5), (30, 0.5), (50, 0.5), (100, 0.5)]
+TP_LADDER = [(5, 0.5), (20, 0.5), (50, 0.5), (100, 1.0)]
 TP_EXPIRE_R = 5  # 下單前/掛單中過期檢查用（首階 10R）
 
 logger.info(f"✅ 系統配置檢查: TG_TOKEN={'已設定' if TG_BOT_TOKEN else '未設定'}, TG_CHAT_ID={'已設定' if TG_CHAT_ID else '未設定'}")
@@ -1042,73 +1042,7 @@ async def monitor_positions(exchange):
                             if '40786' not in str(e):
                                 logger.error(f"掛止損失敗: {e}")
 
-                    # 3D 移動止損：最新 3D 棒吞噬前棒實體 → 止損移至該棒低/高點
-                    _entry_ts = int(sig.get('timestamp', 0))
-                    if _entry_ts > 0:
-                        try:
-                            # 只需近 60 天 3D 棒，由新往舊分頁抓取
-                            _ohlcv_1d_mon = []
-                            _end_time_mon = int(time.time() * 1000)
-                            for _pg in range(10):
-                                _b_mon = await exchange.fetch_ohlcv(symbol, '1d', limit=100, params={'endTime': _end_time_mon})
-                                if not _b_mon:
-                                    break
-                                _ohlcv_1d_mon.extend(_b_mon)
-                                _end_time_mon = _b_mon[0][0] - 1
-                            _ohlcv_1d_mon = sorted({b[0]: b for b in _ohlcv_1d_mon}.values(), key=lambda x: x[0])
-                            if _ohlcv_1d_mon:
-                                _ohlcv_3d_mon = compose_3d_bars(_ohlcv_1d_mon)
-                                if _ohlcv_3d_mon:
-                                    _df_3d_mon = pd.DataFrame(_ohlcv_3d_mon, columns=['ts', 'open', 'high', 'low', 'close', 'vol', 'close_ts'])
-                                    _now_ms_mon = int(time.time() * 1000)
-                                    _closed_3d_pos = _df_3d_mon[_df_3d_mon['close_ts'] <= _now_ms_mon].reset_index(drop=True)
 
-                                    if len(_closed_3d_pos) >= 2:
-                                        _last_3d = _closed_3d_pos.iloc[-1]
-                                        _prev_3d = _closed_3d_pos.iloc[-2]
-                                        _last_3d_close_ts = int(_last_3d['close_ts'])
-
-                                        if _last_3d_close_ts > _entry_ts:
-                                            _new_close = float(_last_3d['close'])
-                                            _new_high = float(_last_3d['high'])
-                                            _new_low = float(_last_3d['low'])
-                                            _prev_open = float(_prev_3d['open'])
-                                            _prev_close = float(_prev_3d['close'])
-                                            _current_sl = float(sig['sl_price'])
-                                            _new_sl = _current_sl
-                                            _move_sl = False
-
-                                            if side.lower() == 'long':
-                                                _prev_body_high = max(_prev_open, _prev_close)
-                                                if _new_close > _prev_body_high and _new_low > _current_sl:
-                                                    _new_sl = _new_low
-                                                    _move_sl = True
-                                            elif side.lower() == 'short':
-                                                _prev_body_low = min(_prev_open, _prev_close)
-                                                if _new_close < _prev_body_low and (_new_high < _current_sl or _current_sl == 0):
-                                                    _new_sl = _new_high
-                                                    _move_sl = True
-
-                                            if _move_sl:
-                                                _3d_dt = pd.to_datetime(int(_last_3d['ts']), unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d')
-                                                logger.info(f"🔄 3D 吞噬 ({symbol} {_3d_dt})，止損移至 {_new_sl}")
-                                                sig['sl_price'] = _new_sl
-                                                save_active_signals(saved_signals)
-                                                history_signals = load_history_signals()
-                                                base_coin = get_base_coin(symbol)
-                                                if base_coin in history_signals:
-                                                    for hs in history_signals[base_coin]:
-                                                        if hs.get('trigger_ts') == _entry_ts:
-                                                            hs['stop_loss'] = _new_sl
-                                                save_history_signals(history_signals)
-                                                send_telegram_message(
-                                                    f"<b>🔄 3D 移動止損觸發</b>\n\n"
-                                                    f"💎 <b>交易對:</b> {get_base_coin(symbol)} [{side.upper()}]\n"
-                                                    f"📅 <b>觸發 K 線:</b> {_3d_dt}\n"
-                                                    f"🛡️ <b>新止損價:</b> <code>{_new_sl:.4f}</code>"
-                                                )
-                        except Exception as _e3d:
-                            logger.warning(f"3D 移動止損監控異常 ({symbol}): {_e3d}")
 
                     await manage_tp_ladder(exchange, symbol, side, sig, size, saved_signals, open_orders)
         # 2. 孤兒訊號清理 (倉位消失但訊號仍 active)
@@ -1497,6 +1431,14 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
                 if sig['status'] == 'active' and c_ts > sig['trigger_ts']:
                     if c_low <= sig['stop_loss']:
                         sig['status'] = 'closed'
+                        continue
+                        
+                    # 100R 止盈檢查
+                    risk = abs(sig['entry_price'] - sig['stop_loss'])
+                    if risk > 0:
+                        tp_price = sig['entry_price'] + 100 * risk
+                        if c_high >= tp_price:
+                            sig['status'] = 'closed'
 
         current_price = float(df_1d['close'].iloc[-1]) if not df_1d.empty else 0.0
         
