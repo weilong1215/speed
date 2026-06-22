@@ -1487,7 +1487,7 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
                             _entry_price = float(sig['entry_price'])
                             _current_trailing = float(sig.get('trailing_sl', -1.0))
                             
-                            if sig['l3_direction'] == 'LONG':
+                            if sig['l2_direction'] == 'LONG':
                                 _prev_body_high = max(_prev_open, _prev_close)
                                 # 吞噬成立 且 低點高於進場價 且 只進不退（低點必須高於現有保護止損）
                                 if (_new_close > _prev_body_high
@@ -1495,7 +1495,7 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
                                         and (_current_trailing < 0 or _new_low > _current_trailing)):
                                     sig['trailing_sl'] = _new_low
                                     sig['trailing_sl_date'] = _18d_dt
-                            elif sig['l3_direction'] == 'SHORT':
+                            elif sig['l2_direction'] == 'SHORT':
                                 _prev_body_low = min(_prev_open, _prev_close)
                                 _current_trailing_s = float(sig.get('trailing_sl', float('inf')))
                                 if (_new_close < _prev_body_low
@@ -1918,21 +1918,19 @@ async def run_scan():
                 if s['status'] == 'active':
                     sym = s['symbol']
                     ts = s.get('timestamp', 0)
-                    l3_date = s.get('l3_date', s.get('l2_date', ''))
-                    if not l3_date and ts > 0:
-                        l3_date = pd.to_datetime(ts, unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d %H:%M:%S')
+                    l2_date = s.get('l2_date', '')
+                    if not l2_date and ts > 0:
+                        l2_date = pd.to_datetime(ts, unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d %H:%M:%S')
                     holding_map[sym] = {
                         'symbol':        sym,
-                        'l3_direction':  s.get('direction', ''),
+                        'l2_direction':  s.get('direction', ''),
                         'entry_price':   s.get('entry_price', 0.0),
                         'stop_loss':     s.get('original_sl_price', s.get('sl_price', 0.0)),
                         'precision':     s.get('precision', 4),
                         'trigger_ts':    ts,
-                        'l2_open_ts':    s.get('l2_open_ts', s.get('l1_open_ts', 0)),
                         'l1_18d_direction': s.get('l1_18d_direction', ''),
                         'l1_date':       s.get('l1_date', ''),
-                        'l2_date':       s.get('l2_date', s.get('l1_date', '')),
-                        'l3_date':       l3_date,
+                        'l2_date':       l2_date,
                         'status':        'active',
                     }
 
@@ -2387,7 +2385,7 @@ HTML_TEMPLATE = """
             const cp = parseFloat(s.current_price || entry);
             if (entry > 0 && sl > 0 && Math.abs(entry - sl) > 0) {
               const risk = Math.abs(entry - sl);
-              const sdir = s.l3_direction || s.l2_direction || 'LONG';
+              const sdir = s.l2_direction || 'LONG';
               totalRR += sdir === 'LONG' ? (cp - entry) / risk : (entry - cp) / risk;
             }
           }
@@ -2511,7 +2509,7 @@ HTML_TEMPLATE = """
     });
 
     if (activeSigs.length === 0) {
-      container.innerHTML = `<div class="empty-state"><div class="icon">🔍</div><p>目前最新 3D 區間尚無有效訊號</p></div>`;
+      container.innerHTML = `<div class="empty-state"><div class="icon">🔍</div><p>目前尚無有效訊號</p></div>`;
       return;
     }
 
@@ -2595,12 +2593,12 @@ HTML_TEMPLATE = """
   }
 
   function renderMain(sym) {
-    document.getElementById('header-title').textContent = `💎 ${sym}　訊號歷史紀錄 (最新 3D 區間)`;
+    document.getElementById('header-title').textContent = `💎 ${sym}　訊號歷史紀錄`;
     const container = document.getElementById('signal-container');
     const signals = allData[sym] || [];
 
     if (signals.length === 0) {
-      container.innerHTML = `<div class="empty-state"><div class="icon">🔍</div><p>此幣種在最新 3D 區間內尚無觸發訊號紀錄</p></div>`;
+      container.innerHTML = `<div class="empty-state"><div class="icon">🔍</div><p>此幣種尚無觸發訊號紀錄</p></div>`;
       return;
     }
 
