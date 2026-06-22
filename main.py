@@ -1332,6 +1332,11 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
         confirmed_bottom = float('inf')
         confirmed_top_date = "未知"
         confirmed_bottom_date = "未知"
+        
+        pending_top = -1.0
+        pending_top_date = "未知"
+        pending_bottom = float('inf')
+        pending_bottom_date = "未知"
 
         all_historical_c2s = []
         
@@ -1355,18 +1360,30 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
                 
             if prev_state != l3_state:
                 if l3_state == 'RED':
-                    # 黑轉紅：確立底
+                    # 黑轉紅：嘗試確立底
                     if prev_state == 'BLACK':
-                        confirmed_bottom = temp_bottom
-                        confirmed_bottom_date = temp_bottom_date
+                        if confirmed_bottom == float('inf'):
+                            confirmed_bottom = temp_bottom
+                            confirmed_bottom_date = temp_bottom_date
+                        else:
+                            # 震盪區間內：尋找最低點的那個底點
+                            if temp_bottom < pending_bottom:
+                                pending_bottom = temp_bottom
+                                pending_bottom_date = temp_bottom_date
                     # 開啟新紅吞
                     temp_top = c_high
                     temp_top_date = c_date
                 elif l3_state == 'BLACK':
-                    # 紅轉黑：確立頂
+                    # 紅轉黑：嘗試確立頂
                     if prev_state == 'RED':
-                        confirmed_top = temp_top
-                        confirmed_top_date = temp_top_date
+                        if confirmed_top == -1.0:
+                            confirmed_top = temp_top
+                            confirmed_top_date = temp_top_date
+                        else:
+                            # 震盪區間內：尋找最高點的那個頂點
+                            if temp_top > pending_top:
+                                pending_top = temp_top
+                                pending_top_date = temp_top_date
                     # 開啟新黑吞
                     temp_bottom = c_low
                     temp_bottom_date = c_date
@@ -1380,9 +1397,19 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
                         temp_bottom = c_low
                         temp_bottom_date = c_date
 
+            # 破底處理：收盤價 < 確立底點
             if confirmed_bottom != float('inf') and c_close < confirmed_bottom:
-                confirmed_top = -1.0
+                # 若破底，潛在頂點正式成為新的確立頂點
+                if pending_top != -1.0:
+                    confirmed_top = pending_top
+                    confirmed_top_date = pending_top_date
+                
+                # 舊底失效，等待尋找新底
+                confirmed_bottom = float('inf')
+                pending_top = -1.0
+                pending_bottom = float('inf')
 
+            # 破頂處理：收盤價 > 確立頂點
             if confirmed_top > 0 and c_close > confirmed_top:
                 # 只有在 L1 成立之後的突破，才算是有效的進場訊號
                 if l1_valid_ts != -1 and c_close_ts >= l1_valid_ts:
@@ -1410,6 +1437,18 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
                             'l3_bottom': confirmed_bottom, 
                             'l3_bottom_date': confirmed_bottom_date
                         })
+                
+                # 不論是否符合進場條件，若破頂，潛在底點正式成為新的確立底點
+                if pending_bottom != float('inf'):
+                    confirmed_bottom = pending_bottom
+                    confirmed_bottom_date = pending_bottom_date
+                
+                # 舊頂失效，等待尋找新頂
+                confirmed_top = -1.0
+                pending_top = -1.0
+                pending_bottom = float('inf')
+
+
 
             for sig in all_historical_c2s:
                 if sig['status'] == 'active':
