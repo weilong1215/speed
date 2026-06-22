@@ -2651,6 +2651,19 @@ def index():
 def health():
     return {"status": "ok", "service": "Speed-Scanner-Auto"}, 200
 
+import math
+
+def sanitize_for_json(obj):
+    if isinstance(obj, float):
+        if math.isinf(obj) or math.isnan(obj):
+            return str(obj)
+        return obj
+    elif isinstance(obj, dict):
+        return {k: sanitize_for_json(v) for k, v in obj.items()}
+    elif isinstance(obj, list):
+        return [sanitize_for_json(v) for v in obj]
+    return obj
+
 @app.route('/api/data')
 def api_data():
     watchlist = load_watchlist()
@@ -2732,7 +2745,8 @@ def api_data():
 
     perf_history = load_perf_history()
     waiting_signals = load_waiting_signals()
-    return jsonify({"watchlist": watchlist_coins, "history": cleaned_history, "price_map": price_map, "holdings": holdings, "active_signals": active_list, "perf_history": perf_history, "waiting_signals": waiting_signals})
+    data_to_return = {"watchlist": watchlist_coins, "history": cleaned_history, "price_map": price_map, "holdings": holdings, "active_signals": active_list, "perf_history": perf_history, "waiting_signals": waiting_signals}
+    return jsonify(sanitize_for_json(data_to_return))
 
 def run_flask():
     port = int(os.environ.get("PORT", 8080))
