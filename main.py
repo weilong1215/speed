@@ -1345,9 +1345,6 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
             c_close_ts = int(_curr['close_ts'])
             c_date = pd.to_datetime(c_ts, unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d')
 
-            if c_close_ts < l1_valid_ts:
-                continue
-
             sw = get_swallow(c_close, _prev['open'], _prev['close'])
             
             prev_state = l3_state
@@ -1387,30 +1384,32 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
                 confirmed_top = -1.0
 
             if confirmed_top > 0 and c_close > confirmed_top:
-                l2_is_valid, l2_date_val = is_l2_valid_at(c_close_ts)
-                has_active = any(s['status'] == 'active' for s in all_historical_c2s)
-                
-                if l2_is_valid and not has_active:
-                    all_historical_c2s.append({
-                        'symbol': symbol, 
-                        'l1_18d_direction': 'LONG',
-                        'l1_date': l1_date_str, 
-                        'l1_open_ts': l1_valid_ts,
-                        'l2_date': l2_date_val, 
-                        'l3_date': c_date,
-                        'entry_price': c_close, 
-                        'stop_loss': c_low, 
-                        'trigger_ts': c_ts,
-                        'l3_direction': 'LONG', 
-                        'precision': precision, 
-                        'l2_open_ts': 0,
-                        'status': 'active', 
-                        'has_entered': True,
-                        'l3_top': confirmed_top, 
-                        'l3_top_date': confirmed_top_date,
-                        'l3_bottom': confirmed_bottom, 
-                        'l3_bottom_date': confirmed_bottom_date
-                    })
+                # 只有在 L1 成立之後的突破，才算是有效的進場訊號
+                if l1_valid_ts != -1 and c_close_ts >= l1_valid_ts:
+                    l2_is_valid, l2_date_val = is_l2_valid_at(c_close_ts)
+                    has_active = any(s['status'] == 'active' for s in all_historical_c2s)
+                    
+                    if l2_is_valid and not has_active:
+                        all_historical_c2s.append({
+                            'symbol': symbol, 
+                            'l1_18d_direction': 'LONG',
+                            'l1_date': l1_date_str, 
+                            'l1_open_ts': l1_valid_ts,
+                            'l2_date': l2_date_val, 
+                            'l3_date': c_date,
+                            'entry_price': c_close, 
+                            'stop_loss': c_low, 
+                            'trigger_ts': c_ts,
+                            'l3_direction': 'LONG', 
+                            'precision': precision, 
+                            'l2_open_ts': 0,
+                            'status': 'active', 
+                            'has_entered': True,
+                            'l3_top': confirmed_top, 
+                            'l3_top_date': confirmed_top_date,
+                            'l3_bottom': confirmed_bottom, 
+                            'l3_bottom_date': confirmed_bottom_date
+                        })
 
             for sig in all_historical_c2s:
                 if sig['status'] == 'active':
@@ -1448,7 +1447,7 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
             'action':             action,
             'data':               {'ts': cache_ts},
             'is_trigger_met':     is_trigger_met,
-            'is_watchlist_eligible': True,
+            'is_watchlist_eligible': (l1_valid_ts != -1),
             'entry_price':        entry_price,
             'stop_loss':          stop_loss,
             'trigger_ts':         trigger_ts,
