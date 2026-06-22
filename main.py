@@ -528,15 +528,17 @@ async def check_signal_expired(exchange, symbol, direction, entry, sl, precision
         return True, f"已產生 18D 移動保護止損 (原: {sl:.{precision}f} -> 新: {dynamic_sl:.{precision}f})", 'PSL'
 
     # 盤中止損防護：用 1H K棒 + 即時市價確認訊號是否在盤中已觸及止損，防止重複下單
-    l3_close_ts = trigger_ts + 3 * 3600 * 1000 if trigger_ts > 0 else int(time.time() * 1000)
-    since_ts = l3_close_ts - 5 * 60 * 1000
+    # 訊號是在 trigger_ts (1D K棒開盤時間) 這根 K 棒「收盤後」才確立。
+    # 故只檢查這根 1D K 棒收盤（+24h）之後的 K 棒，不檢查訊號當天的價格波動。
+    l3_close_ts = trigger_ts + 24 * 3600 * 1000 if trigger_ts > 0 else int(time.time() * 1000)
+    since_ts = l3_close_ts
     try:
         ohlcv_1h = await exchange.fetch_ohlcv(symbol, '1h', since=since_ts, limit=500)
         for candle in ohlcv_1h:
             c_ts = int(candle[0])
             c_high = float(candle[2])
             c_low = float(candle[3])
-            if c_ts < l3_close_ts - 60000:
+            if c_ts < l3_close_ts:
                 continue
             dt_taiwan = pd.to_datetime(c_ts, unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d %H:%M')
             if direction == 'LONG':
