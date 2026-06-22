@@ -1097,7 +1097,8 @@ async def monitor_positions(exchange):
                                                 if base_coin in history_signals:
                                                     for hs in history_signals[base_coin]:
                                                         if hs.get('trigger_ts') == _entry_ts:
-                                                            hs['stop_loss'] = _new_sl
+                                                            hs['trailing_sl'] = _new_sl
+                                                            hs['trailing_sl_date'] = _18d_dt
                                                 save_history_signals(history_signals)
                                                 send_telegram_message(
                                                     f"<b>🔄 18D 移動止損觸發</b>\n\n"
@@ -1532,9 +1533,9 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
                                     sig['trailing_sl_date'] = _18d_dt
 
             # 止損 / 100R 止盈檢查 (極端狀況優先判定為止損)
-            # 止損觸發條件：從進場K棒的「下一根」開始判斷 (c_close_ts > trigger_ts)
+            # trigger_ts = 進場K棒的 open_ts，c_ts == trigger_ts 的那根不計算
             for sig in all_historical_c2s:
-                if sig['status'] == 'active' and c_close_ts > sig['trigger_ts']:
+                if sig['status'] == 'active' and c_ts > sig['trigger_ts']:
                     _is_sl = False
                     _is_tp = False
                     
