@@ -1419,7 +1419,9 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
                             'l3_top': confirmed_top, 
                             'l3_top_date': confirmed_top_date,
                             'l3_bottom': confirmed_bottom, 
-                            'l3_bottom_date': confirmed_bottom_date
+                            'l3_bottom_date': confirmed_bottom_date,
+                            'max_tp_stage': -1,
+                            'real_rr': 0.0
                         })
 
 
@@ -1429,16 +1431,18 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
             # 止損檢查：必須是進場日「之後」的K棒盤中跌破止損，避免被進場當日的最低價同日自殺
             for sig in all_historical_c2s:
                 if sig['status'] == 'active' and c_ts > sig['trigger_ts']:
-                    if c_low <= sig['stop_loss']:
-                        sig['status'] = 'closed'
-                        continue
-                        
-                    # 100R 止盈檢查
                     risk = abs(sig['entry_price'] - sig['stop_loss'])
                     if risk > 0:
-                        tp_price = sig['entry_price'] + 100 * risk
-                        if c_high >= tp_price:
-                            sig['status'] = 'closed'
+                        current_r = (c_high - sig['entry_price']) / risk
+                        for i, target_r in enumerate([5, 20, 50, 100]):
+                            if current_r >= target_r and sig.get('max_tp_stage', -1) < i:
+                                sig['max_tp_stage'] = i
+                                
+                    if c_low <= sig['stop_loss'] or sig.get('max_tp_stage', -1) == 3:
+                        sig['status'] = 'closed'
+                        stage = sig.get('max_tp_stage', -1)
+                        rr_map = {-1: -1.0, 0: 2.0, 1: 7.25, 2: 13.625, 3: 26.25}
+                        sig['real_rr'] = rr_map.get(stage, -1.0)
 
         current_price = float(df_1d['close'].iloc[-1]) if not df_1d.empty else 0.0
         
@@ -2265,7 +2269,7 @@ HTML_TEMPLATE = """
         sigs.forEach(s => {
           if (s.status === 'closed') { 
             closedSigs++; 
-            totalRR -= 1; 
+            totalRR += s.real_rr !== undefined ? parseFloat(s.real_rr) : -1.0; 
           }
           else if (s.status === 'active' || s.status === 'missed') {
             activeSigs++;
@@ -2498,7 +2502,7 @@ HTML_TEMPLATE = """
       const status = sig.status || 'unknown';
       const dirText = dir === 'LONG' ? '▲ LONG' : '▼ SHORT';
       const statusMap = { active: '有效', closed: '止損', missed: '有效', triggered: '歷史紀錄' };
-      const statusText = statusMap[status] || status;
+      let statusText = statusMap[status] || status;
       const prec = sig.precision || 4;
       const badge = (status === 'active') ? (allHoldings.includes(sym) ? '<span class="dir-badge LONG">持倉中</span>' : '<span class="dir-badge" style="color: #d29922; background: rgba(210,153,34,0.1); border-color: rgba(210,153,34,0.4);">掛單中</span>') : '';
       const entry = parseFloat(sig.entry_price);
@@ -2506,7 +2510,10 @@ HTML_TEMPLATE = """
       const cp = parseFloat(sig.current_price || entry);
       let rrStr = '—', rrCol = '#8b949e';
       if (status === 'closed') {
-        rrStr = '-1.00R'; rrCol = '#f85149';
+        let r_val = sig.real_rr !== undefined ? parseFloat(sig.real_rr) : -1.0;
+        rrStr = (r_val >= 0 ? '+' : '') + r_val.toFixed(2) + 'R';
+        rrCol = r_val > 0 ? '#3fb950' : '#f85149';
+        if (r_val > 0) statusText = '止盈';
       } else if (entry > 0 && sl > 0 && Math.abs(entry - sl) > 0) {
         const risk = Math.abs(entry - sl);
         let rr = dir === 'LONG' ? (cp - entry) / risk : (entry - cp) / risk;
