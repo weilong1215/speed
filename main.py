@@ -1880,13 +1880,18 @@ async def run_scan():
         for res in all_results:
             if res.get('is_watchlist_eligible'):
                 base = get_base_coin(res['symbol'])
+                l3_top_val = res.get('l3_top', 0)
+                l3_bot_val = res.get('l3_bottom', 0)
+                if l3_bot_val == float('inf'): l3_bot_val = 'inf'
+                if l3_top_val == float('inf'): l3_top_val = 'inf'
+                
                 waiting_signals[base] = {
                     'symbol': res['symbol'],
                     'l1_date': res.get('l1_date'),
                     'l2_date': res.get('l2_date'),
-                    'l3_top': res.get('l3_top', 0),
+                    'l3_top': l3_top_val,
                     'l3_top_date': res.get('l3_top_date', ''),
-                    'l3_bottom': res.get('l3_bottom', 0),
+                    'l3_bottom': l3_bot_val,
                     'l3_bottom_date': res.get('l3_bottom_date', ''),
                     'current_price': res.get('current_price', 0)
                 }
@@ -2601,7 +2606,7 @@ HTML_TEMPLATE = """
     sortedSigs.forEach(sig => {
       const base = sig.symbol.split('/')[0];
       const topStr = sig.l3_top > 0 ? `${fmt(sig.l3_top, 4)} (${sig.l3_top_date})` : '—';
-      const botStr = sig.l3_bottom !== null && sig.l3_bottom !== 'inf' && sig.l3_bottom < 9999999 ? `${fmt(sig.l3_bottom, 4)} (${sig.l3_bottom_date})` : '—';
+      const botStr = sig.l3_bottom !== null && sig.l3_bottom !== 'inf' && sig.l3_bottom !== 'Infinity' && sig.l3_bottom < 9999999 ? `${fmt(sig.l3_bottom, 4)} (${sig.l3_bottom_date})` : '—';
       html += `
       <div class="signal-card LONG active">
         <div class="card-header">
