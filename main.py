@@ -527,6 +527,36 @@ async def check_signal_expired(exchange, symbol, direction, entry, sl, precision
     if dynamic_sl != sl:
         return True, f"已產生 18D 移動保護止損 (原: {sl:.{precision}f} -> 新: {dynamic_sl:.{precision}f})", 'PSL'
 
+    # 盤中止損防護：用 1H K棒 + 即時市價確認訊號是否在盤中已觸及止損，防止重複下單
+    l3_close_ts = trigger_ts + 3 * 3600 * 1000 if trigger_ts > 0 else int(time.time() * 1000)
+    since_ts = l3_close_ts - 5 * 60 * 1000
+    try:
+        ohlcv_1h = await exchange.fetch_ohlcv(symbol, '1h', since=since_ts, limit=500)
+        for candle in ohlcv_1h:
+            c_ts = int(candle[0])
+            c_high = float(candle[2])
+            c_low = float(candle[3])
+            if c_ts < l3_close_ts - 60000:
+                continue
+            dt_taiwan = pd.to_datetime(c_ts, unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d %H:%M')
+            if direction == 'LONG':
+                if c_low <= sl:
+                    return True, f"歷史 1H K 棒 ({dt_taiwan}) 最低價 {c_low:.{precision}f} 已觸發初始止損 ({sl:.{precision}f})", 'SL'
+            else:
+                if c_high >= sl:
+                    return True, f"歷史 1H K 棒 ({dt_taiwan}) 最高價 {c_high:.{precision}f} 已觸發初始止損 ({sl:.{precision}f})", 'SL'
+
+        ticker = await exchange.fetch_ticker(symbol)
+        current_price = float(ticker['last'])
+        if direction == 'LONG':
+            if current_price <= sl:
+                return True, f"最新市價 {current_price:.{precision}f} 已觸發初始止損 ({sl:.{precision}f})", 'SL'
+        else:
+            if current_price >= sl:
+                return True, f"最新市價 {current_price:.{precision}f} 已觸發初始止損 ({sl:.{precision}f})", 'SL'
+    except Exception as e:
+        logger.warning(f"  過期檢查(盤中止損)異常 ({symbol}): {e}")
+
     return False, "", ""
 
 
@@ -550,8 +580,12 @@ async def place_order(exchange, symbol, direction, entry, sl, precision, fixed_l
             exchange, symbol, direction, entry, sl, precision, trigger_ts)
         if expired:
             logger.warning(f"⚠️ {symbol} 下單前監測觸發，跳過下單: {skip_reason}")
+            if alert_type == 'PSL':
+                title = "<b>🚫 跳過自動下單 (已產生 18D 移動保護止損)</b>"
+            else:
+                title = "<b>🚫 跳過自動下單 (盤中已觸發止損)</b>"
             send_telegram_message(
-                f"<b>🚫 跳過自動下單 (已產生 18D 移動保護止損)</b>\n\n"
+                f"{title}\n\n"
                 f"💎 <b>交易對:</b> {get_base_coin(symbol)} [{direction}]\n"
                 f"🎯 進場價格: <code>{entry:.{precision}f}</code>\n"
                 f"🛡️ 初始止損: <code>{sl:.{precision}f}</code>\n\n"
@@ -1120,10 +1154,10 @@ async def monitor_positions(exchange):
                                     except Exception:
                                         pass
                                         
-                        if alert_type == 'TP':
-                            title = f"已達{TP_EXPIRE_R}R停利"
-                        elif alert_type == 'PSL':
-                            title = "已觸發保護止損"
+                        if alert_type == 'PSL':
+                            title = "已產生 18D 移動保護止損"
+                        elif alert_type == 'SL':
+                            title = "盤中已觸發止損"
                         else:
                             title = "訊號已過期"
                         send_telegram_message(
