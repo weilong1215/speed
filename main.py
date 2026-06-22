@@ -1447,7 +1447,7 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
             'action':             action,
             'data':               {'ts': cache_ts},
             'is_trigger_met':     is_trigger_met,
-            'is_watchlist_eligible': (l1_valid_ts != -1),
+            'is_watchlist_eligible': (l1_valid_ts != -1 and curr_l2_valid),
             'entry_price':        entry_price,
             'stop_loss':          stop_loss,
             'trigger_ts':         trigger_ts,
@@ -1463,6 +1463,8 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
             'l2_open_ts':         0,
             'l1_open_ts':         l1_valid_ts,
             'historical_c2s':     all_historical_c2s,
+            'l3_top':             confirmed_top,
+            'l3_bottom':          confirmed_bottom,
             'l3_top_date':        confirmed_top_date,
             'l3_bottom_date':     confirmed_bottom_date,
         }
@@ -2413,6 +2415,14 @@ HTML_TEMPLATE = """
             <div class="detail-value">${fmt(sig.l2_date || sig.l1_date)}</div>
           </div>
           <div class="detail-block">
+            <div class="detail-label">L3 確立頂點</div>
+            <div class="detail-value">${sig.l3_top > 0 ? fmt(sig.l3_top, prec) + ' (' + (sig.l3_top_date||'—') + ')' : '—'}</div>
+          </div>
+          <div class="detail-block">
+            <div class="detail-label">L3 確立底點</div>
+            <div class="detail-value">${sig.l3_bottom !== null && sig.l3_bottom !== 'inf' && sig.l3_bottom !== 'Infinity' && sig.l3_bottom < 9999999 ? fmt(sig.l3_bottom, prec) + ' (' + (sig.l3_bottom_date||'—') + ')' : '—'}</div>
+          </div>
+          <div class="detail-block">
             <div class="detail-label">L3 (3H) 突破進場時間</div>
             <div class="detail-value">${fmt(sig.l3_date || sig.l2_date)}</div>
           </div>
@@ -2498,6 +2508,14 @@ HTML_TEMPLATE = """
           <div class="detail-block">
             <div class="detail-label">L2 (3D) 邊界時間</div>
             <div class="detail-value">${fmt(sig.l2_date || sig.l1_date)}</div>
+          </div>
+          <div class="detail-block">
+            <div class="detail-label">L3 確立頂點</div>
+            <div class="detail-value">${sig.l3_top > 0 ? fmt(sig.l3_top, prec) + ' (' + (sig.l3_top_date||'—') + ')' : '—'}</div>
+          </div>
+          <div class="detail-block">
+            <div class="detail-label">L3 確立底點</div>
+            <div class="detail-value">${sig.l3_bottom !== null && sig.l3_bottom !== 'inf' && sig.l3_bottom !== 'Infinity' && sig.l3_bottom < 9999999 ? fmt(sig.l3_bottom, prec) + ' (' + (sig.l3_bottom_date||'—') + ')' : '—'}</div>
           </div>
           <div class="detail-block">
             <div class="detail-label">L3 (3H) 突破進場時間</div>
