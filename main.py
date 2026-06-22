@@ -2609,6 +2609,11 @@ HTML_TEMPLATE = """
             <div class="detail-label">止損價格</div>
             <div class="detail-value sl">${fmt(sig.stop_loss, prec)}</div>
           </div>
+          ${sig.trailing_sl ? `
+          <div class="detail-block" style="border: 1px solid #d29922; border-radius: 4px; padding: 4px; background: rgba(210,153,34,0.1);">
+            <div class="detail-label" style="color: #d29922;">保護止損價格</div>
+            <div class="detail-value sl" style="color: #d29922;">${fmt(sig.trailing_sl, prec)} <span style="font-size:0.75rem">(${sig.trailing_sl_date || '已觸發'})</span></div>
+          </div>` : ''}
 
         </div>
       </div>`;
