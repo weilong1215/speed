@@ -469,100 +469,66 @@ def compose_3h_bars(ohlcv_1h):
 # ============================================================================
 
 async def check_signal_expired(exchange, symbol, direction, entry, sl, precision, trigger_ts, expire_r=None):
-    """檢查訊號是否已過期（價格已達 expire_r*R 或觸發保護止損）。下單前與掛單中撤單共用。"""
-    if expire_r is None:
-        expire_r = TP_EXPIRE_R
-    risk_per_unit = abs(entry - sl)
-    if risk_per_unit == 0:
+    """
+    檢查下單前/掛單中的訊號是否應被廢棄。
+    當前唯一踢出標準：18D K棒已產生移動保護止損（低點必須在進場價上方）。
+    """
+    if trigger_ts == 0:
         return False, "", ""
 
-    # 動態計算 3D 吞噬保護止損
+    # 動態計算 18D 吹噬保護止損（只有低點 > 進場價才移動）
     dynamic_sl = sl
-    if trigger_ts > 0:
-        try:
-            # 只需近 60 天 3D 棒，由新往舊分頁抓取
-            _ohlcv_1d = []
-            _end_time = int(time.time() * 1000)
-            for _pg in range(10):
-                _b60 = await exchange.fetch_ohlcv(symbol, '1d', limit=100, params={'endTime': _end_time})
-                if not _b60:
-                    break
-                _ohlcv_1d.extend(_b60)
-                _end_time = _b60[0][0] - 1
-            _ohlcv_1d = sorted({b[0]: b for b in _ohlcv_1d}.values(), key=lambda x: x[0])
-            if _ohlcv_1d:
-                _ohlcv_3d = compose_3d_bars(_ohlcv_1d)
-                if _ohlcv_3d:
-                    _df_3d = pd.DataFrame(_ohlcv_3d, columns=['ts', 'open', 'high', 'low', 'close', 'vol', 'close_ts'])
-                    _now_ms = int(time.time() * 1000)
-                    _closed_3d = _df_3d[_df_3d['close_ts'] <= _now_ms].reset_index(drop=True)
-                    
-                    if len(_closed_3d) >= 2:
-                        _current_sl = sl
-                        for i in range(1, len(_closed_3d)):
-                            _last = _closed_3d.iloc[i]
-                            _prev = _closed_3d.iloc[i-1]
-                            if int(_last['close_ts']) > trigger_ts:
-                                _new_close = float(_last['close'])
-                                _new_high = float(_last['high'])
-                                _new_low = float(_last['low'])
-                                _prev_open = float(_prev['open'])
-                                _prev_close = float(_prev['close'])
-                                
-                                if direction.upper() == 'LONG':
-                                    _prev_body_high = max(_prev_open, _prev_close)
-                                    if _new_close > _prev_body_high and _new_low > _current_sl:
-                                        _current_sl = _new_low
-                                elif direction.upper() == 'SHORT':
-                                    _prev_body_low = min(_prev_open, _prev_close)
-                                    if _new_close < _prev_body_low and (_new_high < _current_sl or _current_sl == 0):
-                                        _current_sl = _new_high
-                        dynamic_sl = _current_sl
-        except Exception as e:
-            logger.warning(f"  過期檢查(3D止損)異常 ({symbol}): {e}")
+    try:
+        _ohlcv_1d = []
+        _end_time = int(time.time() * 1000)
+        for _pg in range(30):
+            _b = await exchange.fetch_ohlcv(symbol, '1d', limit=100, params={'endTime': _end_time})
+            if not _b:
+                break
+            _ohlcv_1d.extend(_b)
+            _end_time = _b[0][0] - 1
+            if len(_ohlcv_1d) >= 360:
+                break
+        _ohlcv_1d = sorted({b[0]: b for b in _ohlcv_1d}.values(), key=lambda x: x[0])
+        if _ohlcv_1d:
+            _ohlcv_18d = compose_18d_bars(_ohlcv_1d)
+            if _ohlcv_18d:
+                _df_18d = pd.DataFrame(_ohlcv_18d, columns=['ts', 'open', 'high', 'low', 'close', 'vol', 'close_ts'])
+                _now_ms = int(time.time() * 1000)
+                _closed_18d = _df_18d[_df_18d['close_ts'] <= _now_ms].reset_index(drop=True)
+
+                if len(_closed_18d) >= 2:
+                    _current_sl = sl
+                    for i in range(1, len(_closed_18d)):
+                        _last = _closed_18d.iloc[i]
+                        _prev = _closed_18d.iloc[i - 1]
+                        if int(_last['close_ts']) <= trigger_ts:
+                            continue
+                        _new_close = float(_last['close'])
+                        _new_high  = float(_last['high'])
+                        _new_low   = float(_last['low'])
+                        _prev_open  = float(_prev['open'])
+                        _prev_close = float(_prev['close'])
+
+                        if direction.upper() == 'LONG':
+                            _prev_body_high = max(_prev_open, _prev_close)
+                            # 低點必須 > 進場價（保本條件）且 > 当前止損
+                            if _new_close > _prev_body_high and _new_low > entry and _new_low > _current_sl:
+                                _current_sl = _new_low
+                        elif direction.upper() == 'SHORT':
+                            _prev_body_low = min(_prev_open, _prev_close)
+                            # 高點必須 < 進場價（保本條件）且 < 当前止損
+                            if _new_close < _prev_body_low and _new_high < entry and (_new_high < _current_sl or _current_sl == 0):
+                                _current_sl = _new_high
+                    dynamic_sl = _current_sl
+    except Exception as e:
+        logger.warning(f"  過期檢查(18D止損)異常 ({symbol}): {e}")
 
     if dynamic_sl != sl:
-        return True, f"已產生移動保護止損 (原: {sl:.{precision}f} -> 新: {dynamic_sl:.{precision}f})", 'PSL'
+        return True, f"已產生 18D 移動保護止損 (原: {sl:.{precision}f} -> 新: {dynamic_sl:.{precision}f})", 'PSL'
 
-    tp_price = entry + expire_r * risk_per_unit if direction == 'LONG' else entry - expire_r * risk_per_unit
-    l3_close_ts = trigger_ts + 3 * 3600 * 1000 if trigger_ts > 0 else int(time.time() * 1000)
-    since_ts = l3_close_ts - 5 * 60 * 1000
-
-    try:
-        ohlcv_1h = await exchange.fetch_ohlcv(symbol, '1h', since=since_ts, limit=500)
-        for candle in ohlcv_1h:
-            c_ts = int(candle[0])
-            c_high = float(candle[2])
-            c_low = float(candle[3])
-            if c_ts < l3_close_ts - 60000:
-                continue
-            dt_taiwan = pd.to_datetime(c_ts, unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d %H:%M')
-            if direction == 'LONG':
-                if c_high >= tp_price:
-                    return True, f"歷史 1H K 棒 ({dt_taiwan}) 最高價 {c_high:.{precision}f} 已達到/超過 {expire_r}R 停利點 ({tp_price:.{precision}f})", 'TP'
-                if c_low <= sl:
-                    return True, f"歷史 1H K 棒 ({dt_taiwan}) 最低價 {c_low:.{precision}f} 已觸發初始止損 ({sl:.{precision}f})", 'PSL'
-            else:
-                if c_low <= tp_price:
-                    return True, f"歷史 1H K 棒 ({dt_taiwan}) 最低價 {c_low:.{precision}f} 已達到/低於 {expire_r}R 停利點 ({tp_price:.{precision}f})", 'TP'
-                if c_high >= sl:
-                    return True, f"歷史 1H K 棒 ({dt_taiwan}) 最高價 {c_high:.{precision}f} 已觸發初始止損 ({sl:.{precision}f})", 'PSL'
-
-        ticker = await exchange.fetch_ticker(symbol)
-        current_price = float(ticker['last'])
-        if direction == 'LONG':
-            if current_price >= tp_price:
-                return True, f"最新市價 {current_price:.{precision}f} 已達到/超過 {expire_r}R 停利點 ({tp_price:.{precision}f})", 'TP'
-            if current_price <= sl:
-                return True, f"最新市價 {current_price:.{precision}f} 已觸發初始止損 ({sl:.{precision}f})", 'PSL'
-        else:
-            if current_price <= tp_price:
-                return True, f"最新市價 {current_price:.{precision}f} 已達到/低於 {expire_r}R 停利點 ({tp_price:.{precision}f})", 'TP'
-            if current_price >= sl:
-                return True, f"最新市價 {current_price:.{precision}f} 已觸發初始止損 ({sl:.{precision}f})", 'PSL'
-    except Exception as e:
-        logger.warning(f"  過期檢查異常 ({symbol}): {e}")
     return False, "", ""
+
 
 
 async def place_order(exchange, symbol, direction, entry, sl, precision, fixed_loss_usdt, trigger_ts,
@@ -583,20 +549,12 @@ async def place_order(exchange, symbol, direction, entry, sl, precision, fixed_l
         expired, skip_reason, alert_type = await check_signal_expired(
             exchange, symbol, direction, entry, sl, precision, trigger_ts)
         if expired:
-            tp_price = entry + TP_EXPIRE_R * risk_per_unit if direction == 'LONG' else entry - TP_EXPIRE_R * risk_per_unit
-            logger.warning(f"⚠️ {symbol} 下單前監測觸發過期，跳過下單: {skip_reason}")
-            if alert_type == 'TP':
-                title = f"<b>🚫 跳過自動下單 (已達{TP_EXPIRE_R}R停利)</b>"
-            elif alert_type == 'PSL':
-                title = "<b>🚫 跳過自動下單 (已觸發保護止損)</b>"
-            else:
-                title = "<b>🚫 跳過自動下單</b>"
+            logger.warning(f"⚠️ {symbol} 下單前監測觸發，跳過下單: {skip_reason}")
             send_telegram_message(
-                f"{title}\n\n"
+                f"<b>🚫 跳過自動下單 (已產生 18D 移動保護止損)</b>\n\n"
                 f"💎 <b>交易對:</b> {get_base_coin(symbol)} [{direction}]\n"
                 f"🎯 進場價格: <code>{entry:.{precision}f}</code>\n"
-                f"🛡️ 保護止損: <code>{sl:.{precision}f}</code>\n"
-                f"🎯 {TP_EXPIRE_R}R價格: <code>{tp_price:.{precision}f}</code>\n\n"
+                f"🛡️ 初始止損: <code>{sl:.{precision}f}</code>\n\n"
                 f"⚠️ <b>原因:</b> {skip_reason}"
             )
             return 'skipped'
@@ -1084,12 +1042,14 @@ async def monitor_positions(exchange):
 
                                             if side.lower() == 'long':
                                                 _prev_body_high = max(_prev_open, _prev_close)
-                                                if _new_close > _prev_body_high and _new_low > _current_sl:
+                                                # 18D 低點必須在進場價上方（保本）且高於當前止損
+                                                if _new_close > _prev_body_high and _new_low > entry_price and _new_low > _current_sl:
                                                     _new_sl = _new_low
                                                     _move_sl = True
                                             elif side.lower() == 'short':
                                                 _prev_body_low = min(_prev_open, _prev_close)
-                                                if _new_close < _prev_body_low and (_new_high < _current_sl or _current_sl == 0):
+                                                # 18D 高點必須在進場價下方（保本）且低於當前止損
+                                                if _new_close < _prev_body_low and _new_high < entry_price and (_new_high < _current_sl or _current_sl == 0):
                                                     _new_sl = _new_high
                                                     _move_sl = True
 
