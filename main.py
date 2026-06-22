@@ -1494,10 +1494,13 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
 
 
             # 18D 移動保護止損檢查
+            # 規則：吞噬成立 且 K棒低點 > 進場價 且 K棒低點 > 現有保護止損 → 推進 trailing_sl
+            # 嚴禁直接覆寫 stop_loss，原始止損欄位永遠鎖定用於計算初始風險
             _closed_18d = df_18d_closed[df_18d_closed['close_ts'] <= c_ts]
             if len(_closed_18d) >= 2:
                 _last_18d = _closed_18d.iloc[-1]
                 _prev_18d = _closed_18d.iloc[-2]
+                _18d_dt = pd.to_datetime(int(_last_18d['ts']), unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d')
                 
                 for sig in all_historical_c2s:
                     if sig['status'] == 'active':
@@ -1508,38 +1511,50 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
                             _new_low   = float(_last_18d['low'])
                             _prev_open  = float(_prev_18d['open'])
                             _prev_close = float(_prev_18d['close'])
-                            
-                            _current_sl = float(sig['stop_loss'])
                             _entry_price = float(sig['entry_price'])
+                            _current_trailing = float(sig.get('trailing_sl', -1.0))
                             
                             if sig['l3_direction'] == 'LONG':
                                 _prev_body_high = max(_prev_open, _prev_close)
-                                if _new_close > _prev_body_high and _new_low > _entry_price and _new_low > _current_sl:
-                                    sig['stop_loss'] = _new_low
+                                # 吞噬成立 且 低點高於進場價 且 只進不退（低點必須高於現有保護止損）
+                                if (_new_close > _prev_body_high
+                                        and _new_low > _entry_price
+                                        and (_current_trailing < 0 or _new_low > _current_trailing)):
+                                    sig['trailing_sl'] = _new_low
+                                    sig['trailing_sl_date'] = _18d_dt
                             elif sig['l3_direction'] == 'SHORT':
                                 _prev_body_low = min(_prev_open, _prev_close)
-                                if _new_close < _prev_body_low and _new_high < _entry_price and (_new_high < _current_sl or _current_sl == 0):
-                                    sig['stop_loss'] = _new_high
+                                _current_trailing_s = float(sig.get('trailing_sl', float('inf')))
+                                if (_new_close < _prev_body_low
+                                        and _new_high < _entry_price
+                                        and _new_high < _current_trailing_s):
+                                    sig['trailing_sl'] = _new_high
+                                    sig['trailing_sl_date'] = _18d_dt
 
             # 止損 / 100R 止盈檢查 (極端狀況優先判定為止損)
+            # 止損觸發條件：從進場K棒的「下一根」開始判斷 (c_close_ts > trigger_ts)
             for sig in all_historical_c2s:
-                if sig['status'] == 'active' and c_ts > sig['trigger_ts']:
+                if sig['status'] == 'active' and c_close_ts > sig['trigger_ts']:
                     _is_sl = False
                     _is_tp = False
                     
-                    # 100R 停利點永遠使用 initial_sl 計算，防止移動止損推進後壓縮 tp_price
+                    # 有效止損線：優先使用保護止損，否則使用原始止損
+                    _trailing = sig.get('trailing_sl')
+                    _effective_sl = _trailing if _trailing is not None else sig['stop_loss']
+                    
+                    # 100R 停利點永遠使用 initial_sl 計算原始風險，防止保護止損推進後壓縮 tp_price
                     _init_sl_for_tp = sig.get('initial_sl', sig['stop_loss'])
                     _base_risk = abs(sig['entry_price'] - _init_sl_for_tp)
                     
                     if sig['l3_direction'] == 'LONG':
-                        if c_low <= sig['stop_loss']:
+                        if c_low <= _effective_sl:
                             _is_sl = True
                         if _base_risk > 0:
                             tp_price = sig['entry_price'] + 100 * _base_risk
                             if c_high >= tp_price:
                                 _is_tp = True
                     else: # SHORT
-                        if c_high >= sig['stop_loss']:
+                        if c_high >= _effective_sl:
                             _is_sl = True
                         if _base_risk > 0:
                             tp_price = sig['entry_price'] - 100 * _base_risk
@@ -1548,18 +1563,21 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
 
                     if _is_sl:
                         sig['status'] = 'closed'
-                        _init_sl = sig.get('initial_sl', sig['entry_price'])
+                        # 出場價以觸發止損的有效止損線為準
+                        _init_sl = sig.get('initial_sl', sig['stop_loss'])
                         _risk = abs(sig['entry_price'] - _init_sl)
                         if _risk > 0:
                             if sig['l3_direction'] == 'LONG':
-                                sig['real_rr'] = (sig['stop_loss'] - sig['entry_price']) / _risk
+                                sig['real_rr'] = (_effective_sl - sig['entry_price']) / _risk
                             else:
-                                sig['real_rr'] = (sig['entry_price'] - sig['stop_loss']) / _risk
+                                sig['real_rr'] = (sig['entry_price'] - _effective_sl) / _risk
                         else:
                             sig['real_rr'] = 0.0
+                        sig['exit_type'] = 'trailing_sl' if _trailing is not None else 'stop_loss'
                     elif _is_tp:
                         sig['status'] = 'closed'
                         sig['real_rr'] = 100.0
+                        sig['exit_type'] = 'tp100'
 
         current_price = float(df_1d['close'].iloc[-1]) if not df_1d.empty else 0.0
         
@@ -2632,14 +2650,19 @@ HTML_TEMPLATE = """
       const prec = sig.precision || 4;
       const badge = (status === 'active') ? (allHoldings.includes(sym) ? '<span class="dir-badge LONG">持倉中</span>' : '<span class="dir-badge" style="color: #d29922; background: rgba(210,153,34,0.1); border-color: rgba(210,153,34,0.4);">掛單中</span>') : '';
       const entry = parseFloat(sig.entry_price);
-      const sl = parseFloat(sig.stop_loss);
+      const sl = parseFloat(sig.stop_loss);           // 原始止損，用於即時 RR 計算
+      const trailing = sig.trailing_sl != null ? parseFloat(sig.trailing_sl) : null;
       const cp = parseFloat(sig.current_price || entry);
       let rrStr = '—', rrCol = '#8b949e';
       if (status === 'closed') {
         let r_val = sig.real_rr !== undefined ? parseFloat(sig.real_rr) : -1.0;
         rrStr = (r_val >= 0 ? '+' : '') + r_val.toFixed(2) + 'R';
         rrCol = r_val > 0 ? '#3fb950' : '#f85149';
-        if (r_val > 0) statusText = '止盈';
+        const exitType = sig.exit_type || '';
+        if (exitType === 'tp100') statusText = '止盈';
+        else if (exitType === 'trailing_sl') statusText = '保護止損';
+        else if (r_val > 0) statusText = '保護止損';
+        else statusText = '止損';
       } else if (entry > 0 && sl > 0 && Math.abs(entry - sl) > 0) {
         const risk = Math.abs(entry - sl);
         let rr = dir === 'LONG' ? (cp - entry) / risk : (entry - cp) / risk;
