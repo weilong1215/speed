@@ -2635,6 +2635,9 @@ HTML_TEMPLATE = """
     });
     container.innerHTML = html;
   }
+
+  fetchData();
+  setInterval(fetchData, 10000);
   
 </script>
 </body>
