@@ -483,14 +483,14 @@ async def check_signal_expired(exchange, symbol, direction, entry, sl, precision
             # 只需近 60 天 3D 棒，分頁抓取
             _ohlcv_1d = []
             _since_60 = int(time.time() * 1000) - 60 * 24 * 3600 * 1000
-            while _since_60 < int(time.time() * 1000):
+            for _pg in range(10):
+                if _since_60 >= int(time.time() * 1000):
+                    break
                 _b60 = await exchange.fetch_ohlcv(symbol, '1d', since=_since_60, limit=100)
                 if not _b60:
                     break
                 _ohlcv_1d.extend(_b60)
                 _since_60 = _b60[-1][0] + 1
-                if len(_b60) < 90:
-                    break
             _ohlcv_1d = sorted({b[0]: b for b in _ohlcv_1d}.values(), key=lambda x: x[0])
             if _ohlcv_1d:
                 _ohlcv_3d = compose_3d_bars(_ohlcv_1d)
@@ -1051,14 +1051,14 @@ async def monitor_positions(exchange):
                             # 只需近 60 天 3D 棒，分頁抓取
                             _ohlcv_1d_mon = []
                             _since_mon = int(time.time() * 1000) - 60 * 24 * 3600 * 1000
-                            while _since_mon < int(time.time() * 1000):
+                            for _pg in range(10):
+                                if _since_mon >= int(time.time() * 1000):
+                                    break
                                 _b_mon = await exchange.fetch_ohlcv(symbol, '1d', since=_since_mon, limit=100)
                                 if not _b_mon:
                                     break
                                 _ohlcv_1d_mon.extend(_b_mon)
                                 _since_mon = _b_mon[-1][0] + 1
-                                if len(_b_mon) < 90:
-                                    break
                             _ohlcv_1d_mon = sorted({b[0]: b for b in _ohlcv_1d_mon}.values(), key=lambda x: x[0])
                             if _ohlcv_1d_mon:
                                 _ohlcv_3d_mon = compose_3d_bars(_ohlcv_1d_mon)
@@ -1263,14 +1263,14 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
         # Bitget 1D 單次最多約 90 根，分頁補滿 365 天
         ohlcv_1d = []
         _since = now_utc - 365 * 24 * 3600 * 1000
-        while _since < now_utc:
+        for _pg in range(10):
+            if _since >= now_utc:
+                break
             _batch = await exchange.fetch_ohlcv(symbol, '1d', since=_since, limit=100)
             if not _batch:
                 break
             ohlcv_1d.extend(_batch)
             _since = _batch[-1][0] + 1
-            if len(_batch) < 90:
-                break
         # 去重並排序
         ohlcv_1d = sorted({b[0]: b for b in ohlcv_1d}.values(), key=lambda x: x[0])
         if not ohlcv_1d or len(ohlcv_1d) < 18:
