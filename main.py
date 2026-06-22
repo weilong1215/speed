@@ -2085,8 +2085,10 @@ async def run_scan():
                 # 同步歷史推演的動態數值 (止損被推升時，RR 與 SL 需要更新)
                 if 'real_rr' in item:
                     existing['real_rr'] = item['real_rr']
-                if 'stop_loss' in item:
-                    existing['stop_loss'] = item['stop_loss']
+                if 'trailing_sl' in item:
+                    existing['trailing_sl'] = item['trailing_sl']
+                if 'trailing_sl_date' in item:
+                    existing['trailing_sl_date'] = item['trailing_sl_date']
                     
                 # 每輪掃描都刷新 current_price，確保 RR 計算準確
                 existing['has_entered'] = True
