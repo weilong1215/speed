@@ -1253,40 +1253,6 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
         if current_idx > 0 and (current_idx % 50 == 0 or current_idx == total_coins):
             logger.info(f"📊 掃描進度: {current_idx}/{total_coins}...")
 
-        now_utc = int(time.time() * 1000)
-
-        # Bitget 1D 單次最多約 90 根，由新往舊分頁補滿
-        ohlcv_1d = []
-        _end_time = now_utc
-        for _pg in range(10):
-            _batch = await exchange.fetch_ohlcv(symbol, '1d', limit=100, params={'endTime': _end_time})
-            if not _batch:
-                break
-            ohlcv_1d.extend(_batch)
-            _end_time = _batch[0][0] - 1
-        # 去重並排序
-        ohlcv_1d = sorted({b[0]: b for b in ohlcv_1d}.values(), key=lambda x: x[0])
-        if not ohlcv_1d or len(ohlcv_1d) < 18:
-            return None
-
-        ohlcv_18d = compose_18d_bars(ohlcv_1d)
-        ohlcv_3d = compose_3d_bars(ohlcv_1d)
-        if not ohlcv_18d or not ohlcv_3d:
-            return None
-
-        df_18d = pd.DataFrame(ohlcv_18d, columns=['ts', 'open', 'high', 'low', 'close', 'vol', 'close_ts'])
-        df_18d_closed = df_18d[df_18d['close_ts'] <= now_utc].reset_index(drop=True)
-
-        df_3d = pd.DataFrame(ohlcv_3d, columns=['ts', 'open', 'high', 'low', 'close', 'vol', 'close_ts'])
-        df_3d_closed = df_3d[df_3d['close_ts'] <= now_utc].reset_index(drop=True)
-
-        df_1d = pd.DataFrame(ohlcv_1d, columns=['ts', 'open', 'high', 'low', 'close', 'vol'])
-        df_1d['close_ts'] = df_1d['ts'] + 24 * 3600 * 1000
-        df_1d_closed = df_1d[df_1d['close_ts'] <= now_utc].reset_index(drop=True)
-
-        if df_1d_closed.empty:
-            return None
-
         def get_swallow(c_close, p_open, p_close):
             p_body_high = max(p_open, p_close)
             p_body_low = min(p_open, p_close)
@@ -1295,6 +1261,85 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
             elif c_close < p_body_low:
                 return 'BLACK'
             return 'NONE'
+
+        now_utc = int(time.time() * 1000)
+
+        # 倒序分批拉取並邊抓邊合成判斷 (Lazy Fetching)
+        ohlcv_1d = []
+        _end_time = now_utc
+        stop_fetching = False
+        extra_fetch_done = False
+        oldest_red_ts = None
+        
+        for _pg in range(20):  # 最多拉 2000 天防無窮迴圈
+            _batch = await exchange.fetch_ohlcv(symbol, '1d', limit=100, params={'endTime': _end_time})
+            if not _batch:
+                break
+                
+            # 最新抓到的 batch 放到最前面
+            ohlcv_1d = _batch + ohlcv_1d
+            _end_time = _batch[0][0] - 1
+            
+            # 去重並排序
+            sorted_1d = sorted({b[0]: b for b in ohlcv_1d}.values(), key=lambda x: x[0])
+            ohlcv_18d = compose_18d_bars(sorted_1d)
+            
+            if len(ohlcv_18d) >= 3:
+                # 捨棄最舊的一根不完整 18D
+                valid_18d = ohlcv_18d[1:]
+                
+                # 倒序尋找吞噬
+                found_black = False
+                oldest_red_ts = None # 每次重新計算
+                for i in range(len(valid_18d)-1, 0, -1):
+                    _curr = valid_18d[i]
+                    _prev = valid_18d[i-1]
+                    
+                    # 只看已收盤的 18D K 棒
+                    if _curr[6] > now_utc:
+                        continue
+                        
+                    sw = get_swallow(_curr[4], _prev[1], _prev[4])
+                    if sw == 'RED':
+                        oldest_red_ts = _curr[6]
+                    elif sw == 'BLACK':
+                        found_black = True
+                        break
+                        
+                if found_black:
+                    if oldest_red_ts is not None:
+                        # 已找到多頭起點 (最舊的 RED)
+                        if not extra_fetch_done:
+                            extra_fetch_done = True
+                            continue # 再跑一次迴圈抓 100 天安全緩衝區 (給 L2 初始化用)
+                        else:
+                            stop_fetching = True
+                            break
+                    else:
+                        # 空頭趨勢，直接淘汰
+                        return None
+                        
+            if stop_fetching:
+                break
+
+        # 去重並排序 (確保資料乾淨)
+        ohlcv_1d = sorted({b[0]: b for b in ohlcv_1d}.values(), key=lambda x: x[0])
+        if not ohlcv_1d or len(ohlcv_1d) < 18:
+            return None
+
+        ohlcv_18d = compose_18d_bars(ohlcv_1d)
+        if not ohlcv_18d:
+            return None
+
+        df_18d = pd.DataFrame(ohlcv_18d, columns=['ts', 'open', 'high', 'low', 'close', 'vol', 'close_ts'])
+        df_18d_closed = df_18d[df_18d['close_ts'] <= now_utc].reset_index(drop=True)
+
+        df_1d = pd.DataFrame(ohlcv_1d, columns=['ts', 'open', 'high', 'low', 'close', 'vol'])
+        df_1d['close_ts'] = df_1d['ts'] + 24 * 3600 * 1000
+        df_1d_closed = df_1d[df_1d['close_ts'] <= now_utc].reset_index(drop=True)
+
+        if df_1d_closed.empty:
+            return None
 
         # ================= L1 (18D) 狀態機推進 =================
         l1_valid_ts = -1
