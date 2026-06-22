@@ -1445,8 +1445,8 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
             'l2_open_ts':         0,
             'l1_open_ts':         l1_valid_ts,
             'historical_c2s':     all_historical_c2s,
-            'l3_top_date':        l3_top_date,
-            'l3_bottom_date':     l3_bottom_date,
+            'l3_top_date':        confirmed_top_date,
+            'l3_bottom_date':     confirmed_bottom_date,
         }
 
     except Exception as e:
