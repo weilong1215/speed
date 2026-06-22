@@ -1341,15 +1341,7 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
                 l2_status_timeline.append({'ts': _c_ts, 'valid': True, 'date': current_l2_date_str})
                 
         def is_l2_valid_at(ts):
-            valid = False
-            date_str = "未知"
-            for ev in l2_status_timeline:
-                if ev['ts'] <= ts:
-                    valid = ev['valid']
-                    date_str = ev['date']
-                else:
-                    break
-            return valid, date_str
+            return True, "免判斷"
 
         # ================= L3 (1D) =================
         l3_state = 'NONE'
@@ -2497,11 +2489,11 @@ HTML_TEMPLATE = """
         </div>
         <div class="card-grid">
           <div class="detail-block">
-            <div class="detail-label">L1 (18D) 吞噬時間</div>
+            <div class="detail-label">L1 吞噬時間</div>
             <div class="detail-value">${sig.l1_date || '—'}</div>
           </div>
           <div class="detail-block">
-            <div class="detail-label">L2 (3D) 邊界時間</div>
+            <div class="detail-label">L2 邊界時間</div>
             <div class="detail-value">${fmt(sig.l2_date || sig.l1_date)}</div>
           </div>
           <div class="detail-block">
@@ -2513,7 +2505,7 @@ HTML_TEMPLATE = """
             <div class="detail-value">${sig.l3_bottom !== null && sig.l3_bottom !== 'inf' && sig.l3_bottom !== 'Infinity' && sig.l3_bottom < 9999999 ? fmt(sig.l3_bottom, prec) + ' (' + (sig.l3_bottom_date||'—') + ')' : '—'}</div>
           </div>
           <div class="detail-block">
-            <div class="detail-label">L3 (3H) 突破進場時間</div>
+            <div class="detail-label">L3 突破進場時間</div>
             <div class="detail-value">${fmt(sig.l3_date || sig.l2_date)}</div>
           </div>
           <div class="detail-block">
@@ -2592,11 +2584,11 @@ HTML_TEMPLATE = """
         </div>
         <div class="card-grid">
           <div class="detail-block">
-            <div class="detail-label">L1 (18D) 吞噬時間</div>
+            <div class="detail-label">L1 吞噬時間</div>
             <div class="detail-value">${sig.l1_date || '—'}</div>
           </div>
           <div class="detail-block">
-            <div class="detail-label">L2 (3D) 邊界時間</div>
+            <div class="detail-label">L2 邊界時間</div>
             <div class="detail-value">${fmt(sig.l2_date || sig.l1_date)}</div>
           </div>
           <div class="detail-block">
@@ -2608,7 +2600,7 @@ HTML_TEMPLATE = """
             <div class="detail-value">${sig.l3_bottom !== null && sig.l3_bottom !== 'inf' && sig.l3_bottom !== 'Infinity' && sig.l3_bottom < 9999999 ? fmt(sig.l3_bottom, prec) + ' (' + (sig.l3_bottom_date||'—') + ')' : '—'}</div>
           </div>
           <div class="detail-block">
-            <div class="detail-label">L3 (3H) 突破進場時間</div>
+            <div class="detail-label">L3 突破進場時間</div>
             <div class="detail-value">${fmt(sig.l3_date || sig.l2_date)}</div>
           </div>
           <div class="detail-block">
@@ -2665,15 +2657,15 @@ HTML_TEMPLATE = """
         </div>
         <div class="card-grid">
           <div class="detail-block">
-            <div class="detail-label">L1 (18D) 吞噬時間</div>
+            <div class="detail-label">L1 吞噬時間</div>
             <div class="detail-value">${sig.l1_date || '—'}</div>
           </div>
           <div class="detail-block">
-            <div class="detail-label">L2 (3D) 邊界時間</div>
+            <div class="detail-label">L2 邊界時間</div>
             <div class="detail-value">${fmt(sig.l2_date || '—')}</div>
           </div>
           <div class="detail-block">
-            <div class="detail-label">L3 (3H) 突破進場時間</div>
+            <div class="detail-label">L3 突破進場時間</div>
             <div class="detail-value">${fmt(l3)}</div>
           </div>
           <div class="detail-block">
