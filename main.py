@@ -1993,7 +1993,7 @@ async def run_scan():
                 history_signals[base] = keep_sigs
 
         # 只記錄掃描器推演出的 C2 事件，與實際倉位無關
-        all_triggered = real_new_triggers + missed_items + all_past_events
+        all_triggered = all_past_events + real_new_triggers + missed_items
         for item in all_triggered:
             base = get_base_coin(item['symbol'])
             if base not in history_signals:
