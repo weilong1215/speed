@@ -1492,21 +1492,63 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
 
 
 
-            # 止損 / 100R 止盈檢查
+            # 18D 移動保護止損檢查
+            _closed_18d = df_18d_closed[df_18d_closed['close_ts'] <= c_ts]
+            if len(_closed_18d) >= 2:
+                _last_18d = _closed_18d.iloc[-1]
+                _prev_18d = _closed_18d.iloc[-2]
+                
+                for sig in all_historical_c2s:
+                    if sig['status'] == 'active':
+                        _entry_ts = sig['trigger_ts']
+                        if int(_last_18d['close_ts']) > _entry_ts:
+                            _new_close = float(_last_18d['close'])
+                            _new_high  = float(_last_18d['high'])
+                            _new_low   = float(_last_18d['low'])
+                            _prev_open  = float(_prev_18d['open'])
+                            _prev_close = float(_prev_18d['close'])
+                            
+                            _current_sl = float(sig['stop_loss'])
+                            _entry_price = float(sig['entry_price'])
+                            
+                            if sig['l3_direction'] == 'LONG':
+                                _prev_body_high = max(_prev_open, _prev_close)
+                                if _new_close > _prev_body_high and _new_low > _entry_price and _new_low > _current_sl:
+                                    sig['stop_loss'] = _new_low
+                            elif sig['l3_direction'] == 'SHORT':
+                                _prev_body_low = min(_prev_open, _prev_close)
+                                if _new_close < _prev_body_low and _new_high < _entry_price and (_new_high < _current_sl or _current_sl == 0):
+                                    sig['stop_loss'] = _new_high
+
+            # 止損 / 100R 止盈檢查 (極端狀況優先判定為止損)
             for sig in all_historical_c2s:
                 if sig['status'] == 'active' and c_ts > sig['trigger_ts']:
-                    risk = abs(sig['entry_price'] - sig['stop_loss'])
-                    if risk > 0:
-                        # 100R 止盈
-                        tp_price = sig['entry_price'] + 100 * risk
-                        if c_high >= tp_price:
-                            sig['status'] = 'closed'
-                            sig['real_rr'] = 100.0
-                            continue
-                    # 止損
-                    if c_low <= sig['stop_loss']:
+                    _is_sl = False
+                    _is_tp = False
+                    
+                    if sig['l3_direction'] == 'LONG':
+                        if c_low <= sig['stop_loss']:
+                            _is_sl = True
+                        risk = abs(sig['entry_price'] - sig['stop_loss'])
+                        if risk > 0:
+                            tp_price = sig['entry_price'] + 100 * risk
+                            if c_high >= tp_price:
+                                _is_tp = True
+                    else: # SHORT
+                        if c_high >= sig['stop_loss']:
+                            _is_sl = True
+                        risk = abs(sig['entry_price'] - sig['stop_loss'])
+                        if risk > 0:
+                            tp_price = sig['entry_price'] - 100 * risk
+                            if c_low <= tp_price:
+                                _is_tp = True
+
+                    if _is_sl:
                         sig['status'] = 'closed'
                         sig['real_rr'] = -1.0
+                    elif _is_tp:
+                        sig['status'] = 'closed'
+                        sig['real_rr'] = 100.0
 
         current_price = float(df_1d['close'].iloc[-1]) if not df_1d.empty else 0.0
         
