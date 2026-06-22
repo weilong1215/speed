@@ -1377,6 +1377,7 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
         for i in range(1, len(df_1d_closed)):
             _prev = df_1d_closed.iloc[i-1]
             _curr = df_1d_closed.iloc[i]
+            c_open = float(_curr['open'])
             c_high = float(_curr['high'])
             c_low = float(_curr['low'])
             c_close = float(_curr['close'])
@@ -1460,8 +1461,8 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
                         temp_bottom = c_low
                         temp_bottom_date = c_date
 
-            # 進場觸發：一日K棒收盤價格大於最新的頂的價格
-            if confirmed_top > 0 and c_close > confirmed_top:
+            # 進場觸發：一日K棒由下往上實體貫穿最新頂點 (開盤<頂點 且 收盤>頂點)
+            if confirmed_top > 0 and c_open < confirmed_top and c_close > confirmed_top:
                 # 只有在 L1 成立之後的突破，才算是有效的進場訊號
                 if l1_valid_ts != -1 and c_close_ts >= l1_valid_ts:
                     l2_is_valid, l2_date_val = is_l2_valid_at(c_close_ts)
@@ -1493,8 +1494,9 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
 
 
 
+            # 止損檢查：必須是進場日「之後」的K棒盤中跌破止損，避免被進場當日的最低價同日自殺
             for sig in all_historical_c2s:
-                if sig['status'] == 'active':
+                if sig['status'] == 'active' and c_ts > sig['trigger_ts']:
                     if c_low <= sig['stop_loss']:
                         sig['status'] = 'closed'
 
