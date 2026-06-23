@@ -1264,22 +1264,17 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
 
         now_utc = int(time.time() * 1000)
 
-        # 為了保證 L2 狀態機的路徑依賴完整性，必須拉滿 1000 天資料。
-        # 採用並發 (asyncio.gather) 一次拉取 10 頁，速度與拉取 1 頁幾乎相同！
-        tasks = []
-        for _pg in range(10):
-            _end_time = now_utc - _pg * 100 * 24 * 3600 * 1000
-            tasks.append(exchange.fetch_ohlcv(symbol, '1d', limit=100, params={'endTime': _end_time}))
-            
-        batches = await asyncio.gather(*tasks, return_exceptions=True)
-        
+        # Bitget 1D 單次最多約 90 根，由新往舊分頁補滿 (拉滿 1000 天保證 L2 路徑完整)
+        # 注意：外層 run_scan 已採 20 幣並發，此處必須用串列以避免瞬間打出 200 個請求觸發 RateLimit 導致漏資料！
         ohlcv_1d = []
-        for batch in batches:
-            if isinstance(batch, list):
-                ohlcv_1d.extend(batch)
-            else:
-                logger.debug(f"Fetch batch failed for {symbol}: {batch}")
-
+        _end_time = now_utc
+        for _pg in range(10):
+            _batch = await exchange.fetch_ohlcv(symbol, '1d', limit=100, params={'endTime': _end_time})
+            if not _batch:
+                break
+            ohlcv_1d.extend(_batch)
+            _end_time = _batch[0][0] - 1
+            
         # 去重並排序 (確保資料乾淨)
         ohlcv_1d = sorted({b[0]: b for b in ohlcv_1d}.values(), key=lambda x: x[0])
         if not ohlcv_1d or len(ohlcv_1d) < 18:
