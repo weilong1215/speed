@@ -1073,17 +1073,18 @@ async def monitor_positions(exchange):
                                             _prev_close = float(_prev_18d['close'])
                                             _new_sl = _current_sl
                                             _move_sl = False
+                                            _entry_price = float(pos.get('entryPrice') or pos.get('avgPrice') or sig.get('entry_price', 0))
 
                                             if side.lower() == 'long':
                                                 _prev_body_high = max(_prev_open, _prev_close)
                                                 # 18D 低點必須在進場價上方（保本）且高於當前止損
-                                                if _new_close > _prev_body_high and _new_low > entry_price and _new_low > _current_sl:
+                                                if _new_close > _prev_body_high and _new_low > _entry_price and _new_low > _current_sl:
                                                     _new_sl = _new_low
                                                     _move_sl = True
                                             elif side.lower() == 'short':
                                                 _prev_body_low = min(_prev_open, _prev_close)
                                                 # 18D 高點必須在進場價下方（保本）且低於當前止損
-                                                if _new_close < _prev_body_low and _new_high < entry_price and (_new_high < _current_sl or _current_sl == 0):
+                                                if _new_close < _prev_body_low and _new_high < _entry_price and (_new_high < _current_sl or _current_sl == 0):
                                                     _new_sl = _new_high
                                                     _move_sl = True
 
