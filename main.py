@@ -60,12 +60,10 @@ logger.info(f"✅ 交易所配置檢查: API_KEY={'已設定' if BITGET_API_KEY 
 # ============================================================================
 
 DATA_DIR = "/app/data"
-WATCHLIST_FILE = os.path.join(DATA_DIR, "watchlist.json")
+WATCHLIST_FILE      = os.path.join(DATA_DIR, "watchlist.json")
 ACTIVE_SIGNALS_FILE = os.path.join(DATA_DIR, "active_signals.json")
-HISTORY_SIGNALS_FILE = os.path.join(DATA_DIR, "history_signals.json")
-SCANNED_COINS_FILE = os.path.join(DATA_DIR, "scanned_coins.json")
-HOLDINGS_FILE = os.path.join(DATA_DIR, "holdings.json")
-WAITING_SIGNALS_FILE = os.path.join(DATA_DIR, "waiting_signals.json")
+HISTORY_SIGNALS_FILE= os.path.join(DATA_DIR, "history_signals.json")
+# waiting_signals / scanned_coins / holdings 已合併進 watchlist 或即時推導，不再獨立存檔
 
 def ensure_data_dir():
     if not os.path.exists(DATA_DIR):
@@ -79,30 +77,6 @@ def ensure_data_dir():
     if not os.path.exists(HISTORY_SIGNALS_FILE):
         with open(HISTORY_SIGNALS_FILE, 'w') as f:
             json.dump({}, f)
-    if not os.path.exists(SCANNED_COINS_FILE):
-        with open(SCANNED_COINS_FILE, 'w') as f:
-            json.dump([], f)
-    if not os.path.exists(HOLDINGS_FILE):
-        with open(HOLDINGS_FILE, 'w') as f:
-            json.dump([], f)
-
-def load_waiting_signals():
-    ensure_data_dir()
-    try:
-        if os.path.exists(WAITING_SIGNALS_FILE):
-            with open(WAITING_SIGNALS_FILE, 'r', encoding='utf-8') as f:
-                return json.load(f)
-    except:
-        pass
-    return {}
-
-def save_waiting_signals(data):
-    ensure_data_dir()
-    try:
-        with open(WAITING_SIGNALS_FILE, 'w', encoding='utf-8') as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
-    except:
-        pass
 
 def load_watchlist():
     ensure_data_dir()
@@ -121,39 +95,15 @@ def save_watchlist(data):
     except Exception as e:
         logger.error(f"儲存 watchlist 失敗: {e}")
 
-def save_scanned_coins(coins: list):
-    """持久化本輪掃描的完整幣種清單，供網頁 UI 強制顯示所有名單用"""
-    ensure_data_dir()
-    try:
-        bases = sorted(set(get_base_coin(s) for s in coins))
-        with open(SCANNED_COINS_FILE, 'w', encoding='utf-8') as f:
-            json.dump(bases, f, ensure_ascii=False)
-    except Exception as e:
-        logger.error(f"儲存 scanned_coins 失敗: {e}")
-
-def load_scanned_coins() -> list:
-    ensure_data_dir()
-    try:
-        with open(SCANNED_COINS_FILE, 'r', encoding='utf-8') as f:
-            return json.load(f)
-    except Exception:
-        return []
-
-def save_holdings(bases: list):
-    ensure_data_dir()
-    try:
-        with open(HOLDINGS_FILE, 'w', encoding='utf-8') as f:
-            json.dump(list(set(bases)), f, ensure_ascii=False)
-    except Exception as e:
-        logger.error(f"儲存 holdings 失敗: {e}")
-
-def load_holdings() -> list:
-    ensure_data_dir()
-    try:
-        with open(HOLDINGS_FILE, 'r', encoding='utf-8') as f:
-            return json.load(f)
-    except Exception:
-        return []
+def derive_holdings_from_active_signals() -> list:
+    """從 active_signals.json 即時推導持倉中的 base coin 清單，不再依賴獨立的 holdings.json"""
+    active = load_active_signals()
+    bases = set()
+    for slist in active.values():
+        for s in slist:
+            if s.get('status') == 'active':
+                bases.add(get_base_coin(s['symbol']))
+    return list(bases)
 
 def load_active_signals():
     ensure_data_dir()
@@ -958,7 +908,7 @@ async def monitor_positions(exchange):
         saved_signals = load_active_signals()
 
         pos_symbols = [p['symbol'] for p in active_pos]
-        save_holdings([get_base_coin(s) for s in pos_symbols])
+        # holdings 已改為即時從 active_signals 推導，不再寫入獨立檔案
         logger.info(f"--- 倉位監控檢查 | 交易所持倉: {len(active_pos)} 個 ({', '.join(pos_symbols) if pos_symbols else '無'}) ---")
 
         # 1. 監控已成交倉位，確保 TP 與 SL 掛單存在
@@ -1838,7 +1788,7 @@ async def run_scan():
             if skipped_symbols:
                 logger.warning(f"⚠️ 過濾掉 {len(skipped_symbols)} 個幣種 (前10): {', '.join(skipped_symbols[:10])}{'...' if len(skipped_symbols) > 10 else ''}")
             logger.info(f"📊 實際掃描幣種: {len(coins)} 個 (全市場非RWA)")
-            save_scanned_coins(coins)
+            # scanned_coins.json 已廢除，不再額外儲存
 
             # 必須包含目前正在持倉與等待追蹤的幣種
             active_signals = load_active_signals()
@@ -1870,7 +1820,7 @@ async def run_scan():
             try:
                 positions = await ex.fetch_positions()
                 existing_positions = [p for p in positions if float(p.get('contracts', 0) or p.get('size', 0)) > 0]
-                save_holdings([get_base_coin(p['symbol']) for p in existing_positions])
+                # holdings 已改為即時從 active_signals 推導，不再寫入獨立檔案
             except Exception as e:
                 logger.warning(f"拉取持倉列表失敗 (下單防重複查詢): {e}")
 
@@ -2003,26 +1953,23 @@ async def run_scan():
                 real_new_triggers_final.append(item)
         real_new_triggers = real_new_triggers_final
 
-        waiting_signals = {}
+        # 將追蹤名單的顯示資料 (頂底、日期) 直接合併進 watchlist 條目，不再單獨存 waiting_signals.json
         for res in all_results:
             if res.get('is_watchlist_eligible'):
-                base = get_base_coin(res['symbol'])
-                l2_top_val = res.get('l2_top', 0)
-                l2_bot_val = res.get('l2_bottom', 0)
-                if l2_bot_val == float('inf'): l2_bot_val = 'inf'
-                if l2_top_val == float('inf'): l2_top_val = 'inf'
-                
-                waiting_signals[base] = {
-                    'symbol': res['symbol'],
-                    'l1_date': res.get('l1_date'),
-                    'l2_date': res.get('l2_date'),
-                    'l2_top': l2_top_val,
-                    'l2_top_date': res.get('l2_top_date', ''),
-                    'l2_bottom': l2_bot_val,
-                    'l2_bottom_date': res.get('l2_bottom_date', ''),
-                    'current_price': res.get('current_price', 0)
-                }
-        save_waiting_signals(waiting_signals)
+                sym = res['symbol']
+                if sym in watchlist:
+                    l2_top_val = res.get('l2_top', 0)
+                    l2_bot_val = res.get('l2_bottom', 0)
+                    if l2_bot_val == float('inf'): l2_bot_val = 'inf'
+                    if l2_top_val == float('inf'): l2_top_val = 'inf'
+                    watchlist[sym]['l1_date']        = res.get('l1_date', '')
+                    watchlist[sym]['l2_date']        = res.get('l2_date', '')
+                    watchlist[sym]['l2_top']         = l2_top_val
+                    watchlist[sym]['l2_top_date']    = res.get('l2_top_date', '')
+                    watchlist[sym]['l2_bottom']      = l2_bot_val
+                    watchlist[sym]['l2_bottom_date'] = res.get('l2_bottom_date', '')
+                    watchlist[sym]['current_price']  = res.get('current_price', 0)
+        save_watchlist(watchlist)
         
         history_signals = load_history_signals()
 
@@ -2879,14 +2826,13 @@ def api_data():
                     # 以進場價作為臨時佔位，前端 RR 算出 0，但至少不會崩潰
                     price_map[base] = float(s['entry_price'])
 
-    # 側欄統一用 base coin 顯示；強制合併最新輪掃描幣種，確保無訊號幣種也能呈現
-    scanned_coins = load_scanned_coins()
+    # 側欄只顯示「有訊號紀錄」或「在追蹤名單中」的幣種，去除無意義的掃描雜訊
     watchlist_coins = sorted(set(
-        scanned_coins +
         [get_base_coin(k) for k in watchlist.keys()] +
         list(cleaned_history.keys())
     ))
-    holdings = load_holdings()
+    # holdings 即時從 active_signals 推導，不讀獨立檔案
+    holdings = derive_holdings_from_active_signals()
 
     # 整理 active_signals 供前端持倉總覽使用
     active_list = []
@@ -2904,13 +2850,27 @@ def api_data():
                     'precision': s.get('precision', 4),
                     'l1_date': s.get('l1_date', ''),
                     'l2_date': s.get('l2_date', ''),
-                    'l3_date': s.get('l3_date', ''),
                     'l1_18d_direction': s.get('l1_18d_direction', ''),
                     'timestamp': s.get('timestamp', 0),
                 })
 
+    # waiting_signals 從 watchlist 即時提取（已在掃描時合併進去）
+    waiting_signals = {}
+    for sym, wdata in watchlist.items():
+        base = get_base_coin(sym)
+        if 'l2_top' in wdata:
+            waiting_signals[base] = {
+                'symbol': sym,
+                'l1_date':        wdata.get('l1_date', ''),
+                'l2_date':        wdata.get('l2_date', ''),
+                'l2_top':         wdata.get('l2_top', 0),
+                'l2_top_date':    wdata.get('l2_top_date', ''),
+                'l2_bottom':      wdata.get('l2_bottom', 0),
+                'l2_bottom_date': wdata.get('l2_bottom_date', ''),
+                'current_price':  wdata.get('current_price', 0),
+            }
+
     perf_history = load_perf_history()
-    waiting_signals = load_waiting_signals()
     data_to_return = {"watchlist": watchlist_coins, "history": cleaned_history, "price_map": price_map, "holdings": holdings, "active_signals": active_list, "perf_history": perf_history, "waiting_signals": waiting_signals}
     return jsonify(sanitize_for_json(data_to_return))
 
