@@ -2099,22 +2099,25 @@ async def run_scan():
         await ex.close()
 
 async def scheduler():
-    last_hour = -1
+    # 以日期追蹤，避免 last_hour=0 跨日不重置導致每天午夜只能觸發一次的 Bug
+    last_scan_date = None
     
     try:
         await run_scan()
+        last_scan_date = datetime.utcnow().date()
     except Exception as e:
         logger.error(f"初始掃描異常: {e}")
 
     while True:
         try:
             now = datetime.utcnow()
-            if now.hour == 0 and now.minute <= 10 and now.hour != last_hour:
+            today = now.date()
+            if now.hour == 0 and now.minute <= 10 and today != last_scan_date:
                 try:
                     await run_scan()
                 except Exception as e:
                     logger.error(f"定時掃描異常: {e}")
-                last_hour = now.hour
+                last_scan_date = today
 
             if BITGET_API_KEY:
                 ex = get_exchange()
