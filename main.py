@@ -2281,10 +2281,13 @@ HTML_TEMPLATE = """
     letter-spacing: 0.04em;
     text-transform: uppercase;
   }
-  .status-badge.active { background: rgba(63,185,80,0.1); color: #3fb950; border: 1px solid rgba(63,185,80,0.25); }
-  .status-badge.closed { background: rgba(248,81,73,0.1); color: #f85149; border: 1px solid rgba(248,81,73,0.25); }
-  .status-badge.missed { background: rgba(63,185,80,0.1); color: #3fb950; border: 1px solid rgba(63,185,80,0.25); }
-  .status-badge.triggered { background: rgba(88,166,255,0.1); color: #58a6ff; border: 1px solid rgba(88,166,255,0.25); }
+  .status-badge.active   { background: rgba(63,185,80,0.1);   color: #3fb950; border: 1px solid rgba(63,185,80,0.25); }
+  .status-badge.closed   { background: rgba(248,81,73,0.1);   color: #f85149; border: 1px solid rgba(248,81,73,0.25); }
+  .status-badge.missed   { background: rgba(63,185,80,0.1);   color: #3fb950; border: 1px solid rgba(63,185,80,0.25); }
+  .status-badge.triggered{ background: rgba(88,166,255,0.1);  color: #58a6ff; border: 1px solid rgba(88,166,255,0.25); }
+  /* 止盈 = 持倉中色系 (綠); 保護止損 = 掛單中色系 (黃) */
+  .status-badge.tp       { background: rgba(63,185,80,0.15);  color: #3fb950; border: 1px solid rgba(63,185,80,0.40); }
+  .status-badge.trail-sl { background: rgba(210,153,34,0.15); color: #d29922; border: 1px solid rgba(210,153,34,0.40); }
   .card-time { font-size: 0.75rem; color: #6e7681; }
 
   .card-grid {
@@ -2367,9 +2370,7 @@ HTML_TEMPLATE = """
     updateStats();
     renderSidebar(document.getElementById('search-input').value);
     if (tab === 'signals') renderHome();
-    else if (tab === 'holdings') renderHoldingsHome();
     else if (tab === 'watchlist') renderWatchlistHome();
-    
   }
 
   function updateStats() {
@@ -2403,27 +2404,6 @@ HTML_TEMPLATE = """
         <span>🏆 勝率：<strong style="color:#3fb950">${winRate}%</strong></span>
         <span>💰 訊號總 RR：<strong style="color:${rrColor}">${rrText}</strong></span>
       `;
-    } else if (currentView === 'holdings') {
-      let hCount = 0, pCount = 0, hRR = 0;
-      allActiveSignals.forEach(s => {
-        const base = s._base;
-        const isH = allHoldings.includes(base);
-        if (isH) hCount++; else pCount++;
-        const entry = parseFloat(s.entry_price), sl = parseFloat(s.sl_price);
-        const cp = parseFloat(priceMap[base] || entry);
-        if (entry > 0 && sl > 0 && Math.abs(entry - sl) > 0) {
-          const risk = Math.abs(entry - sl);
-          const sdir = s.direction || 'LONG';
-          hRR += sdir === 'LONG' ? (cp - entry) / risk : (entry - cp) / risk;
-        }
-      });
-      const hrrText = hRR >= 0 ? `+${hRR.toFixed(2)}` : `${hRR.toFixed(2)}`;
-      const hrrColor = hRR >= 0 ? '#3fb950' : '#f85149';
-      document.getElementById('global-stats').innerHTML = `
-        <span>💼 持倉中：<strong style="color:#9e6a03">${hCount}</strong></span>
-        <span>⏳ 掛單中：<strong style="color:#e3b341">${pCount}</strong></span>
-        <span>💰 持倉總 RR：<strong style="color:${hrrColor}">${hrrText}</strong></span>
-      `;
     }   }
 
   async function fetchData() {
@@ -2447,9 +2427,7 @@ HTML_TEMPLATE = """
       updateStats();
       renderSidebar(document.getElementById('search-input').value);
       if (currentSymbol) renderMain(currentSymbol);
-      else if (currentView === 'holdings') renderHoldingsHome();
       else if (currentView === 'watchlist') renderWatchlistHome();
-      
       else renderHome();
     } catch (e) {
       console.error('Fetch error:', e);
@@ -2469,13 +2447,9 @@ HTML_TEMPLATE = """
 
     let html = '';
     if (!q) {
-      const sigsActive = currentView === 'signals' && currentSymbol === null ? 'active' : '';
-      const holdsActive = currentView === 'holdings' && currentSymbol === null ? 'active' : '';
-      const perfActive = currentView === 'perf' && currentSymbol === null ? 'active' : '';
-      html += `<div class="symbol-item ${sigsActive}" onclick="switchTab('signals')"><span>📡 訊號總覽</span></div>`;
-      html += `<div class="symbol-item ${holdsActive}" onclick="switchTab('holdings')"><span>💼 持倉總覽</span></div>`;
-
+      const sigsActive  = currentView === 'signals'   && currentSymbol === null ? 'active' : '';
       const watchActive = currentView === 'watchlist' && currentSymbol === null ? 'active' : '';
+      html += `<div class="symbol-item ${sigsActive}" onclick="switchTab('signals')"><span>📡 訊號總覽</span></div>`;
       html += `<div class="symbol-item ${watchActive}" onclick="switchTab('watchlist')"><span>👀 追蹤名單</span></div>`;
       html += `<div style="height: 1px; background: #21262d; margin: 8px 0;"></div>`;
     }
@@ -2494,8 +2468,7 @@ HTML_TEMPLATE = """
   function goHome() {
     currentSymbol = null;
     renderSidebar(document.getElementById('search-input').value);
-    if (currentView === 'holdings') renderHoldingsHome();
-    else renderHome();
+    renderHome();
   }
 
   function renderHome() {
@@ -2533,7 +2506,18 @@ HTML_TEMPLATE = """
         rrStr = (rr >= 0 ? '+' : '') + rr.toFixed(2) + 'R';
         rrCol = rr >= 0 ? '#3fb950' : '#f85149';
       }
-      const badge = (sig.status === 'active') ? (allHoldings.includes(sig._base) ? '<span class="dir-badge LONG">持倉中</span>' : '<span class="dir-badge" style="color: #d29922; background: rgba(210,153,34,0.1); border-color: rgba(210,153,34,0.4);">掛單中</span>') : '';
+      // 掛單中且已有保護止損 → 顯示「未上車」樣式 (灰色，語意貼近 missed)
+      const hasTrailSL = sig.trailing_sl != null;
+      let badge = '';
+      if (sig.status === 'active') {
+        if (allHoldings.includes(sig._base)) {
+          badge = '<span class="dir-badge LONG">持倉中</span>';
+        } else if (hasTrailSL) {
+          badge = '<span class="dir-badge" style="color:#6e7681;background:rgba(110,118,129,0.1);border-color:rgba(110,118,129,0.3);">未上車</span>';
+        } else {
+          badge = '<span class="dir-badge" style="color:#d29922;background:rgba(210,153,34,0.1);border-color:rgba(210,153,34,0.4);">掛單中</span>';
+        }
+      }
       html += `
       <div class="signal-card ${dir} active" style="cursor:pointer" onclick="selectSymbol('${sig._base}')">
         <div class="card-header">
@@ -2615,21 +2599,38 @@ HTML_TEMPLATE = """
       const statusMap = { active: '有效', closed: '止損', missed: '有效', triggered: '歷史紀錄' };
       let statusText = statusMap[status] || status;
       const prec = sig.precision || 4;
-      const badge = (status === 'active') ? (allHoldings.includes(sym) ? '<span class="dir-badge LONG">持倉中</span>' : '<span class="dir-badge" style="color: #d29922; background: rgba(210,153,34,0.1); border-color: rgba(210,153,34,0.4);">掛單中</span>') : '';
+      // active: 持倉中(綠) / 掛單中有保護止損(灰=未上車) / 掛單中(黃)
+      let badge = '';
+      if (status === 'active') {
+        if (allHoldings.includes(sym)) {
+          badge = '<span class="dir-badge LONG">持倉中</span>';
+        } else if (sig.trailing_sl != null) {
+          badge = '<span class="dir-badge" style="color:#6e7681;background:rgba(110,118,129,0.1);border-color:rgba(110,118,129,0.3);">未上車</span>';
+        } else {
+          badge = '<span class="dir-badge" style="color:#d29922;background:rgba(210,153,34,0.1);border-color:rgba(210,153,34,0.4);">掛單中</span>';
+        }
+      }
       const entry = parseFloat(sig.entry_price);
-      const sl = parseFloat(sig.stop_loss);           // 原始止損，用於即時 RR 計算
-      const trailing = sig.trailing_sl != null ? parseFloat(sig.trailing_sl) : null;
+      const sl = parseFloat(sig.stop_loss);   // 原始止損，用於即時 RR 計算
       const cp = parseFloat(sig.current_price || entry);
       let rrStr = '—', rrCol = '#8b949e';
+      // exitType 決定 statusText & badge 色系
+      let exitBadgeClass = 'closed';
       if (status === 'closed') {
         let r_val = sig.real_rr !== undefined ? parseFloat(sig.real_rr) : -1.0;
         rrStr = (r_val >= 0 ? '+' : '') + r_val.toFixed(2) + 'R';
         rrCol = r_val > 0 ? '#3fb950' : '#f85149';
         const exitType = sig.exit_type || '';
-        if (exitType === 'tp100') statusText = '止盈';
-        else if (exitType === 'trailing_sl') statusText = '保護止損';
-        else if (r_val > 0) statusText = '保護止損';
-        else statusText = '止損';
+        if (exitType === 'tp100') {
+          statusText = '止盈';
+          exitBadgeClass = 'tp';       // 綠色 → 跟持倉中同色系
+        } else if (exitType === 'trailing_sl' || r_val > 0) {
+          statusText = '保護止損';
+          exitBadgeClass = 'trail-sl'; // 黃色 → 跟掛單中同色系
+        } else {
+          statusText = '止損';
+          exitBadgeClass = 'closed';   // 紅色
+        }
       } else if (entry > 0 && sl > 0 && Math.abs(entry - sl) > 0) {
         const risk = Math.abs(entry - sl);
         let rr = dir === 'LONG' ? (cp - entry) / risk : (entry - cp) / risk;
@@ -2642,7 +2643,7 @@ HTML_TEMPLATE = """
         <div class="card-header">
           <div class="card-title">
             <span style="color:#6e7681;font-size:0.75rem;">#${idx + 1}</span>
-            ${(status === 'closed' || status === 'triggered') ? `<span class="status-badge ${status}">${statusText}</span>` : ''}
+            ${(status === 'closed' || status === 'triggered') ? `<span class="status-badge ${exitBadgeClass}">${statusText}</span>` : ''}
             ${badge}
             <span style="font-size:0.85rem;font-weight:700;color:${rrCol};margin-left:auto;">${rrStr}</span>
           </div>
