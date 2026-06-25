@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+
+# 本地開發用測試腳本 (不上傳 GitHub)
+test_*.py
+debug_*.py
+patch_*.py
+
+# 資料檔 (Zeabur 持久化儲存，不納入版本控制)
+*.json
+
+# IDE / 編輯器
+.cursor/
+.vscode/
+*.code-workspace
+
+# 環境變數
+.env
+*.env
+main.nv
