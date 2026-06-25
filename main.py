@@ -63,7 +63,8 @@ DATA_DIR = "/app/data"
 WATCHLIST_FILE      = os.path.join(DATA_DIR, "watchlist.json")
 ACTIVE_SIGNALS_FILE = os.path.join(DATA_DIR, "active_signals.json")
 HISTORY_SIGNALS_FILE= os.path.join(DATA_DIR, "history_signals.json")
-# waiting_signals / scanned_coins / holdings 已合併進 watchlist 或即時推導，不再獨立存檔
+HOLDINGS_FILE       = os.path.join(DATA_DIR, "holdings.json")
+# waiting_signals / scanned_coins 已合併進 watchlist，不再獨立存檔
 
 def ensure_data_dir():
     if not os.path.exists(DATA_DIR):
@@ -77,6 +78,26 @@ def ensure_data_dir():
     if not os.path.exists(HISTORY_SIGNALS_FILE):
         with open(HISTORY_SIGNALS_FILE, 'w') as f:
             json.dump({}, f)
+    if not os.path.exists(HOLDINGS_FILE):
+        with open(HOLDINGS_FILE, 'w') as f:
+            json.dump([], f)
+
+def save_holdings(bases: list):
+    ensure_data_dir()
+    try:
+        with open(HOLDINGS_FILE, 'w', encoding='utf-8') as f:
+            json.dump(list(set(bases)), f, ensure_ascii=False)
+    except Exception as e:
+        logger.error(f"儲存 holdings 失敗: {e}")
+
+def load_holdings() -> list:
+    """讀取交易所真實持倉的 base coin 清單 (由 monitor_positions / run_scan 寫入)"""
+    ensure_data_dir()
+    try:
+        with open(HOLDINGS_FILE, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    except Exception:
+        return []
 
 def load_watchlist():
     ensure_data_dir()
@@ -908,7 +929,8 @@ async def monitor_positions(exchange):
         saved_signals = load_active_signals()
 
         pos_symbols = [p['symbol'] for p in active_pos]
-        # holdings 已改為即時從 active_signals 推導，不再寫入獨立檔案
+        # 以真實交易所倉位更新 holdings.json，供前端區分「持倉中」vs「掛單中」
+        save_holdings([get_base_coin(s) for s in pos_symbols])
         logger.info(f"--- 倉位監控檢查 | 交易所持倉: {len(active_pos)} 個 ({', '.join(pos_symbols) if pos_symbols else '無'}) ---")
 
         # 1. 監控已成交倉位，確保 TP 與 SL 掛單存在
@@ -1820,7 +1842,8 @@ async def run_scan():
             try:
                 positions = await ex.fetch_positions()
                 existing_positions = [p for p in positions if float(p.get('contracts', 0) or p.get('size', 0)) > 0]
-                # holdings 已改為即時從 active_signals 推導，不再寫入獨立檔案
+                # 以真實交易所倉位更新 holdings.json，供前端區分「持倉中」vs「掛單中」
+                save_holdings([get_base_coin(p['symbol']) for p in existing_positions])
             except Exception as e:
                 logger.warning(f"拉取持倉列表失敗 (下單防重複查詢): {e}")
 
@@ -2831,8 +2854,8 @@ def api_data():
         [get_base_coin(k) for k in watchlist.keys()] +
         list(cleaned_history.keys())
     ))
-    # holdings 即時從 active_signals 推導，不讀獨立檔案
-    holdings = derive_holdings_from_active_signals()
+    # holdings 讀取真實交易所倉位 (由 monitor_positions 每分鐘更新)
+    holdings = load_holdings()
 
     # 整理 active_signals 供前端持倉總覽使用
     active_list = []
