@@ -1250,15 +1250,16 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
             
         # 去重並排序 (確保資料乾淨)
         ohlcv_1d = sorted({b[0]: b for b in ohlcv_1d}.values(), key=lambda x: x[0])
-        if not ohlcv_1d or len(ohlcv_1d) < 18:
+        if not ohlcv_1d:
             return None
 
         ohlcv_18d = compose_18d_bars(ohlcv_1d)
-        if not ohlcv_18d:
-            return None
-
-        df_18d = pd.DataFrame(ohlcv_18d, columns=['ts', 'open', 'high', 'low', 'close', 'vol', 'close_ts'])
-        df_18d_closed = df_18d[df_18d['close_ts'] <= now_utc].reset_index(drop=True)
+        
+        if ohlcv_18d:
+            df_18d = pd.DataFrame(ohlcv_18d, columns=['ts', 'open', 'high', 'low', 'close', 'vol', 'close_ts'])
+            df_18d_closed = df_18d[df_18d['close_ts'] <= now_utc].reset_index(drop=True)
+        else:
+            df_18d_closed = pd.DataFrame(columns=['ts', 'open', 'high', 'low', 'close', 'vol', 'close_ts'])
 
         df_1d = pd.DataFrame(ohlcv_1d, columns=['ts', 'open', 'high', 'low', 'close', 'vol'])
         df_1d['close_ts'] = df_1d['ts'] + 24 * 3600 * 1000
@@ -1268,9 +1269,9 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
             return None
 
         # ================= L1 (18D) 狀態機推進 =================
-        l1_valid_ts = -1
-        l1_valid = False
-        l1_date_str = "未知"
+        l1_valid = True
+        l1_valid_ts = int(df_1d_closed.iloc[-1]['ts'])
+        l1_date_str = "新幣首發"
         for i in range(1, len(df_18d_closed)):
             _prev = df_18d_closed.iloc[i-1]
             _curr = df_18d_closed.iloc[i]
