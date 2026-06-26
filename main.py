@@ -1778,12 +1778,12 @@ def poll_telegram_commands():
 
 async def run_scan():
     logger.info("⏰ 開始執行 極速系統...")
-    ex = get_exchange()
-    watchlist = load_watchlist()
-    config = load_config()
-    default_loss = config.get("total_capital", 300) * config.get("loss_pct", 2) / 100
-
+    ex = None
     try:
+        ex = get_exchange()
+        watchlist = load_watchlist()
+        config = load_config()
+        default_loss = config.get("total_capital", 300) * config.get("loss_pct", 2) / 100
         try:
             # 抓取全市場 USDT-FUTURES 非 RWA 幣種（跳過股票合約）
             whitelist = _get_crypto_whitelist()
@@ -2067,7 +2067,10 @@ async def run_scan():
         if real_new_triggers or holding_items or real_holding_new_triggers or missed_items:
             send_system_settings_message(config)
     finally:
-        await ex.close()
+        if ex:
+            await ex.close()
+            # 讓 aiohttp 徹底釋放 TCP connection，避免 Unclosed connector 警告
+            await asyncio.sleep(0.1)
 
 async def scheduler():
     # 以日期追蹤，避免 last_hour=0 跨日不重置導致每天午夜只能觸發一次的 Bug
@@ -2091,13 +2094,16 @@ async def scheduler():
                 last_scan_date = today
 
             if BITGET_API_KEY:
-                ex = get_exchange()
+                ex = None
                 try:
+                    ex = get_exchange()
                     await monitor_positions(ex)
                 except Exception as e:
                     logger.error(f"監控週期異常: {e}")
                 finally:
-                    await ex.close()
+                    if ex:
+                        await ex.close()
+                        await asyncio.sleep(0.1)
 
         except Exception as e:
             logger.critical(f"💥 Scheduler 頂層異常 (已攔截): {e}")
