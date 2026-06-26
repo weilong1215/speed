@@ -1277,7 +1277,7 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
             _curr = df_18d_closed.iloc[i]
             sw = get_swallow(_curr['close'], _prev['open'], _prev['close'])
             if sw == 'RED':
-                if not l1_valid:
+                if not l1_valid or l1_date_str == "新幣首發":
                     l1_valid = True
                     l1_valid_ts = int(_curr['close_ts'])
                     l1_date_str = pd.to_datetime(int(_curr['ts']), unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d')
