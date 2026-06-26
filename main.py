@@ -1855,9 +1855,12 @@ async def run_scan():
         for i in range(0, total_coins, 20):
             batch = coins[i:i+20]
             tasks = [scan_for_symbol(ex, s, get_base_coin(s), precisions[s], i + idx + 1, total_coins, watchlist.get(s)) for idx, s in enumerate(batch)]
-            results = await asyncio.gather(*tasks)
+            results = await asyncio.gather(*tasks, return_exceptions=True)
 
             for res in results:
+                if isinstance(res, Exception):
+                    logger.warning(f"掃描幣種並發異常: {res}")
+                    continue
                 if res is None: continue
                 sym = res['symbol']
                 
