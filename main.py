@@ -1776,11 +1776,13 @@ def poll_telegram_commands():
 # 主掃描流程
 # ============================================================================
 
-async def run_scan():
+async def run_scan(ex=None):
     logger.info("⏰ 開始執行 極速系統...")
-    ex = None
-    try:
+    _local_ex = False
+    if ex is None:
         ex = get_exchange()
+        _local_ex = True
+    try:
         watchlist = load_watchlist()
         config = load_config()
         default_loss = config.get("total_capital", 300) * config.get("loss_pct", 2) / 100
@@ -2070,7 +2072,7 @@ async def run_scan():
         if real_new_triggers or holding_items or real_holding_new_triggers or missed_items:
             send_system_settings_message(config)
     finally:
-        if ex:
+        if _local_ex and ex:
             await ex.close()
             # 讓 aiohttp 徹底釋放 TCP connection，避免 Unclosed connector 警告
             await asyncio.sleep(0.1)
@@ -2079,38 +2081,39 @@ async def scheduler():
     # 以日期追蹤，避免 last_hour=0 跨日不重置導致每天午夜只能觸發一次的 Bug
     last_scan_date = None
     
+    global_ex = get_exchange()
     try:
-        await run_scan()
-        last_scan_date = datetime.utcnow().date()
-    except Exception as e:
-        logger.error(f"初始掃描異常: {e}")
-
-    while True:
         try:
-            now = datetime.utcnow()
-            today = now.date()
-            if now.hour == 0 and now.minute <= 10 and today != last_scan_date:
-                try:
-                    await run_scan()
-                except Exception as e:
-                    logger.error(f"定時掃描異常: {e}")
-                last_scan_date = today
-
-            if BITGET_API_KEY:
-                ex = None
-                try:
-                    ex = get_exchange()
-                    await monitor_positions(ex)
-                except Exception as e:
-                    logger.error(f"監控週期異常: {e}")
-                finally:
-                    if ex:
-                        await ex.close()
-                        await asyncio.sleep(0.1)
-
+            await run_scan(global_ex)
+            last_scan_date = datetime.utcnow().date()
         except Exception as e:
-            logger.critical(f"💥 Scheduler 頂層異常 (已攔截): {e}")
-        await asyncio.sleep(60)
+            logger.error(f"初始掃描異常: {e}")
+
+        while True:
+            try:
+                now = datetime.utcnow()
+                today = now.date()
+                if now.hour == 0 and now.minute <= 10 and today != last_scan_date:
+                    try:
+                        await run_scan(global_ex)
+                    except Exception as e:
+                        logger.error(f"定時掃描異常: {e}")
+                    last_scan_date = today
+
+                if BITGET_API_KEY:
+                    try:
+                        await monitor_positions(global_ex)
+                    except Exception as e:
+                        logger.error(f"監控週期異常: {e}")
+
+            except Exception as e:
+                logger.critical(f"💥 Scheduler 頂層異常 (已攔截): {e}")
+            await asyncio.sleep(60)
+            
+    finally:
+        if global_ex:
+            await global_ex.close()
+            await asyncio.sleep(0.25)
 
 # ============================================================================
 # Flask Web UI Dashboard
