@@ -1353,10 +1353,12 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
                             confirmed_bottom = temp_bottom
                             confirmed_bottom_date = temp_bottom_date
                             
-                            # 若舊底與新底之間有產生潛在頂點，正式取代舊頂
+                            # 若舊底與新底之間有產生潛在頂點，取舊頂與潛在頂中較高的那個
                             if pending_top != -1.0:
-                                confirmed_top = pending_top
-                                confirmed_top_date = pending_top_date
+                                if pending_top > confirmed_top:
+                                    confirmed_top = pending_top
+                                    confirmed_top_date = pending_top_date
+                                # else: confirmed_top 已是較高值，保留不動
                             
                             # 區間破壞，清空暫存
                             pending_top = -1.0
@@ -1387,10 +1389,12 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
                             confirmed_top = temp_top
                             confirmed_top_date = temp_top_date
                             
-                            # 若舊頂與新頂之間有產生潛在底點，正式取代舊底
+                            # 若舊頂與新頂之間有產生潛在底點，取舊底與潛在底中較低的那個
                             if pending_bottom != float('inf'):
-                                confirmed_bottom = pending_bottom
-                                confirmed_bottom_date = pending_bottom_date
+                                if pending_bottom < confirmed_bottom:
+                                    confirmed_bottom = pending_bottom
+                                    confirmed_bottom_date = pending_bottom_date
+                                # else: confirmed_bottom 已是較低值，保留不動
                             
                             # 區間破壞，清空暫存
                             pending_top = -1.0
