@@ -714,11 +714,8 @@ async def place_order(exchange, symbol, direction, entry, sl, precision, fixed_l
                 send_telegram_message(
                     f"<b>🤖 自動下單 ({leverage}x)</b>\n\n"
                     f"💎 {get_base_coin(symbol)} [{dir_str}]\n"
-                    f"📅 L1(18D): <code>{l1_date}</code>\n"
-                    f"📅 L2訊號: <code>{l2_display}</code>\n"
-                    f"🏔️ 頂點時間: <code>{l2_top_date}</code> / 🕳️ 底點時間: <code>{l2_bottom_date}</code>\n"
                     f"🎯 進場: <code>{entry:.{precision}f}</code>\n"
-                    f"🛡️ 保護止損: <code>{sl:.{precision}f}</code>"
+                    f"🛡️ 止損: <code>{sl:.{precision}f}</code>"
                 )
                 return order
 
