@@ -1347,18 +1347,19 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
                     if confirmed_bottom == float('inf'):
                         confirmed_bottom = temp_bottom
                         confirmed_bottom_date = temp_bottom_date
+                        # 同步寫入 pending，確保新幣的第一個底在破頂時能被納入比較
+                        pending_bottom = temp_bottom
+                        pending_bottom_date = temp_bottom_date
                     else:
                         if temp_bottom < confirmed_bottom:
                             # 產生了一個更低的底部 (破底) -> 此即為最新確立底
                             confirmed_bottom = temp_bottom
                             confirmed_bottom_date = temp_bottom_date
                             
-                            # 若舊底與新底之間有產生潛在頂點，取舊頂與潛在頂中較高的那個
+                            # 若舊底與新底之間有產生潛在頂點，正式取代舊頂
                             if pending_top != -1.0:
-                                if pending_top > confirmed_top:
-                                    confirmed_top = pending_top
-                                    confirmed_top_date = pending_top_date
-                                # else: confirmed_top 已是較高值，保留不動
+                                confirmed_top = pending_top
+                                confirmed_top_date = pending_top_date
                             
                             # 區間破壞，清空暫存
                             pending_top = -1.0
@@ -1383,18 +1384,19 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
                     if confirmed_top == -1.0:
                         confirmed_top = temp_top
                         confirmed_top_date = temp_top_date
+                        # 同步寫入 pending，確保新幣的第一個頂在破底時能被納入比較
+                        pending_top = temp_top
+                        pending_top_date = temp_top_date
                     else:
                         if temp_top > confirmed_top:
                             # 產生了一個更高的頂部 (破頂) -> 此即為最新確立頂
                             confirmed_top = temp_top
                             confirmed_top_date = temp_top_date
                             
-                            # 若舊頂與新頂之間有產生潛在底點，取舊底與潛在底中較低的那個
+                            # 若舊頂與新頂之間有產生潛在底點，正式取代舊底
                             if pending_bottom != float('inf'):
-                                if pending_bottom < confirmed_bottom:
-                                    confirmed_bottom = pending_bottom
-                                    confirmed_bottom_date = pending_bottom_date
-                                # else: confirmed_bottom 已是較低值，保留不動
+                                confirmed_bottom = pending_bottom
+                                confirmed_bottom_date = pending_bottom_date
                             
                             # 區間破壞，清空暫存
                             pending_top = -1.0
