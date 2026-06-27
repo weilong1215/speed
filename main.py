@@ -1306,6 +1306,16 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
         pending_bottom_date = "未知"
 
         all_historical_c2s = []
+
+        # 第一根 K 棒只作為 prev 不進入迴圈，須手動將其 high/low 納入初始 temp
+        # 避免新幣首根 K 棒的頂底點資料遺失
+        if len(df_1d_closed) > 0:
+            _first = df_1d_closed.iloc[0]
+            _first_date = pd.to_datetime(int(_first['ts']), unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d')
+            temp_top = float(_first['high'])
+            temp_top_date = _first_date
+            temp_bottom = float(_first['low'])
+            temp_bottom_date = _first_date
         
         for i in range(1, len(df_1d_closed)):
             _prev = df_1d_closed.iloc[i-1]
