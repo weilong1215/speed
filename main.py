@@ -2511,6 +2511,10 @@ HTML_TEMPLATE = """
             <div class="detail-value">${sig.l1_date || '—'}</div>
           </div>
           <div class="detail-block">
+            <div class="detail-label">L2 突破進場時間</div>
+            <div class="detail-value">${fmt(sig.l2_date)}</div>
+          </div>
+          <div class="detail-block">
             <div class="detail-label">L2 確立頂點</div>
             <div class="detail-value">${sig.l2_top > 0 ? fmt(sig.l2_top, prec) + ' (' + (sig.l2_top_date||'—') + ')' : '—'}</div>
           </div>
@@ -2518,10 +2522,8 @@ HTML_TEMPLATE = """
             <div class="detail-label">L2 確立底點</div>
             <div class="detail-value">${sig.l2_bottom !== null && sig.l2_bottom !== 'inf' && sig.l2_bottom !== 'Infinity' && sig.l2_bottom < 9999999 ? fmt(sig.l2_bottom, prec) + ' (' + (sig.l2_bottom_date||'—') + ')' : '—'}</div>
           </div>
-          <div class="detail-block">
-            <div class="detail-label">L2 突破進場時間</div>
-            <div class="detail-value">${fmt(sig.l2_date)}</div>
-          </div>
+        </div>
+        <div class="card-grid" style="margin-top: 12px;">
           <div class="detail-block">
             <div class="detail-label">進場價格</div>
             <div class="detail-value price">${fmt(sig.entry_price, prec)}</div>
@@ -2535,7 +2537,6 @@ HTML_TEMPLATE = """
             <div class="detail-label" style="color: #d29922;">保護止損價格</div>
             <div class="detail-value sl" style="color: #d29922;">${fmt(sig.trailing_sl, prec)} <span style="font-size:0.75rem">(${sig.trailing_sl_date || '已觸發'})</span></div>
           </div>` : ''}
-
         </div>
       </div>`;
     });
