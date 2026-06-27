@@ -1353,10 +1353,9 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
                             pending_top = -1.0
                             pending_bottom = float('inf')
                         else:
-                            # 較高的底部，暫存為潛在底點 (找最低的那個)
-                            if temp_bottom < pending_bottom:
-                                pending_bottom = temp_bottom
-                                pending_bottom_date = temp_bottom_date
+                            # 較高的底部，改為暫存最後一個出現的潛在底點
+                            pending_bottom = temp_bottom
+                            pending_bottom_date = temp_bottom_date
                                 
                     # 開啟新紅吞
                     temp_top = c_high
