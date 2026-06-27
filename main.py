@@ -1267,7 +1267,9 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
 
         # ================= L1 (18D) 狀態機推進 =================
         l1_valid = True
-        l1_valid_ts = int(df_1d_closed.iloc[-1]['ts'])
+        # 新幣首發預設 l1_valid_ts = 0，代表整段歷史皆有效
+        # 若後續 18D 狀態機推進出合法 RED 吞噬，才覆寫為該吞噬的 close_ts
+        l1_valid_ts = 0
         l1_date_str = "新幣首發"
         for i in range(1, len(df_18d_closed)):
             _prev = df_18d_closed.iloc[i-1]
