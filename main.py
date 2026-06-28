@@ -481,16 +481,10 @@ async def check_signal_expired(exchange, symbol, direction, entry, sl, precision
                         _prev_open  = float(_prev['open'])
                         _prev_close = float(_prev['close'])
 
-                        if direction.upper() == 'LONG':
-                            _prev_body_high = max(_prev_open, _prev_close)
-                            # 低點必須 > 進場價（保本條件）且 > 当前止損
-                            if _new_close > _prev_body_high and _new_low > entry and _new_low > _current_sl:
-                                _current_sl = _new_low
-                        elif direction.upper() == 'SHORT':
-                            _prev_body_low = min(_prev_open, _prev_close)
-                            # 高點必須 < 進場價（保本條件）且 < 当前止損
-                            if _new_close < _prev_body_low and _new_high < entry and (_new_high < _current_sl or _current_sl == 0):
-                                _current_sl = _new_high
+                        _prev_body_high = max(_prev_open, _prev_close)
+                        # 低點必須 > 進場價（保本條件）且 > 当前止損
+                        if _new_close > _prev_body_high and _new_low > entry and _new_low > _current_sl:
+                            _current_sl = _new_low
                     dynamic_sl = _current_sl
     except Exception as e:
         logger.warning(f"  過期檢查(18D止損)異常 ({symbol}): {e}")
@@ -512,21 +506,13 @@ async def check_signal_expired(exchange, symbol, direction, entry, sl, precision
             if c_ts < l3_close_ts:
                 continue
             dt_taiwan = pd.to_datetime(c_ts, unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d %H:%M')
-            if direction == 'LONG':
-                if c_low <= sl:
-                    return True, f"歷史 1H K 棒 ({dt_taiwan}) 最低價 {c_low:.{precision}f} 已觸發初始止損 ({sl:.{precision}f})", 'SL'
-            else:
-                if c_high >= sl:
-                    return True, f"歷史 1H K 棒 ({dt_taiwan}) 最高價 {c_high:.{precision}f} 已觸發初始止損 ({sl:.{precision}f})", 'SL'
+            if c_low <= sl:
+                return True, f"歷史 1H K 棒 ({dt_taiwan}) 最低價 {c_low:.{precision}f} 已觸發初始止損 ({sl:.{precision}f})", 'SL'
 
         ticker = await exchange.fetch_ticker(symbol)
         current_price = float(ticker['last'])
-        if direction == 'LONG':
-            if current_price <= sl:
-                return True, f"最新市價 {current_price:.{precision}f} 已觸發初始止損 ({sl:.{precision}f})", 'SL'
-        else:
-            if current_price >= sl:
-                return True, f"最新市價 {current_price:.{precision}f} 已觸發初始止損 ({sl:.{precision}f})", 'SL'
+        if current_price <= sl:
+            return True, f"最新市價 {current_price:.{precision}f} 已觸發初始止損 ({sl:.{precision}f})", 'SL'
     except Exception as e:
         logger.warning(f"  過期檢查(盤中止損)異常 ({symbol}): {e}")
 
@@ -665,10 +651,10 @@ async def place_order(exchange, symbol, direction, entry, sl, precision, fixed_l
                     send_telegram_message(f"<b>⚠️ 資金不足</b>\n{get_base_coin(symbol)}\n可用: {available:.2f} USDT")
                     break
 
-                side = 'buy' if direction == 'LONG' else 'sell'
+                side = 'buy'
                 signal_id = f"entry_{uuid.uuid4().hex[:8]}"
                 params = {
-                    'hedged': True, 'holdSide': 'long' if direction == 'LONG' else 'short',
+                    'hedged': True, 'holdSide': 'long',
                     'clientOid': signal_id, 'stopLoss': {'triggerPrice': sl, 'type': 'market'}
                 }
 
@@ -680,9 +666,7 @@ async def place_order(exchange, symbol, direction, entry, sl, precision, fixed_l
                         ticker = await exchange.fetch_ticker(symbol)
                         current_p = float(ticker['last'])
                         is_within_range = False
-                        if side == 'buy' and sl < current_p < entry:
-                            is_within_range = True
-                        elif side == 'sell' and sl > current_p > entry:
+                        if sl < current_p < entry:
                             is_within_range = True
                             
                         if is_within_range:
@@ -697,7 +681,7 @@ async def place_order(exchange, symbol, direction, entry, sl, precision, fixed_l
                 logger.info(f"✅ 下單成功: {symbol} @ {entry} (ID: {signal_id}, Strat: {strategy_name}, Lev: {leverage}x)")
 
                 signals = load_active_signals()
-                key = f"{get_base_coin(symbol)}_{direction}"
+                key = f"{get_base_coin(symbol)}_LONG"
                 if key not in signals:
                     signals[key] = []
                 signals[key].append({
@@ -710,7 +694,7 @@ async def place_order(exchange, symbol, direction, entry, sl, precision, fixed_l
                 })
                 save_active_signals(signals)
                 l2_display = l2_date or (pd.to_datetime(trigger_ts, unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d %H:%M:%S') if trigger_ts > 0 else '未知')
-                dir_str = "🟢 LONG" if direction == "LONG" else "🔴 SHORT" if direction == "SHORT" else direction
+                dir_str = "🟢 LONG"
                 send_telegram_message(
                     f"<b>🤖 自動下單 ({leverage}x)</b>\n\n"
                     f"💎 {get_base_coin(symbol)} [{dir_str}]\n"
@@ -820,7 +804,7 @@ async def manage_tp_ladder(exchange, symbol, side, sig, size, saved_signals, ope
                     existing_qty = float(tp_order_obj.get('amount', 0) or tp_order_obj.get('info', {}).get('size', 0) or 0)
                     ideal_qty = float(exchange.amount_to_precision(symbol, size * close_pct))
                     if existing_qty > 0 and ideal_qty > 0 and abs(existing_qty - ideal_qty) / ideal_qty > 0.02:
-                        chk_tp_price = entry + r_mult * risk if direction == 'LONG' else entry - r_mult * risk
+                        chk_tp_price = entry + r_mult * risk
                         chk_tp_price = round(chk_tp_price, precision)
                         full_qty = float(exchange.amount_to_precision(symbol, size))
                         if ideal_qty * chk_tp_price < 6 and full_qty > 0 and abs(existing_qty - full_qty) / full_qty <= 0.02:
@@ -867,7 +851,7 @@ async def manage_tp_ladder(exchange, symbol, side, sig, size, saved_signals, ope
                 save_active_signals(saved_signals)
             return
 
-        tp_price = entry + r_mult * risk if direction == 'LONG' else entry - r_mult * risk
+        tp_price = entry + r_mult * risk
         tp_price = max(10 ** -precision, tp_price)
         tp_price = round(tp_price, precision)
         tp_qty = float(exchange.amount_to_precision(symbol, size * close_pct))
@@ -881,10 +865,10 @@ async def manage_tp_ladder(exchange, symbol, side, sig, size, saved_signals, ope
                 logger.warning(f"  TP{r_mult}R 全倉價值仍不足 6U ({full_qty * tp_price:.2f}U)，停止掛單 (粉塵由 SL 保護)")
                 return
 
-        order_side = 'sell' if direction == 'LONG' else 'buy'
+        order_side = 'sell'
         tp_params = {
             'triggerPrice': tp_price, 'triggerType': 'fill_price', 'reduceOnly': True,
-            'hedged': True, 'holdSide': 'long' if direction == 'LONG' else 'short',
+            'hedged': True, 'holdSide': 'long',
             'clientOid': tp_coid
         }
 
@@ -959,8 +943,7 @@ async def monitor_positions(exchange):
                             if "sl_" in cid:
                                 my_sl_orders.append(o)
                         else:
-                            is_sl_side = (side.lower() == 'long' and o['side'].lower() == 'sell') or \
-                                         (side.lower() == 'short' and o['side'].lower() == 'buy')
+                            is_sl_side = (o['side'].lower() == 'sell')
                             if is_sl_side and abs(trig_p - sl_price_target) < 1e-8:
                                 my_sl_orders.append(o)
 
@@ -992,10 +975,10 @@ async def monitor_positions(exchange):
                     if not my_sl_orders:
                         logger.info(f"🛡️ 補掛止損單: {symbol} @ {sl_price_target}")
                         try:
-                            order_side = 'sell' if side.lower() == 'long' else 'buy'
+                            order_side = 'sell'
                             sl_params = {
                                 'triggerPrice': sl_price_target, 'triggerType': 'fill_price', 'reduceOnly': True,
-                                'hedged': True, 'holdSide': 'long' if order_side == 'sell' else 'short',
+                                'hedged': True, 'holdSide': 'long',
                                 'clientOid': f"sl_{signal_id}"
                             }
                             await exchange.create_order(symbol, 'market', order_side, size, None, params=sl_params)
@@ -1044,18 +1027,11 @@ async def monitor_positions(exchange):
                                             _move_sl = False
                                             _entry_price = float(pos.get('entryPrice') or pos.get('avgPrice') or sig.get('entry_price', 0))
 
-                                            if side.lower() == 'long':
-                                                _prev_body_high = max(_prev_open, _prev_close)
-                                                # 18D 低點必須在進場價上方（保本）且高於當前止損
-                                                if _new_close > _prev_body_high and _new_low > _entry_price and _new_low > _current_sl:
-                                                    _new_sl = _new_low
-                                                    _move_sl = True
-                                            elif side.lower() == 'short':
-                                                _prev_body_low = min(_prev_open, _prev_close)
-                                                # 18D 高點必須在進場價下方（保本）且低於當前止損
-                                                if _new_close < _prev_body_low and _new_high < _entry_price and (_new_high < _current_sl or _current_sl == 0):
-                                                    _new_sl = _new_high
-                                                    _move_sl = True
+                                            _prev_body_high = max(_prev_open, _prev_close)
+                                            # 18D 低點必須在進場價上方（保本）且高於當前止損
+                                            if _new_close > _prev_body_high and _new_low > _entry_price and _new_low > _current_sl:
+                                                _new_sl = _new_low
+                                                _move_sl = True
 
                                             if _move_sl:
                                                 _18d_dt = pd.to_datetime(int(_last_18d['ts']), unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d')
@@ -1115,8 +1091,7 @@ async def monitor_positions(exchange):
                         # 連帶強制撤銷可能殘留的原始附加計畫止損單
                         for po in orders_plan:
                             if po['symbol'] == symbol:
-                                _is_opp = (direction.upper() == 'LONG' and po['side'].lower() == 'sell') or \
-                                          (direction.upper() == 'SHORT' and po['side'].lower() == 'buy')
+                                _is_opp = (po['side'].lower() == 'sell')
                                 _trig_p = float(po.get('triggerPrice', 0) or po.get('info', {}).get('triggerPrice', 0))
                                 if _is_opp and abs(_trig_p - sl_price) < 1e-8:
                                     try:
@@ -1195,7 +1170,7 @@ async def monitor_positions(exchange):
                     raw_sig_id = co_id
                 if raw_sig_id not in all_active_ids:
                     symbol = oo['symbol']
-                    target_direction = "SHORT" if oo['side'].lower() == "buy" else "LONG"
+                    target_direction = "LONG"
                     has_related_pos = any(p['symbol'] == symbol and p['side'].upper() == target_direction
                                          for p in active_pos)
                     if not has_related_pos:
@@ -1474,22 +1449,13 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
                             _entry_price = float(sig['entry_price'])
                             _current_trailing = float(sig.get('trailing_sl', -1.0))
                             
-                            if sig['l2_direction'] == 'LONG':
-                                _prev_body_high = max(_prev_open, _prev_close)
-                                # 吞噬成立 且 低點高於進場價 且 只進不退（低點必須高於現有保護止損）
-                                if (_new_close > _prev_body_high
-                                        and _new_low > _entry_price
-                                        and (_current_trailing < 0 or _new_low > _current_trailing)):
-                                    sig['trailing_sl'] = _new_low
-                                    sig['trailing_sl_date'] = _18d_dt
-                            elif sig['l2_direction'] == 'SHORT':
-                                _prev_body_low = min(_prev_open, _prev_close)
-                                _current_trailing_s = float(sig.get('trailing_sl', float('inf')))
-                                if (_new_close < _prev_body_low
-                                        and _new_high < _entry_price
-                                        and _new_high < _current_trailing_s):
-                                    sig['trailing_sl'] = _new_high
-                                    sig['trailing_sl_date'] = _18d_dt
+                            _prev_body_high = max(_prev_open, _prev_close)
+                            # 吞噬成立 且 低點高於進場價 且 只進不退（低點必須高於現有保護止損）
+                            if (_new_close > _prev_body_high
+                                    and _new_low > _entry_price
+                                    and (_current_trailing < 0 or _new_low > _current_trailing)):
+                                sig['trailing_sl'] = _new_low
+                                sig['trailing_sl_date'] = _18d_dt
 
             # 止損 / 100R 止盈檢查 (極端狀況優先判定為止損)
             # trigger_ts = 進場K棒的 open_ts，c_ts == trigger_ts 的那根不計算
@@ -1506,20 +1472,12 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
                     _init_sl_for_tp = sig.get('initial_sl', sig['stop_loss'])
                     _base_risk = abs(sig['entry_price'] - _init_sl_for_tp)
                     
-                    if sig['l2_direction'] == 'LONG':
-                        if c_low <= _effective_sl:
-                            _is_sl = True
-                        if _base_risk > 0:
-                            tp_price = sig['entry_price'] + 100 * _base_risk
-                            if c_high >= tp_price:
-                                _is_tp = True
-                    else: # SHORT
-                        if c_high >= _effective_sl:
-                            _is_sl = True
-                        if _base_risk > 0:
-                            tp_price = sig['entry_price'] - 100 * _base_risk
-                            if c_low <= tp_price:
-                                _is_tp = True
+                    if c_low <= _effective_sl:
+                        _is_sl = True
+                    if _base_risk > 0:
+                        tp_price = sig['entry_price'] + 100 * _base_risk
+                        if c_high >= tp_price:
+                            _is_tp = True
 
                     if _is_sl:
                         sig['status'] = 'closed'
@@ -1527,10 +1485,7 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
                         _init_sl = sig.get('initial_sl', sig['stop_loss'])
                         _risk = abs(sig['entry_price'] - _init_sl)
                         if _risk > 0:
-                            if sig['l2_direction'] == 'LONG':
-                                sig['real_rr'] = (_effective_sl - sig['entry_price']) / _risk
-                            else:
-                                sig['real_rr'] = (sig['entry_price'] - _effective_sl) / _risk
+                            sig['real_rr'] = (_effective_sl - sig['entry_price']) / _risk
                         else:
                             sig['real_rr'] = 0.0
                         sig['exit_type'] = 'trailing_sl' if _trailing is not None else 'stop_loss'
@@ -1948,20 +1903,15 @@ async def run_scan(ex=None):
         
         holding_items_dict = {item['symbol']: item for item in holding_items}
 
-        real_holding_new_triggers = []
+        # 同向加倉冗餘邏輯已移除
 
         for item in all_results:
             sym = item['symbol']
             
             if sym in holding_items_dict:
-                if item.get('is_trigger_met'):
-                    cached = watchlist.get(sym, {})
-                    trigger_ts = item.get('trigger_ts', 0)
-                    if cached.get('last_trigger_ts') != trigger_ts or trigger_ts == 0:
-                        real_holding_new_triggers.append(item)
-                        if sym in watchlist:
-                            watchlist[sym]['last_trigger_ts'] = trigger_ts
-            elif item.get('is_trigger_met'):
+                continue
+                
+            if item.get('is_trigger_met'):
                 cached = watchlist.get(sym, {})
                 trigger_ts = item.get('trigger_ts', 0)
                 if cached.get('last_trigger_ts') == trigger_ts and trigger_ts > 0:
@@ -2079,12 +2029,12 @@ async def run_scan(ex=None):
             send_grouped_message(pending_items, "⏳ <b>加密貨幣[掛單中]</b>")
 
         active_count = len(watchlist)
-        logger.info(f"✅ 掃描完成。新觸發: {len(real_new_triggers)} / 持倉: {len(real_holding_items)} / 掛單: {len(pending_items)} / 持倉新訊號: {len(real_holding_new_triggers)} / 未上車: {len(missed_items)} / 追蹤總數: {active_count}")
+        logger.info(f"✅ 掃描完成。新觸發: {len(real_new_triggers)} / 持倉: {len(real_holding_items)} / 掛單: {len(pending_items)} / 未上車: {len(missed_items)} / 追蹤總數: {active_count}")
 
         if not real_new_triggers and not holding_items and not missed_items:
             send_telegram_message(f"✅ <b>條件掃描完成</b>\n本次共掃描 {total_coins} 個幣種，無滿足條件標的。\n(當前追蹤觸發訊號: {active_count} 個)")
 
-        if real_new_triggers or holding_items or real_holding_new_triggers or missed_items:
+        if real_new_triggers or holding_items or missed_items:
             send_system_settings_message(config)
     finally:
         if _local_ex and ex:
