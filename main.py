@@ -116,15 +116,6 @@ def save_watchlist(data):
     except Exception as e:
         logger.error(f"儲存 watchlist 失敗: {e}")
 
-def derive_holdings_from_active_signals() -> list:
-    """從 active_signals.json 即時推導持倉中的 base coin 清單，不再依賴獨立的 holdings.json"""
-    active = load_active_signals()
-    bases = set()
-    for slist in active.values():
-        for s in slist:
-            if s.get('status') == 'active':
-                bases.add(get_base_coin(s['symbol']))
-    return list(bases)
 
 def load_active_signals():
     ensure_data_dir()
@@ -161,24 +152,6 @@ def save_history_signals(data):
 # ============================================================================
 # 系統設定持久化
 # ============================================================================
-PERF_HISTORY_FILE = os.path.join(DATA_DIR, "performance_history.json")
-
-def load_perf_history():
-    ensure_data_dir()
-    try:
-        with open(PERF_HISTORY_FILE, 'r', encoding='utf-8') as f:
-            return json.load(f)
-    except Exception:
-        return {}
-
-def save_perf_history(data):
-    ensure_data_dir()
-    try:
-        with open(PERF_HISTORY_FILE, 'w', encoding='utf-8') as f:
-            json.dump(data, f, indent=2)
-    except Exception as e:
-        logger.error(f"儲存歷史績效失敗: {e}")
-
 CONFIG_FILE = os.path.join(DATA_DIR, "system_config.json")
 
 def load_config():
@@ -188,8 +161,6 @@ def load_config():
                 config = json.load(f)
             if "blacklist" not in config:
                 config["blacklist"] = []
-            config.setdefault("coin_rank_mode", "hot")
-            config.setdefault("top_coins_count", 20)
             return config
         except Exception as e:
             logger.error(f"讀取設定檔失敗: {e}")
@@ -197,8 +168,6 @@ def load_config():
         "total_capital": 300,
         "loss_pct": 2,
         "blacklist": [],
-        "coin_rank_mode": "hot",
-        "top_coins_count": 20,
     }
 
 def save_config(data):
@@ -265,13 +234,6 @@ def get_exchange():
     return ccxt.bitget(exchange_config)
 
 
-def _bitget_ticker_hot_score(ticker):
-    """Bitget Open API 無 App「熱門」榜端點；以 tickers 的成交額×波動加權近似 App 熱門排序。"""
-    vol = float(ticker.get('usdtVolume') or ticker.get('quoteVolume') or 0)
-    chg = abs(float(ticker.get('change24h') or ticker.get('changeUtc24h') or 0))
-    return vol * (1 + chg * 3)
-
-
 _crypto_whitelist_cache = {"timestamp": 0, "symbols": set()}
 
 def _get_crypto_whitelist():
@@ -294,74 +256,6 @@ def _get_crypto_whitelist():
         logger.warning(f"獲取加密貨幣白名單失敗: {e}")
     
     return _crypto_whitelist_cache["symbols"]
-
-def fetch_top_bitget_symbols(limit=20, rank_mode='volume'):
-    """從 Bitget USDT 永續 tickers 取 Top N。rank_mode: volume | hot"""
-    try:
-        url = 'https://api.bitget.com/api/v2/mix/market/tickers?productType=USDT-FUTURES'
-        res = requests.get(url, timeout=10).json()
-        if res.get('code') != '00000':
-            logger.warning(f"拉取 Bitget tickers 失敗: {res.get('msg')}")
-            return []
-            
-        whitelist = _get_crypto_whitelist()
-        data = res.get('data') or []
-        if whitelist:
-            data = [x for x in data if x.get('symbol') in whitelist]
-            
-        if rank_mode == 'hot':
-            sorted_data = sorted(data, key=_bitget_ticker_hot_score, reverse=True)
-            label = '熱門 (Bitget tickers 成交額×波動)'
-        else:
-            sorted_data = sorted(data, key=lambda x: float(x.get('quoteVolume', 0) or 0), reverse=True)
-            label = '成交額'
-        symbols = [x['symbol'] for x in sorted_data[:limit]]
-        logger.info(f"📊 幣種榜單 [{label}] Top {limit}: {', '.join(s.replace('USDT', '') for s in symbols)}")
-        return symbols
-    except Exception as e:
-        logger.warning(f"拉取榜單失敗: {e}")
-        return []
-
-
-def compose_3d_bars(ohlcv_1d):
-    """將 1D OHLCV 合成 3D K 棒 (按每年 1/1 起算)
-    輸入: [[ts, open, high, low, close, vol], ...]
-    輸出: 同格式的 3D K 棒列表
-    """
-    if not ohlcv_1d or len(ohlcv_1d) < 3:
-        return []
-
-    from datetime import datetime, timezone
-    PERIOD_MS = 3 * 24 * 3600 * 1000
-    groups = {}
-    for bar in ohlcv_1d:
-        ts = bar[0]
-        dt = datetime.fromtimestamp(ts / 1000, tz=timezone.utc)
-        year_start_dt = datetime(dt.year, 1, 1, tzinfo=timezone.utc)
-        year_epoch_ms = int(year_start_dt.timestamp() * 1000)
-
-        group_idx = (ts - year_epoch_ms) // PERIOD_MS
-        group_key = year_epoch_ms + group_idx * PERIOD_MS
-
-        if group_key not in groups:
-            groups[group_key] = []
-        groups[group_key].append(bar)
-
-    result = []
-    for gts in sorted(groups.keys()):
-        bars = sorted(groups[gts], key=lambda x: x[0])
-        result.append([
-            gts,
-            bars[0][1],
-            max(b[2] for b in bars),
-            min(b[3] for b in bars),
-            bars[-1][4],
-            sum(b[5] for b in bars),
-            gts + PERIOD_MS
-        ])
-    return result
-
-
 
 
 def compose_18d_bars(ohlcv_1d):
@@ -399,41 +293,6 @@ def compose_18d_bars(ohlcv_1d):
         ])
     return result
 
-def compose_3h_bars(ohlcv_1h):
-    """將 1H OHLCV 合成 3H K棒 (從每天 00:00 UTC 起算，每 3 根 1H 合一根)
-    輸入: [[ts, open, high, low, close, vol], ...]
-    輸出: [[ts, open, high, low, close, vol, close_ts], ...]
-    """
-    if not ohlcv_1h or len(ohlcv_1h) < 3:
-        return []
-
-    PERIOD_MS = 3 * 3600 * 1000   # 3 小時
-    DAY_MS    = 24 * 3600 * 1000  # 1 天
-
-    groups = {}
-    for bar in ohlcv_1h:
-        ts = bar[0]
-        day_start = (ts // DAY_MS) * DAY_MS
-        slot_idx  = (ts - day_start) // PERIOD_MS
-        group_key = day_start + slot_idx * PERIOD_MS
-
-        if group_key not in groups:
-            groups[group_key] = []
-        groups[group_key].append(bar)
-
-    result = []
-    for gts in sorted(groups.keys()):
-        bars = sorted(groups[gts], key=lambda x: x[0])
-        result.append([
-            gts,
-            bars[0][1],
-            max(b[2] for b in bars),
-            min(b[3] for b in bars),
-            bars[-1][4],
-            sum(b[5] for b in bars),
-            gts + PERIOD_MS
-        ])
-    return result
 
 # ============================================================================
 # 交易執行
@@ -2309,7 +2168,6 @@ HTML_TEMPLATE = """
   let priceMap = {};
   let allHoldings = [];
   let allActiveSignals = [];
-  let allPerfHistory = {};
   let allWaitingSignals = {};
 
   function switchTab(tab) {
@@ -2363,7 +2221,6 @@ HTML_TEMPLATE = """
       priceMap = json.price_map || {};
       allHoldings = json.holdings || [];
       allActiveSignals = json.active_signals || [];
-      allPerfHistory = json.perf_history || {};
       allWaitingSignals = json.waiting_signals || {};
 
       Object.entries(allData).forEach(([base, sigs]) => {
@@ -2635,72 +2492,6 @@ HTML_TEMPLATE = """
     container.innerHTML = html;
   }
 
-  function renderHoldingsHome() {
-    document.getElementById('header-title').textContent = '💼 持倉總覽';
-    const container = document.getElementById('signal-container');
-    if (allActiveSignals.length === 0) {
-      container.innerHTML = `<div class="empty-state"><div class="icon">💼</div><p>目前無任何持倉或掛單</p></div>`;
-      return;
-    }
-    let html = '';
-    allActiveSignals.forEach(sig => {
-      const base = sig._base;
-      const dir = sig.direction || 'LONG';
-      const dirText = dir === 'LONG' ? '▲ LONG' : '▼ SHORT';
-      const prec = sig.precision || 4;
-      const entry = parseFloat(sig.entry_price);
-      const sl = parseFloat(sig.sl_price);
-      const cp = parseFloat(priceMap[base] || entry);
-      let rrStr = '—', rrCol = '#8b949e';
-      if (entry > 0 && sl > 0 && Math.abs(entry - sl) > 0) {
-        const risk = Math.abs(entry - sl);
-        const rr = dir === 'LONG' ? (cp - entry) / risk : (entry - cp) / risk;
-        rrStr = (rr >= 0 ? '+' : '') + rr.toFixed(2) + 'R';
-        rrCol = rr >= 0 ? '#3fb950' : '#f85149';
-      }
-      const isH = allHoldings.includes(base);
-      const badge = isH
-        ? '<span class="dir-badge LONG">持倉中</span>'
-        : '<span class="dir-badge" style="color: #d29922; background: rgba(210,153,34,0.1); border-color: rgba(210,153,34,0.4);">掛單中</span>';
-      html += `
-      <div class="signal-card ${dir} active">
-        <div class="card-header">
-          <div class="card-title">
-            <span style="color:#58a6ff;font-weight:600;font-size:0.95rem;">${base}</span>
-            ${badge}
-            <span style="font-size:0.85rem;font-weight:700;color:${rrCol};margin-left:auto;">${rrStr}</span>
-          </div>
-        </div>
-        <div class="card-grid">
-          <div class="detail-block">
-            <div class="detail-label">L1 吞噬時間</div>
-            <div class="detail-value">${sig.l1_date || '—'}</div>
-          </div>
-          <div class="detail-block">
-            <div class="detail-label">L2進場時間</div>
-            <div class="detail-value">${fmt(sig.l2_date)}</div>
-          </div>
-        </div>
-        <div class="card-grid" style="margin-top: 12px;">
-          <div class="detail-block">
-            <div class="detail-label">進場價格</div>
-            <div class="detail-value price">${fmt(sig.entry_price, prec)}</div>
-          </div>
-          <div class="detail-block">
-            <div class="detail-label">止損價格</div>
-            <div class="detail-value sl">${sig.original_sl_price ? fmt(sig.original_sl_price, prec) : fmt(sig.sl_price, prec)}</div>
-          </div>
-          ${sig.original_sl_price && sig.original_sl_price != sig.sl_price ? `
-          <div class="detail-block" style="border: 1px solid #d29922; border-radius: 4px; padding: 4px; background: rgba(210,153,34,0.1);">
-            <div class="detail-label" style="color: #d29922;">保護止損價格</div>
-            <div class="detail-value sl" style="color: #d29922;">${fmt(sig.sl_price, prec)}</div>
-          </div>` : ''}
-        </div>
-      </div>`;
-    });
-    container.innerHTML = html;
-  }
-
   
   function renderWatchlistHome() {
     document.getElementById('header-title').textContent = '👀 追蹤中名單 (等待突破)';
@@ -2874,8 +2665,7 @@ def api_data():
                 'current_price':  wdata.get('current_price', 0),
             }
 
-    perf_history = load_perf_history()
-    data_to_return = {"watchlist": watchlist_coins, "history": cleaned_history, "price_map": price_map, "holdings": holdings, "active_signals": active_list, "perf_history": perf_history, "waiting_signals": waiting_signals}
+    data_to_return = {"watchlist": watchlist_coins, "history": cleaned_history, "price_map": price_map, "holdings": holdings, "active_signals": active_list, "waiting_signals": waiting_signals}
     return jsonify(sanitize_for_json(data_to_return))
 
 def run_flask():
