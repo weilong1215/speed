@@ -1523,14 +1523,15 @@ async def run_history_scan_worker():
     try:
         logger.info("🚀 背景歷史掃描任務啟動！")
         if not BITGET_API_KEY: return
-        # 每次啟動都刪除舊的全量歷史結果，強制重建（避免舊格式資料混入）
-        _old_full = os.path.join(DATA_DIR, "history_signals_full.json")
-        if os.path.exists(_old_full):
-            try:
-                os.remove(_old_full)
-                logger.info("🗑️ 已清除舊版 history_signals_full.json，重新建立中...")
-            except Exception as _del_e:
-                logger.warning(f"清除舊歷史檔失敗: {_del_e}")
+        # 每次啟動都刪除舊的狀態與歷史結果，強制重建（方便修改策略後無痛重啟）
+        for _f in ["history_signals_full.json", "history_signals.json", "watchlist.json"]:
+            _path = os.path.join(DATA_DIR, _f)
+            if os.path.exists(_path):
+                try:
+                    os.remove(_path)
+                    logger.info(f"🗑️ 已清除舊版 {_f}，重新建立中...")
+                except Exception as _del_e:
+                    logger.warning(f"清除舊檔案失敗 ({_f}): {_del_e}")
         ex = ccxt.bitget({
             'apiKey': BITGET_API_KEY,
             'secret': BITGET_SECRET_KEY,
@@ -2437,7 +2438,7 @@ HTML_TEMPLATE = """
         </div>
         <div class="card-grid">
           <div class="detail-block">
-            <div class="detail-label">L1 吞噬時間</div>
+            <div class="detail-label">18D紅吞時間</div>
             <div class="detail-value">${sig.l1_date || '—'}</div>
           </div>
           <div class="detail-block">
@@ -2563,7 +2564,7 @@ HTML_TEMPLATE = """
         </div>
         <div class="card-grid">
           <div class="detail-block">
-            <div class="detail-label">L1 吞噬時間</div>
+            <div class="detail-label">18D紅吞時間</div>
             <div class="detail-value">${sig.l1_date || '—'}</div>
           </div>
           <div class="detail-block">
@@ -2635,8 +2636,12 @@ HTML_TEMPLATE = """
         </div>
         <div class="card-grid">
           <div class="detail-block">
-            <div class="detail-label">L1 成立時間</div>
+            <div class="detail-label">18D紅吞時間</div>
             <div class="detail-value">${sig.l1_date || '—'}</div>
+          </div>
+          <div class="detail-block">
+            <div class="detail-label">3D紅吞時間</div>
+            <div class="detail-value">${sig.l2_date || '—'}</div>
           </div>
           <div class="detail-block">
             <div class="detail-label">3H頂點時間</div>
