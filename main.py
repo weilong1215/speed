@@ -1,6 +1,5 @@
 # 檔名: main.py
 
-import numpy as np
 import pandas as pd
 import ccxt.async_support as ccxt
 import asyncio
@@ -15,8 +14,7 @@ import json
 from flask import Flask, jsonify, render_template_string
 from datetime import datetime
 from dotenv import load_dotenv
-import sys
-import io
+
 
 # ============================================================================
 # 系統初始化 (日誌與環境變數)
@@ -50,7 +48,7 @@ BITGET_PASSWORD = os.getenv("BITGET_API_PASSWORD", "") or os.getenv("BITGET_PASS
 
 # 停利：單一目標 100R，全倉平倉
 TP_LADDER = [(100, 1.0)]
-TP_EXPIRE_R = 5  # 下單前/掛單中過期檢查用（首階 100R）
+
 
 logger.info(f"✅ 系統配置檢查: TG_TOKEN={'已設定' if TG_BOT_TOKEN else '未設定'}, TG_CHAT_ID={'已設定' if TG_CHAT_ID else '未設定'}")
 logger.info(f"✅ 交易所配置檢查: API_KEY={'已設定' if BITGET_API_KEY else '未設定'}")
@@ -298,7 +296,7 @@ def compose_18d_bars(ohlcv_1d):
 # 交易執行
 # ============================================================================
 
-async def check_signal_expired(exchange, symbol, direction, entry, sl, precision, trigger_ts, expire_r=None):
+async def check_signal_expired(exchange, symbol, direction, entry, sl, precision, trigger_ts):
     """
     檢查下單前/掛單中的訊號是否應被廢棄。
     踢出標準（1）PSL: 18D 紅吞已產生移動保護止損
