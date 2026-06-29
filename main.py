@@ -357,7 +357,8 @@ async def check_signal_expired(exchange, symbol, direction, entry, sl, precision
     l3_close_ts = trigger_ts + 24 * 3600 * 1000 if trigger_ts > 0 else int(time.time() * 1000)
     since_ts = l3_close_ts
     try:
-        tp_100r = entry + 100 * abs(entry - sl) if direction == 'long' else entry - 100 * abs(entry - sl)
+        is_long = direction.lower() in ('long', 'buy', '')
+        tp_100r = entry + 100 * abs(entry - sl) if is_long else entry - 100 * abs(entry - sl)
         ohlcv_1h = await exchange.fetch_ohlcv(symbol, '1h', since=since_ts, limit=500)
         for candle in ohlcv_1h:
             c_ts = int(candle[0])
@@ -366,7 +367,7 @@ async def check_signal_expired(exchange, symbol, direction, entry, sl, precision
             if c_ts < l3_close_ts:
                 continue
             dt_taiwan = pd.to_datetime(c_ts, unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d %H:%M')
-            if direction == 'long':
+            if is_long:
                 if c_low <= sl:
                     return True, f"歷史 1H K 棒 ({dt_taiwan}) 最低價 {c_low:.{precision}f} 已觸發初始止損 ({sl:.{precision}f})", 'SL'
                 if c_high >= tp_100r:
@@ -379,7 +380,7 @@ async def check_signal_expired(exchange, symbol, direction, entry, sl, precision
 
         ticker = await exchange.fetch_ticker(symbol)
         current_price = float(ticker['last'])
-        if direction == 'long':
+        if is_long:
             if current_price <= sl:
                 return True, f"最新市價 {current_price:.{precision}f} 已觸發初始止損 ({sl:.{precision}f})", 'SL'
             if current_price >= tp_100r:
