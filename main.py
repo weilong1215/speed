@@ -865,12 +865,11 @@ async def monitor_positions(exchange):
                                 logger.error(f"掛止損失敗: {e}")
 
 
-                    # 18D 移動止損：最新 18D 棒吞噬前棒實體 → 止損移至該棒低/高點
-                    # 若 sl_price 已不等於 original_sl_price 代表已觸發過，跳過避免反覆移動
+                    # 18D 黑吞平倉與移動止損檢查
                     _original_sl = float(sig.get('original_sl_price', sig['sl_price']))
                     _current_sl = float(sig['sl_price'])
                     _entry_ts = int(sig.get('timestamp', 0))
-                    if _entry_ts > 0 and abs(_current_sl - _original_sl) < 1e-8:
+                    if _entry_ts > 0:
                         try:
                             _ohlcv_1d_mon = []
                             _end_time_mon = int(time.time() * 1000)
@@ -901,37 +900,57 @@ async def monitor_positions(exchange):
                                             _new_low   = float(_last_18d['low'])
                                             _prev_open  = float(_prev_18d['open'])
                                             _prev_close = float(_prev_18d['close'])
-                                            _new_sl = _current_sl
-                                            _move_sl = False
                                             _entry_price = float(pos.get('entryPrice') or pos.get('avgPrice') or sig.get('entry_price', 0))
 
                                             _prev_body_high = max(_prev_open, _prev_close)
-                                            # 18D 低點必須在進場價上方（保本）且高於當前止損
-                                            if _new_close > _prev_body_high and _new_low > _entry_price and _new_low > _current_sl:
-                                                _new_sl = _new_low
-                                                _move_sl = True
+                                            _prev_body_low = min(_prev_open, _prev_close)
+                                            _18d_dt = pd.to_datetime(int(_last_18d['ts']), unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d')
 
-                                            if _move_sl:
-                                                _18d_dt = pd.to_datetime(int(_last_18d['ts']), unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d')
-                                                logger.info(f"🔄 18D 吞噬 ({symbol} {_18d_dt})，移動止損至 {_new_sl}")
-                                                sig['sl_price'] = _new_sl
-                                                save_active_signals(saved_signals)
-                                                history_signals = load_history_signals()
-                                                base_coin = get_base_coin(symbol)
-                                                if base_coin in history_signals:
-                                                    for hs in history_signals[base_coin]:
-                                                        if hs.get('trigger_ts') == _entry_ts:
-                                                            hs['trailing_sl'] = _new_sl
-                                                            hs['trailing_sl_date'] = _18d_dt
-                                                save_history_signals(history_signals)
-                                                send_telegram_message(
-                                                    f"<b>🔄 18D 移動止損觸發</b>\n\n"
-                                                    f"💎 <b>交易對:</b> {get_base_coin(symbol)} [{side.upper()}]\n"
-                                                    f"📅 <b>觸發 K 線:</b> {_18d_dt}\n"
-                                                    f"🛡️ <b>新止損價:</b> <code>{_new_sl:.4f}</code>"
-                                                )
+                                            # 檢查 1. 18D 黑吞市價平倉 (失效出場)
+                                            if _new_close < _prev_body_low:
+                                                logger.info(f"🚨 18D 黑吞觸發 ({symbol} {_18d_dt})，市價平倉！")
+                                                try:
+                                                    await exchange.create_order(symbol, 'market', 'sell', size, None, params={'reduceOnly': True})
+                                                    send_telegram_message(
+                                                        f"<b>🚨 18D 黑吞平倉觸發</b>\n\n"
+                                                        f"💎 <b>交易對:</b> {get_base_coin(symbol)} [{side.upper()}]\n"
+                                                        f"📅 <b>觸發 K 線:</b> {_18d_dt}\n"
+                                                        f"💰 <b>平倉價格:</b> <code>市價</code>"
+                                                    )
+                                                    continue  # 平倉後不再執行後續掛單管理
+                                                except Exception as ep:
+                                                    logger.error(f"18D 黑吞平倉失敗 ({symbol}): {ep}")
+
+                                            # 檢查 2. 18D 紅吞移動止損
+                                            # 若 sl_price 已不等於 original_sl_price 代表已觸發過，跳過避免反覆移動
+                                            if abs(_current_sl - _original_sl) < 1e-8:
+                                                _new_sl = _current_sl
+                                                _move_sl = False
+                                                # 18D 低點必須在進場價上方（保本）且高於當前止損
+                                                if _new_close > _prev_body_high and _new_low > _entry_price and _new_low > _current_sl:
+                                                    _new_sl = _new_low
+                                                    _move_sl = True
+
+                                                if _move_sl:
+                                                    logger.info(f"🔄 18D 吞噬 ({symbol} {_18d_dt})，移動止損至 {_new_sl}")
+                                                    sig['sl_price'] = _new_sl
+                                                    save_active_signals(saved_signals)
+                                                    history_signals = load_history_signals()
+                                                    base_coin = get_base_coin(symbol)
+                                                    if base_coin in history_signals:
+                                                        for hs in history_signals[base_coin]:
+                                                            if hs.get('trigger_ts') == _entry_ts:
+                                                                hs['trailing_sl'] = _new_sl
+                                                                hs['trailing_sl_date'] = _18d_dt
+                                                    save_history_signals(history_signals)
+                                                    send_telegram_message(
+                                                        f"<b>🔄 18D 移動止損觸發</b>\n\n"
+                                                        f"💎 <b>交易對:</b> {get_base_coin(symbol)} [{side.upper()}]\n"
+                                                        f"📅 <b>觸發 K 線:</b> {_18d_dt}\n"
+                                                        f"🛡️ <b>新止損價:</b> <code>{_new_sl:.4f}</code>"
+                                                    )
                         except Exception as _e18d:
-                            logger.warning(f"18D 移動止損監控異常 ({symbol}): {_e18d}")
+                            logger.warning(f"18D 監控異常 ({symbol}): {_e18d}")
 
                     await manage_tp_ladder(exchange, symbol, side, sig, size, saved_signals, open_orders)
         # 2. 孤兒訊號清理 (倉位消失但訊號仍 active)
