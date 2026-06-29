@@ -15,7 +15,7 @@ import sys
 import io
 import math
 from flask import Flask, jsonify, render_template_string
-from datetime import datetime
+from datetime import datetime, timezone
 from dotenv import load_dotenv
 
 
@@ -264,7 +264,7 @@ def compose_18d_bars(ohlcv_1d):
     if not ohlcv_1d or len(ohlcv_1d) < 3:
         return []
 
-    from datetime import datetime, timezone
+    from datetime import datetime, timezone, timezone
     PERIOD_MS = 18 * 24 * 3600 * 1000
     groups = {}
     for bar in ohlcv_1d:
@@ -1571,6 +1571,123 @@ async def run_history_scan_worker():
         await ex.close()
     except Exception as e:
         logger.error(f"歷史掃描整體異常: {e}")
+
+
+
+_tg_update_offset = 0
+
+def poll_telegram_commands():
+    """輪詢 Telegram getUpdates，處理指令與 Callback Queries"""
+    global _tg_update_offset
+    if not TG_BOT_TOKEN:
+        return
+
+    url = f"https://api.telegram.org/bot{TG_BOT_TOKEN}/getUpdates"
+    params = {"offset": _tg_update_offset, "timeout": 0, "limit": 20}
+
+    try:
+        resp = requests.get(url, params=params, timeout=10)
+        if resp.status_code != 200:
+            return
+        data = resp.json()
+        if not data.get("ok"):
+            return
+
+        for update in data.get("result", []):
+            _tg_update_offset = update["update_id"] + 1
+
+            message = update.get("message", {})
+            text = message.get("text", "").strip()
+            chat_id = str(message.get("chat", {}).get("id", ""))
+
+            if chat_id != str(TG_CHAT_ID) or not text:
+                continue
+
+            text = re.sub(r'^@\w+\s*', '', text).strip()
+
+            reply = ""
+            if text.startswith("/set_capital"):
+                parts = text.split()
+                if len(parts) >= 2:
+                    try:
+                        new_val = float(parts[1])
+                        if new_val <= 0:
+                            raise ValueError("金額必須大於 0")
+                        config = load_config()
+                        config["total_capital"] = new_val
+                        save_config(config)
+                        loss_pct = config.get("loss_pct", 2)
+                        reply = f"✅ 總資金已更新為 <b>{new_val} USDT</b>，每筆虧損 <b>{loss_pct}%</b>"
+                        logger.info(f"⚙️ /set_capital 指令: 總資金更新為 {new_val}")
+                    except ValueError:
+                        reply = "❌ 格式錯誤，請輸入大於零的數字。"
+                else:
+                    reply = "❌ 格式錯誤，未提供數字。"
+                    
+            elif text.startswith("/set_loss_pct"):
+                parts = text.split()
+                if len(parts) >= 2:
+                    try:
+                        new_val = float(parts[1])
+                        if new_val <= 0 or new_val > 100:
+                            raise ValueError("比例必須在 0 到 100 之間")
+                        config = load_config()
+                        config["loss_pct"] = new_val
+                        save_config(config)
+                        capital = config.get("total_capital", 300)
+                        reply = f"✅ 每筆虧損比例已更新為 <b>{new_val}%</b> (總資金: {capital} USDT)"
+                        logger.info(f"⚙️ /set_loss_pct 指令: 虧損比例更新為 {new_val}%")
+                    except ValueError:
+                        reply = "❌ 格式錯誤，請輸入大於 0 且小於等於 100 的數字。"
+                else:
+                    reply = "❌ 格式錯誤，未提供數字。"
+
+            elif text.startswith("/add_blacklist"):
+                parts = text.split(maxsplit=1)
+                if len(parts) >= 2:
+                    coin = parts[1].strip().upper()
+                    config = load_config()
+                    blacklist = config.get("blacklist", ["XAUT", "PAXG", "TQQQ", "SQQQ"])
+                    if coin not in blacklist:
+                        blacklist.append(coin)
+                        config["blacklist"] = blacklist
+                        save_config(config)
+                        reply = f"✅ 已將 <b>{coin}</b> 加入黑名單"
+                        logger.info(f"⚙️ /add_blacklist 指令: 新增 {coin}")
+                    else:
+                        reply = f"⚠️ <b>{coin}</b> 已經在黑名單中"
+                else:
+                    reply = "❌ 格式錯誤，未提供幣種名稱。"
+
+            elif text.startswith("/remove_blacklist"):
+                parts = text.split(maxsplit=1)
+                if len(parts) >= 2:
+                    coin = parts[1].strip().upper()
+                    config = load_config()
+                    blacklist = config.get("blacklist", ["XAUT", "PAXG", "TQQQ", "SQQQ"])
+                    if coin in blacklist:
+                        blacklist.remove(coin)
+                        config["blacklist"] = blacklist
+                        save_config(config)
+                        reply = f"✅ 已將 <b>{coin}</b> 從黑名單移除"
+                        logger.info(f"⚙️ /remove_blacklist 指令: 移除 {coin}")
+                    else:
+                        reply = f"⚠️ <b>{coin}</b> 不在黑名單中"
+                else:
+                    reply = "❌ 格式錯誤，未提供幣種名稱。"
+
+                send_url = f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendMessage"
+                payload = {"chat_id": chat_id, "text": reply, "parse_mode": "HTML"}
+                requests.post(send_url, json=payload, timeout=10)
+
+
+
+    except Exception as e:
+        logger.warning(f"Telegram 指令輪詢異常: {e}")
+
+# ============================================================================
+# 主掃描流程
+# ============================================================================
 
 
 async def run_scan(ex=None):
