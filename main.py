@@ -1188,7 +1188,6 @@ def build_timeline(df_closed):
 
 def get_active_intervals(ohlcv_1d, now_utc):
     if not ohlcv_1d or len(ohlcv_1d) < 3: return [], None, None
-    from main import compose_18d_bars
     ohlcv_18d = compose_18d_bars(ohlcv_1d)
     df_18d = pd.DataFrame(ohlcv_18d, columns=['ts', 'open', 'high', 'low', 'close', 'vol', 'close_ts']) if ohlcv_18d else pd.DataFrame(columns=['ts', 'open', 'high', 'low', 'close', 'vol', 'close_ts'])
     df_18d_closed = df_18d[df_18d['close_ts'] <= now_utc].reset_index(drop=True)
@@ -1227,12 +1226,13 @@ async def fetch_history_for_intervals(exchange, symbol, intervals, timeframe='1h
     import logging
     logger = logging.getLogger("SPEED")
     for (start_ts, end_ts) in intervals:
-        _end = end_ts
+        _end = min(end_ts, int(time.time() * 1000)) if end_ts == float('inf') else end_ts
         interval_data = []
         pages = 0
         while _end > start_ts and pages < max_pages_per_interval:
             try:
-                _batch = await exchange.fetch_ohlcv(symbol, timeframe, limit=limit, params={'endTime': _end})
+                if _end < 1514764800000: break
+                _batch = await exchange.fetch_ohlcv(symbol, timeframe, limit=limit, params={'endTime': int(_end)})
                 if not _batch: break
                 interval_data.extend(_batch)
                 _end = _batch[0][0] - 1
@@ -1263,7 +1263,6 @@ def scan_for_symbol_logic(symbol, name, precision, ohlcv_1d, ohlcv_1h, l1_timeli
         df_1d = pd.DataFrame(ohlcv_1d, columns=['ts', 'open', 'high', 'low', 'close', 'vol'])
         df_1d['close_ts'] = df_1d['ts'] + 24 * 3600 * 1000
         
-        from main import compose_18d_bars
         ohlcv_18d = compose_18d_bars(ohlcv_1d)
         df_18d = pd.DataFrame(ohlcv_18d, columns=['ts', 'open', 'high', 'low', 'close', 'vol', 'close_ts']) if ohlcv_18d else pd.DataFrame(columns=['ts', 'open', 'high', 'low', 'close', 'vol', 'close_ts'])
         df_18d_closed = df_18d[df_18d['close_ts'] <= now_utc].reset_index(drop=True)
@@ -1484,7 +1483,8 @@ async def process_symbol(exchange, symbol, name, precision, current_idx, total_c
         ohlcv_1d = []
         _end_time = now_utc
         for _pg in range(10):
-            _batch = await exchange.fetch_ohlcv(symbol, '1d', limit=100, params={'endTime': _end_time})
+            if _end_time < 1514764800000: break
+            _batch = await exchange.fetch_ohlcv(symbol, '1d', limit=100, params={'endTime': int(_end_time)})
             if not _batch: break
             ohlcv_1d.extend(_batch)
             _end_time = _batch[0][0] - 1
@@ -1518,8 +1518,8 @@ async def run_history_scan_worker():
         if not BITGET_API_KEY: return
         ex = ccxt.bitget({
             'apiKey': BITGET_API_KEY,
-            'secret': BITGET_API_SECRET,
-            'password': BITGET_API_PASSWORD,
+            'secret': BITGET_SECRET_KEY,
+            'password': BITGET_PASSWORD,
             'enableRateLimit': True,
         })
         
@@ -1543,7 +1543,8 @@ async def run_history_scan_worker():
                 ohlcv_1d = []
                 _end_time = now_utc
                 for _pg in range(10):
-                    _batch = await ex.fetch_ohlcv(sym, '1d', limit=100, params={'endTime': _end_time})
+                    if _end_time < 1514764800000: break
+                    _batch = await ex.fetch_ohlcv(sym, '1d', limit=100, params={'endTime': int(_end_time)})
                     if not _batch: break
                     ohlcv_1d.extend(_batch)
                     _end_time = _batch[0][0] - 1
@@ -1551,7 +1552,9 @@ async def run_history_scan_worker():
                 
                 intervals, l1_timeline, l2_timeline = get_active_intervals(ohlcv_1d, now_utc)
                 if intervals:
-                    ohlcv_1h = await fetch_history_for_intervals(ex, sym, intervals, timeframe='1h', limit=100, max_pages_per_interval=30)
+                    _now = int(time.time() * 1000)
+                    intervals_capped = [(s, min(e, _now)) for (s, e) in intervals]
+                    ohlcv_1h = await fetch_history_for_intervals(ex, sym, intervals_capped, timeframe='1h', limit=100, max_pages_per_interval=30)
                     res = scan_for_symbol_logic(sym, get_base_coin(sym), precisions.get(sym, 4), ohlcv_1d, ohlcv_1h, l1_timeline, l2_timeline, now_utc)
                     if res and 'historical_c2s' in res:
                         all_past_events.extend(res['historical_c2s'])
