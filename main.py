@@ -1165,28 +1165,42 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
         if df_1d_closed.empty:
             return None
 
-        # ================= L1 (18D) 狀態機推進 =================
-        l1_valid = True
-        # 新幣首發預設 l1_valid_ts = 0，代表整段歷史皆有效
-        # 若後續 18D 狀態機推進出合法 RED 吞噬，才覆寫為該吞噬的 close_ts
-        l1_valid_ts = 0
-        l1_date_str = "新幣首發"
+        # ================= L1 (18D) 時間線推進 =================
+        l1_timeline = []
+        current_l1_valid = True
+        current_l1_start = 0
+        current_l1_date = "新幣首發"
         for i in range(1, len(df_18d_closed)):
             _prev = df_18d_closed.iloc[i-1]
             _curr = df_18d_closed.iloc[i]
             sw = get_swallow(_curr['close'], _prev['open'], _prev['close'])
+            c_ts = int(_curr['close_ts'])
             if sw == 'RED':
-                if not l1_valid or l1_date_str == "新幣首發":
-                    l1_valid = True
-                    l1_valid_ts = int(_curr['close_ts'])
-                    l1_date_str = pd.to_datetime(int(_curr['ts']), unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d')
+                if not current_l1_valid or current_l1_date == "新幣首發":
+                    if not current_l1_valid:
+                        l1_timeline.append({
+                            'start': current_l1_start, 'end': c_ts, 'valid': False, 'date': "未知"
+                        })
+                    current_l1_valid = True
+                    current_l1_start = c_ts
+                    current_l1_date = pd.to_datetime(int(_curr['ts']), unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d')
             elif sw == 'BLACK':
-                l1_valid = False
-                l1_valid_ts = -1
-                l1_date_str = "未知"
+                if current_l1_valid:
+                    l1_timeline.append({
+                        'start': current_l1_start, 'end': c_ts, 'valid': True, 'date': current_l1_date
+                    })
+                    current_l1_valid = False
+                    current_l1_start = c_ts
+                    current_l1_date = "未知"
+        l1_timeline.append({
+            'start': current_l1_start, 'end': float('inf'), 'valid': current_l1_valid, 'date': current_l1_date
+        })
 
-        if not l1_valid or l1_valid_ts == -1:
-            return None
+        def get_l1_status(target_ts):
+            for block in l1_timeline:
+                if block['start'] <= target_ts < block['end']:
+                    return block['valid'], block['date']
+            return True, "新幣首發"
 
         # ================= L2 (1D) 頂底突破 =================
         l2_state = 'NONE'
@@ -1322,15 +1336,17 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
 
             # 進場觸發：一日K棒由下往上實體貫穿最新頂點 (開盤<頂點 且 收盤>頂點)
             if confirmed_top > 0 and c_open < confirmed_top and c_close > confirmed_top:
-                # 只有在 L1 成立之後的突破，才算是有效的進場訊號
-                if l1_valid_ts != -1 and c_close_ts >= l1_valid_ts:
+                # 取得當下日線突破時，18D 的狀態是否為紅吞
+                is_l1_valid, l1_dt_str = get_l1_status(c_close_ts)
+                
+                if is_l1_valid:
                     has_active = any(s['status'] == 'active' for s in all_historical_c2s)
                     
                     if not has_active:
                         all_historical_c2s.append({
                             'symbol': symbol, 
                             'l1_18d_direction': 'LONG',
-                            'l1_date': l1_date_str, 
+                            'l1_date': l1_dt_str, 
                             'l1_open_ts': l1_valid_ts,
                             'l2_date': c_date,
                             'entry_price': c_close, 
@@ -1375,7 +1391,16 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
                             _current_trailing = float(sig.get('trailing_sl', -1.0))
                             
                             _prev_body_high = max(_prev_open, _prev_close)
-                            # 吞噬成立 且 低點高於進場價 且 只進不退（低點必須高於現有保護止損）
+                            _prev_body_low = min(_prev_open, _prev_close)
+                            
+                            # 1. 黑吞失效判斷
+                            if _new_close < _prev_body_low:
+                                sig['status'] = 'closed'
+                                sig['exit_type'] = 'black_swallow'
+                                sig['real_rr'] = 0.0
+                                continue
+                                
+                            # 2. 吞噬成立 且 低點高於進場價 且 只進不退（低點必須高於現有保護止損）
                             if (_new_close > _prev_body_high
                                     and _new_low > _entry_price
                                     and (_current_trailing < 0 or _new_low > _current_trailing)):
@@ -1424,6 +1449,11 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
         active_sigs = [c2 for c2 in all_historical_c2s if c2['status'] == 'active']
         is_trigger_met = len(active_sigs) > 0
         
+        # 確認現在的最新 18D 狀態是否也是紅吞 (若不是，就不能成為下單目標)
+        current_l1_ok, _ = get_l1_status(now_utc)
+        if not current_l1_ok:
+            is_trigger_met = False
+            
         if is_trigger_met:
             final_state = 'triggered'
         else:
@@ -1440,7 +1470,7 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
         for c2 in all_historical_c2s:
             c2['current_price'] = current_price
 
-        cache_ts = trigger_ts if is_trigger_met else l1_valid_ts
+        cache_ts = trigger_ts if is_trigger_met else 0
         action = 'update' if (not cached_info or cached_info.get('ts') != cache_ts) else 'keep'
 
         return {
@@ -1448,13 +1478,13 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
             'action':             action,
             'data':               {'ts': cache_ts},
             'is_trigger_met':     is_trigger_met,
-            'is_watchlist_eligible': (l1_valid_ts != -1),
+            'is_watchlist_eligible': current_l1_ok,
             'entry_price':        entry_price,
             'stop_loss':          stop_loss,
             'trigger_ts':         trigger_ts,
             'precision':          precision,
             'l1_18d_direction':   "LONG",
-            'l1_date':            l1_date_str,
+            'l1_date':            l1_timeline[-1]['date'] if current_l1_ok else "未知",
             'l2_date':            l2_date_str,
             'l2_direction':       l2_direction,
             'scan_state':         final_state,
