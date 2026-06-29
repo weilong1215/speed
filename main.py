@@ -1187,6 +1187,12 @@ def build_timeline(df_closed):
     return timeline
 
 def get_active_intervals(ohlcv_1d, now_utc):
+    """
+    計算需要拉取 1H 資料的區間。
+    - 觸發進場條件：L1 (18D) 且 L2 (3D) 皆為紅吞
+    - 1H 資料範圍：以 L1 (18D) 紅吞區間為主（這樣才能追蹤到 L2 轉黑後的止損）
+      往前加 90 天暖機期，並合併重疊區間
+    """
     if not ohlcv_1d or len(ohlcv_1d) < 3: return [], None, None
     ohlcv_18d = compose_18d_bars(ohlcv_1d)
     df_18d = pd.DataFrame(ohlcv_18d, columns=['ts', 'open', 'high', 'low', 'close', 'vol', 'close_ts']) if ohlcv_18d else pd.DataFrame(columns=['ts', 'open', 'high', 'low', 'close', 'vol', 'close_ts'])
@@ -1197,21 +1203,22 @@ def get_active_intervals(ohlcv_1d, now_utc):
     df_3d = pd.DataFrame(ohlcv_3d, columns=['ts', 'open', 'high', 'low', 'close', 'vol', 'close_ts']) if ohlcv_3d else pd.DataFrame(columns=['ts', 'open', 'high', 'low', 'close', 'vol', 'close_ts'])
     df_3d_closed = df_3d[df_3d['close_ts'] <= now_utc].reset_index(drop=True)
     l2_timeline = build_timeline(df_3d_closed)
-    
-    intervals = []
-    for b1 in l1_timeline:
-        if not b1['valid']: continue
-        for b2 in l2_timeline:
-            if not b2['valid']: continue
-            s = max(b1['start'], b2['start'])
-            e = min(b1['end'], b2['end'])
-            if s < e: intervals.append((s, e))
-                
+
+    # 先確認 L1 ∩ L2 有沒有有效重疊（用來判斷這支幣是否值得去拉 1H）
+    has_overlap = any(
+        b1['valid'] and b2['valid'] and max(b1['start'], b2['start']) < min(b1['end'], b2['end'])
+        for b1 in l1_timeline for b2 in l2_timeline
+    )
+    if not has_overlap:
+        return [], l1_timeline, l2_timeline
+
+    # 1H 資料範圍用 L1 (18D) 紅吞區間（確保止損追蹤不被 L2 截斷）
     WARMUP_MS = 90 * 24 * 3600 * 1000
     expanded = []
-    for (s, e) in intervals:
-        expanded.append((max(0, s - WARMUP_MS), e))
-        
+    for b1 in l1_timeline:
+        if not b1['valid']: continue
+        expanded.append((max(0, b1['start'] - WARMUP_MS), b1['end']))
+
     if not expanded: return [], l1_timeline, l2_timeline
     expanded.sort(key=lambda x: x[0])
     merged = [expanded[0]]
@@ -2717,6 +2724,22 @@ def api_data():
                     cleaned_history[_base].append(_sig)
         except Exception as _e:
             pass  # 歷史全量檔讀取失敗不影響主流程
+
+    # ── 快速補丁：歷史訊號若 status='active' 但現價已低於止損，直接標記已止損 ──
+    _now_ms = int(time.time() * 1000)
+    for _base, _sigs in cleaned_history.items():
+        for _sig in _sigs:
+            if _sig.get('status') != 'active': continue
+            _cp = float(_sig.get('current_price') or 0)
+            _sl = float(_sig.get('trailing_sl') or _sig.get('stop_loss') or 0)
+            _ep = float(_sig.get('entry_price') or 0)
+            _isl = float(_sig.get('initial_sl') or _sig.get('stop_loss') or 0)
+            if _cp <= 0 or _sl <= 0 or _ep <= 0: continue
+            _risk = abs(_ep - _isl)
+            if _cp <= _sl:
+                _sig['status'] = 'closed'
+                _sig['exit_type'] = 'trailing_sl' if _sig.get('trailing_sl') else 'stop_loss'
+                _sig['real_rr'] = round((_sl - _ep) / _risk, 2) if _risk > 0 else 0.0
     # 建立 base -> 最新 current_price 的對照表
     # 優先從 history 中找掃描時注入的 current_price；
     # 若沒有（舊紀錄），退而使用 active_signals 的 entry_price 當佔位符
