@@ -13,6 +13,7 @@ import re
 import json
 import sys
 import io
+import math
 from flask import Flask, jsonify, render_template_string
 from datetime import datetime
 from dotenv import load_dotenv
@@ -1728,7 +1729,7 @@ async def run_scan(ex=None):
                         if base not in exclude_bases:
                             coins.append(s)
             
-            precisions = {s: max(0, int(round(-np.log10(markets[s].get('precision', {}).get('price', 1e-8))))) for s in coins}
+            precisions = {s: max(0, int(round(-math.log10(markets[s].get('precision', {}).get('price', 1e-8))))) for s in coins}
         except Exception as e:
             logger.error(f"拉取市場資料失敗: {e}")
             coins = ["BTC/USDT:USDT", "ETH/USDT:USDT", "SOL/USDT:USDT", "XRP/USDT:USDT", "DOGE/USDT:USDT", "ADA/USDT:USDT"]
@@ -2624,7 +2625,7 @@ def index():
 def health():
     return {"status": "ok", "service": "Speed-Scanner-Auto"}, 200
 
-import math
+
 
 def sanitize_for_json(obj):
     if isinstance(obj, float):
