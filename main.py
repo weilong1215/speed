@@ -2697,6 +2697,26 @@ def api_data():
                     cleaned_history[base].append(sig)
     # 清掉空的 key
     cleaned_history = {k: v for k, v in cleaned_history.items() if v}
+
+    # ── 合併背景歷史掃描結果 (history_signals_full.json) ─────────────────────
+    _HISTORY_FULL_FILE = os.path.join(DATA_DIR, "history_signals_full.json")
+    if os.path.exists(_HISTORY_FULL_FILE):
+        try:
+            with open(_HISTORY_FULL_FILE, 'r', encoding='utf-8') as _f:
+                _full_list = json.load(_f)
+            for _sig in _full_list:
+                _base = get_base_coin(_sig.get('symbol', ''))
+                if not _base: continue
+                if not _sig.get('entry_price') or float(_sig.get('entry_price', 0)) == 0: continue
+                if not _sig.get('trigger_ts') or int(_sig.get('trigger_ts', 0)) == 0: continue
+                _ts = _sig.get('trigger_ts')
+                if _base not in cleaned_history:
+                    cleaned_history[_base] = []
+                _existing = next((s for s in cleaned_history[_base] if s.get('trigger_ts') == _ts), None)
+                if not _existing:
+                    cleaned_history[_base].append(_sig)
+        except Exception as _e:
+            pass  # 歷史全量檔讀取失敗不影響主流程
     # 建立 base -> 最新 current_price 的對照表
     # 優先從 history 中找掃描時注入的 current_price；
     # 若沒有（舊紀錄），退而使用 active_signals 的 entry_price 當佔位符
