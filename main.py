@@ -1523,6 +1523,14 @@ async def run_history_scan_worker():
     try:
         logger.info("🚀 背景歷史掃描任務啟動！")
         if not BITGET_API_KEY: return
+        # 每次啟動都刪除舊的全量歷史結果，強制重建（避免舊格式資料混入）
+        _old_full = os.path.join(DATA_DIR, "history_signals_full.json")
+        if os.path.exists(_old_full):
+            try:
+                os.remove(_old_full)
+                logger.info("🗑️ 已清除舊版 history_signals_full.json，重新建立中...")
+            except Exception as _del_e:
+                logger.warning(f"清除舊歷史檔失敗: {_del_e}")
         ex = ccxt.bitget({
             'apiKey': BITGET_API_KEY,
             'secret': BITGET_SECRET_KEY,
@@ -1561,7 +1569,7 @@ async def run_history_scan_worker():
                 if intervals:
                     _now = int(time.time() * 1000)
                     intervals_capped = [(s, min(e, _now)) for (s, e) in intervals]
-                    ohlcv_1h = await fetch_history_for_intervals(ex, sym, intervals_capped, timeframe='1h', limit=100, max_pages_per_interval=30)
+                    ohlcv_1h = await fetch_history_for_intervals(ex, sym, intervals_capped, timeframe='1h', limit=100, max_pages_per_interval=300)
                     res = scan_for_symbol_logic(sym, get_base_coin(sym), precisions.get(sym, 4), ohlcv_1d, ohlcv_1h, l1_timeline, l2_timeline, now_utc)
                     if res and 'historical_c2s' in res:
                         all_past_events.extend(res['historical_c2s'])
