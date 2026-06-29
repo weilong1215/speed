@@ -1228,7 +1228,7 @@ def get_active_intervals(ohlcv_1d, now_utc):
         else: merged.append(current)
     return merged, l1_timeline, l2_timeline
 
-async def fetch_history_for_intervals(exchange, symbol, intervals, timeframe='1h', limit=100, max_pages_per_interval=30):
+async def fetch_history_for_intervals(exchange, symbol, intervals, timeframe='1h', limit=1000, max_pages_per_interval=30):
     all_data = []
     import logging
     logger = logging.getLogger("SPEED")
@@ -1491,7 +1491,7 @@ async def process_symbol(exchange, symbol, name, precision, current_idx, total_c
         _end_time = now_utc
         for _pg in range(30):
             if _end_time < 1514764800000: break
-            _batch = await exchange.fetch_ohlcv(symbol, '1d', limit=100, params={'endTime': int(_end_time)})
+            _batch = await exchange.fetch_ohlcv(symbol, '1d', limit=1000, params={'endTime': int(_end_time)})
             if not _batch: break
             ohlcv_1d.extend(_batch)
             _end_time = _batch[0][0] - 1
@@ -1511,7 +1511,7 @@ async def process_symbol(exchange, symbol, name, precision, current_idx, total_c
             return None
             
         last_interval = intervals[-1]
-        ohlcv_1h = await fetch_history_for_intervals(exchange, symbol, [last_interval], timeframe='1h', limit=100, max_pages_per_interval=10)
+        ohlcv_1h = await fetch_history_for_intervals(exchange, symbol, [last_interval], timeframe='1h', limit=1000, max_pages_per_interval=10)
         
         return scan_for_symbol_logic(symbol, name, precision, ohlcv_1d, ohlcv_1h, l1_timeline, l2_timeline, now_utc)
     except Exception as e:
@@ -1560,7 +1560,7 @@ async def run_history_scan_worker():
                 _end_time = now_utc
                 for _pg in range(30):
                     if _end_time < 1514764800000: break
-                    _batch = await ex.fetch_ohlcv(sym, '1d', limit=100, params={'endTime': int(_end_time)})
+                    _batch = await ex.fetch_ohlcv(sym, '1d', limit=1000, params={'endTime': int(_end_time)})
                     if not _batch: break
                     ohlcv_1d.extend(_batch)
                     _end_time = _batch[0][0] - 1
@@ -1570,7 +1570,7 @@ async def run_history_scan_worker():
                 if intervals:
                     _now = int(time.time() * 1000)
                     intervals_capped = [(s, min(e, _now)) for (s, e) in intervals]
-                    ohlcv_1h = await fetch_history_for_intervals(ex, sym, intervals_capped, timeframe='1h', limit=100, max_pages_per_interval=300)
+                    ohlcv_1h = await fetch_history_for_intervals(ex, sym, intervals_capped, timeframe='1h', limit=1000, max_pages_per_interval=300)
                     res = scan_for_symbol_logic(sym, get_base_coin(sym), precisions.get(sym, 4), ohlcv_1d, ohlcv_1h, l1_timeline, l2_timeline, now_utc)
                     if res and 'historical_c2s' in res:
                         all_past_events.extend(res['historical_c2s'])
