@@ -1199,8 +1199,8 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
         def get_l1_status(target_ts):
             for block in l1_timeline:
                 if block['start'] <= target_ts < block['end']:
-                    return block['valid'], block['date']
-            return True, "新幣首發"
+                    return block['valid'], block['date'], block['start']
+            return True, "新幣首發", 0
 
         # ================= L2 (1D) 頂底突破 =================
         l2_state = 'NONE'
@@ -1337,7 +1337,7 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
             # 進場觸發：一日K棒由下往上實體貫穿最新頂點 (開盤<頂點 且 收盤>頂點)
             if confirmed_top > 0 and c_open < confirmed_top and c_close > confirmed_top:
                 # 取得當下日線突破時，18D 的狀態是否為紅吞
-                is_l1_valid, l1_dt_str = get_l1_status(c_close_ts)
+                is_l1_valid, l1_dt_str, l1_start_ts = get_l1_status(c_close_ts)
                 
                 if is_l1_valid:
                     has_active = any(s['status'] == 'active' for s in all_historical_c2s)
@@ -1347,7 +1347,7 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
                             'symbol': symbol, 
                             'l1_18d_direction': 'LONG',
                             'l1_date': l1_dt_str, 
-                            'l1_open_ts': l1_valid_ts,
+                            'l1_open_ts': l1_start_ts,
                             'l2_date': c_date,
                             'entry_price': c_close, 
                             'stop_loss': c_low, 
@@ -1450,7 +1450,7 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
         is_trigger_met = len(active_sigs) > 0
         
         # 確認現在的最新 18D 狀態是否也是紅吞 (若不是，就不能成為下單目標)
-        current_l1_ok, _ = get_l1_status(now_utc)
+        current_l1_ok, _, _ = get_l1_status(now_utc)
         if not current_l1_ok:
             is_trigger_met = False
             
@@ -1488,7 +1488,7 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
             'l2_date':            l2_date_str,
             'l2_direction':       l2_direction,
             'scan_state':         final_state,
-            'l1_open_ts':         l1_valid_ts,
+            'l1_open_ts':         l1_timeline[-1]['start'] if current_l1_ok else 0,
             'historical_c2s':     all_historical_c2s,
             'l2_top':             confirmed_top,
             'l2_bottom':          confirmed_bottom,
