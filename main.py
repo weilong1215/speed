@@ -1489,7 +1489,7 @@ async def process_symbol(exchange, symbol, name, precision, current_idx, total_c
         now_utc = int(time.time() * 1000)
         ohlcv_1d = []
         _end_time = now_utc
-        for _pg in range(10):
+        for _pg in range(30):
             if _end_time < 1514764800000: break
             _batch = await exchange.fetch_ohlcv(symbol, '1d', limit=100, params={'endTime': int(_end_time)})
             if not _batch: break
@@ -1558,7 +1558,7 @@ async def run_history_scan_worker():
                 now_utc = int(time.time() * 1000)
                 ohlcv_1d = []
                 _end_time = now_utc
-                for _pg in range(10):
+                for _pg in range(30):
                     if _end_time < 1514764800000: break
                     _batch = await ex.fetch_ohlcv(sym, '1d', limit=100, params={'endTime': int(_end_time)})
                     if not _batch: break
