@@ -301,13 +301,17 @@ def compose_18d_bars(ohlcv_1d):
 async def check_signal_expired(exchange, symbol, direction, entry, sl, precision, trigger_ts, expire_r=None):
     """
     檢查下單前/掛單中的訊號是否應被廢棄。
-    當前唯一踢出標準：18D K棒已產生移動保護止損（低點必須在進場價上方）。
+    踢出標準（1）PSL: 18D 紅吞已產生移動保護止損
+                (2) BLACK: 18D 黑吞出現，訊號失效
+                (3) SL: 1H K 棒或即時市價已觸發止損
+                (4) TP: 1H K 棒或即時市價已觸發 100R 止盈
     """
     if trigger_ts == 0:
         return False, "", ""
 
-    # 動態計算 18D 吹噬保護止損（只有低點 > 進場價才移動）
+    # 部分計算結果儲存，供後續 18D 黑吞檢查複用
     dynamic_sl = sl
+    _closed_18d_for_check = None
     try:
         _ohlcv_1d = []
         _end_time = int(time.time() * 1000)
@@ -326,6 +330,7 @@ async def check_signal_expired(exchange, symbol, direction, entry, sl, precision
                 _df_18d = pd.DataFrame(_ohlcv_18d, columns=['ts', 'open', 'high', 'low', 'close', 'vol', 'close_ts'])
                 _now_ms = int(time.time() * 1000)
                 _closed_18d = _df_18d[_df_18d['close_ts'] <= _now_ms].reset_index(drop=True)
+                _closed_18d_for_check = _closed_18d  # 儲存備用
 
                 if len(_closed_18d) >= 2:
                     _current_sl = sl
@@ -335,7 +340,6 @@ async def check_signal_expired(exchange, symbol, direction, entry, sl, precision
                         if int(_last['close_ts']) <= trigger_ts:
                             continue
                         _new_close = float(_last['close'])
-                        _new_high  = float(_last['high'])
                         _new_low   = float(_last['low'])
                         _prev_open  = float(_prev['open'])
                         _prev_close = float(_prev['close'])
@@ -350,6 +354,22 @@ async def check_signal_expired(exchange, symbol, direction, entry, sl, precision
 
     if dynamic_sl != sl:
         return True, f"已產生 18D 移動保護止損 (原: {sl:.{precision}f} -> 新: {dynamic_sl:.{precision}f})", 'PSL'
+
+    # 18D 黑吞失效檢查：如果訊號後最新封已關閉 18D K 棒出現黑吞完成形態，訊號失效
+    try:
+        if _closed_18d_for_check is not None and len(_closed_18d_for_check) >= 2:
+            _last_b = _closed_18d_for_check.iloc[-1]
+            _prev_b = _closed_18d_for_check.iloc[-2]
+            if int(_last_b['close_ts']) > trigger_ts:
+                _lc = float(_last_b['close'])
+                _po = float(_prev_b['open'])
+                _pc = float(_prev_b['close'])
+                _prev_body_low = min(_po, _pc)
+                if _lc < _prev_body_low:
+                    _dt = pd.to_datetime(int(_last_b['ts']), unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d')
+                    return True, f"18D K 棒 ({_dt}) 出現黑吞，訊號失效", 'BLACK'
+    except Exception as e:
+        logger.warning(f"  過期檢查(18D黑吞)異常 ({symbol}): {e}")
 
     # 盤中止損防護：用 1H K棒 + 即時市價確認訊號是否在盤中已觸及止損，防止重複下單
     # 訊號是在 trigger_ts (1D K棒開盤時間) 這根 K 棒「收盤後」才確立。
@@ -418,6 +438,8 @@ async def place_order(exchange, symbol, direction, entry, sl, precision, fixed_l
             logger.warning(f"⚠️ {symbol} 下單前監測觸發，跳過下單: {skip_reason}")
             if alert_type == 'PSL':
                 title = "<b>🚫 跳過自動下單 (已產生 18D 移動保護止損)</b>"
+            elif alert_type == 'BLACK':
+                title = "<b>🚫 跳過自動下單 (18D 黑吞，訊號已失效)</b>"
             elif alert_type == 'TP':
                 title = "<b>🚫 跳過自動下單 (盤中已觸發 100R 止盈)</b>"
             else:
@@ -1000,6 +1022,8 @@ async def monitor_positions(exchange):
                                         
                         if alert_type == 'PSL':
                             title = "已產生 18D 移動保護止損"
+                        elif alert_type == 'BLACK':
+                            title = "18D 黑吞失效"
                         elif alert_type == 'TP':
                             title = "盤中已觸發 100R 止盈"
                         elif alert_type == 'SL':
