@@ -1118,237 +1118,243 @@ async def monitor_positions(exchange):
 # 掃描模組
 # ============================================================================
 
-async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, total_coins=0, cached_info=None):
-    try:
-        if current_idx > 0 and (current_idx % 50 == 0 or current_idx == total_coins):
-            logger.info(f"📊 掃描進度: {current_idx}/{total_coins}...")
 
-        def get_swallow(c_close, p_open, p_close):
-            p_body_high = max(p_open, p_close)
-            p_body_low = min(p_open, p_close)
-            if c_close > p_body_high:
-                return 'RED'
-            elif c_close < p_body_low:
-                return 'BLACK'
-            return 'NONE'
+def compose_3d_bars(ohlcv_1d):
+    if not ohlcv_1d or len(ohlcv_1d) < 1: return []
+    PERIOD_MS = 3 * 24 * 3600 * 1000
+    groups = {}
+    for bar in ohlcv_1d:
+        ts = bar[0]
+        dt = datetime.fromtimestamp(ts / 1000, tz=timezone.utc)
+        year_start_dt = datetime(dt.year, 1, 1, tzinfo=timezone.utc)
+        year_epoch_ms = int(year_start_dt.timestamp() * 1000)
+        group_idx = (ts - year_epoch_ms) // PERIOD_MS
+        group_key = year_epoch_ms + group_idx * PERIOD_MS
+        if group_key not in groups: groups[group_key] = []
+        groups[group_key].append(bar)
+    result = []
+    for gts in sorted(groups.keys()):
+        bars = sorted(groups[gts], key=lambda x: x[0])
+        result.append([gts, bars[0][1], max(b[2] for b in bars), min(b[3] for b in bars), bars[-1][4], sum(b[5] for b in bars), gts + PERIOD_MS])
+    return result
 
-        now_utc = int(time.time() * 1000)
+def compose_3h_bars(ohlcv_1h):
+    if not ohlcv_1h or len(ohlcv_1h) < 1: return []
+    PERIOD_MS = 3 * 3600 * 1000
+    groups = {}
+    for bar in ohlcv_1h:
+        ts = bar[0]
+        group_key = ts - (ts % PERIOD_MS)
+        if group_key not in groups: groups[group_key] = []
+        groups[group_key].append(bar)
+    result = []
+    for gts in sorted(groups.keys()):
+        bars = sorted(groups[gts], key=lambda x: x[0])
+        result.append([gts, bars[0][1], max(b[2] for b in bars), min(b[3] for b in bars), bars[-1][4], sum(b[5] for b in bars), gts + PERIOD_MS])
+    return result
 
-        # Bitget 1D 單次最多約 90 根，由新往舊分頁補滿 (拉滿 1000 天保證 L2 路徑完整)
-        # 注意：外層 run_scan 已採 20 幣並發，此處必須用串列以避免瞬間打出 200 個請求觸發 RateLimit 導致漏資料！
-        ohlcv_1d = []
-        _end_time = now_utc
-        for _pg in range(10):
-            _batch = await exchange.fetch_ohlcv(symbol, '1d', limit=100, params={'endTime': _end_time})
-            if not _batch:
-                break
-            ohlcv_1d.extend(_batch)
-            _end_time = _batch[0][0] - 1
-            
-        # 去重並排序 (確保資料乾淨)
-        ohlcv_1d = sorted({b[0]: b for b in ohlcv_1d}.values(), key=lambda x: x[0])
-        if not ohlcv_1d:
-            return None
+def get_swallow(c_close, p_open, p_close):
+    p_body_high = max(p_open, p_close)
+    p_body_low = min(p_open, p_close)
+    if c_close > p_body_high: return 'RED'
+    elif c_close < p_body_low: return 'BLACK'
+    return 'NONE'
 
-        ohlcv_18d = compose_18d_bars(ohlcv_1d)
+def build_timeline(df_closed):
+    timeline = []
+    current_valid = True
+    current_start = 0
+    current_date = "新幣首發"
+    for i in range(1, len(df_closed)):
+        _prev = df_closed.iloc[i-1]
+        _curr = df_closed.iloc[i]
+        sw = get_swallow(_curr['close'], _prev['open'], _prev['close'])
+        c_ts = int(_curr['close_ts'])
+        if sw == 'RED':
+            if not current_valid or current_date == "新幣首發":
+                if not current_valid:
+                    timeline.append({'start': current_start, 'end': c_ts, 'valid': False, 'date': "未知"})
+                current_valid = True
+                current_start = c_ts
+                current_date = pd.to_datetime(int(_curr['ts']), unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d')
+        elif sw == 'BLACK':
+            if current_valid:
+                timeline.append({'start': current_start, 'end': c_ts, 'valid': True, 'date': current_date})
+                current_valid = False
+                current_start = c_ts
+                current_date = "未知"
+    timeline.append({'start': current_start, 'end': float('inf'), 'valid': current_valid, 'date': current_date})
+    return timeline
+
+def get_active_intervals(ohlcv_1d, now_utc):
+    if not ohlcv_1d or len(ohlcv_1d) < 3: return [], None, None
+    from main import compose_18d_bars
+    ohlcv_18d = compose_18d_bars(ohlcv_1d)
+    df_18d = pd.DataFrame(ohlcv_18d, columns=['ts', 'open', 'high', 'low', 'close', 'vol', 'close_ts']) if ohlcv_18d else pd.DataFrame(columns=['ts', 'open', 'high', 'low', 'close', 'vol', 'close_ts'])
+    df_18d_closed = df_18d[df_18d['close_ts'] <= now_utc].reset_index(drop=True)
+    l1_timeline = build_timeline(df_18d_closed)
+
+    ohlcv_3d = compose_3d_bars(ohlcv_1d)
+    df_3d = pd.DataFrame(ohlcv_3d, columns=['ts', 'open', 'high', 'low', 'close', 'vol', 'close_ts']) if ohlcv_3d else pd.DataFrame(columns=['ts', 'open', 'high', 'low', 'close', 'vol', 'close_ts'])
+    df_3d_closed = df_3d[df_3d['close_ts'] <= now_utc].reset_index(drop=True)
+    l2_timeline = build_timeline(df_3d_closed)
+    
+    intervals = []
+    for b1 in l1_timeline:
+        if not b1['valid']: continue
+        for b2 in l2_timeline:
+            if not b2['valid']: continue
+            s = max(b1['start'], b2['start'])
+            e = min(b1['end'], b2['end'])
+            if s < e: intervals.append((s, e))
+                
+    WARMUP_MS = 90 * 24 * 3600 * 1000
+    expanded = []
+    for (s, e) in intervals:
+        expanded.append((max(0, s - WARMUP_MS), e))
         
-        if ohlcv_18d:
-            df_18d = pd.DataFrame(ohlcv_18d, columns=['ts', 'open', 'high', 'low', 'close', 'vol', 'close_ts'])
-            df_18d_closed = df_18d[df_18d['close_ts'] <= now_utc].reset_index(drop=True)
-        else:
-            df_18d_closed = pd.DataFrame(columns=['ts', 'open', 'high', 'low', 'close', 'vol', 'close_ts'])
+    if not expanded: return [], l1_timeline, l2_timeline
+    expanded.sort(key=lambda x: x[0])
+    merged = [expanded[0]]
+    for current in expanded[1:]:
+        last = merged[-1]
+        if current[0] <= last[1]: merged[-1] = (last[0], max(last[1], current[1]))
+        else: merged.append(current)
+    return merged, l1_timeline, l2_timeline
 
-        df_1d = pd.DataFrame(ohlcv_1d, columns=['ts', 'open', 'high', 'low', 'close', 'vol'])
-        df_1d['close_ts'] = df_1d['ts'] + 24 * 3600 * 1000
-        df_1d_closed = df_1d[df_1d['close_ts'] <= now_utc].reset_index(drop=True)
+async def fetch_history_for_intervals(exchange, symbol, intervals, timeframe='1h', limit=100, max_pages_per_interval=30):
+    all_data = []
+    import logging
+    logger = logging.getLogger("SPEED")
+    for (start_ts, end_ts) in intervals:
+        _end = end_ts
+        interval_data = []
+        pages = 0
+        while _end > start_ts and pages < max_pages_per_interval:
+            try:
+                _batch = await exchange.fetch_ohlcv(symbol, timeframe, limit=limit, params={'endTime': _end})
+                if not _batch: break
+                interval_data.extend(_batch)
+                _end = _batch[0][0] - 1
+                if _batch[-1][0] <= start_ts: break
+                pages += 1
+            except Exception as e:
+                logger.error(f"fetch_history_for_intervals error for {symbol}: {e}")
+                break
+        all_data.extend(interval_data)
+    all_data = sorted({b[0]: b for b in all_data}.values(), key=lambda x: x[0])
+    return all_data
 
-        if df_1d_closed.empty:
-            return None
-
-        # ================= L1 (18D) 時間線推進 =================
-        l1_timeline = []
-        current_l1_valid = True
-        current_l1_start = 0
-        current_l1_date = "新幣首發"
-        for i in range(1, len(df_18d_closed)):
-            _prev = df_18d_closed.iloc[i-1]
-            _curr = df_18d_closed.iloc[i]
-            sw = get_swallow(_curr['close'], _prev['open'], _prev['close'])
-            c_ts = int(_curr['close_ts'])
-            if sw == 'RED':
-                if not current_l1_valid or current_l1_date == "新幣首發":
-                    if not current_l1_valid:
-                        l1_timeline.append({
-                            'start': current_l1_start, 'end': c_ts, 'valid': False, 'date': "未知"
-                        })
-                    current_l1_valid = True
-                    current_l1_start = c_ts
-                    current_l1_date = pd.to_datetime(int(_curr['ts']), unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d')
-            elif sw == 'BLACK':
-                if current_l1_valid:
-                    l1_timeline.append({
-                        'start': current_l1_start, 'end': c_ts, 'valid': True, 'date': current_l1_date
-                    })
-                    current_l1_valid = False
-                    current_l1_start = c_ts
-                    current_l1_date = "未知"
-        l1_timeline.append({
-            'start': current_l1_start, 'end': float('inf'), 'valid': current_l1_valid, 'date': current_l1_date
-        })
-
-        def get_l1_status(target_ts):
-            for block in l1_timeline:
+def scan_for_symbol_logic(symbol, name, precision, ohlcv_1d, ohlcv_1h, l1_timeline, l2_timeline, now_utc):
+    import logging
+    logger = logging.getLogger("SPEED")
+    try:
+        def get_status(target_ts, timeline):
+            for block in timeline:
                 if block['start'] <= target_ts < block['end']:
                     return block['valid'], block['date'], block['start']
             return True, "新幣首發", 0
 
-        # ================= L2 (1D) 頂底突破 =================
-        l2_state = 'NONE'
+        ohlcv_3h = compose_3h_bars(ohlcv_1h)
+        df_3h = pd.DataFrame(ohlcv_3h, columns=['ts', 'open', 'high', 'low', 'close', 'vol', 'close_ts']) if ohlcv_3h else pd.DataFrame(columns=['ts', 'open', 'high', 'low', 'close', 'vol', 'close_ts'])
+        df_3h_closed = df_3h[df_3h['close_ts'] <= now_utc].reset_index(drop=True)
+        if df_3h_closed.empty: return None
+
+        df_1d = pd.DataFrame(ohlcv_1d, columns=['ts', 'open', 'high', 'low', 'close', 'vol'])
+        df_1d['close_ts'] = df_1d['ts'] + 24 * 3600 * 1000
+        
+        from main import compose_18d_bars
+        ohlcv_18d = compose_18d_bars(ohlcv_1d)
+        df_18d = pd.DataFrame(ohlcv_18d, columns=['ts', 'open', 'high', 'low', 'close', 'vol', 'close_ts']) if ohlcv_18d else pd.DataFrame(columns=['ts', 'open', 'high', 'low', 'close', 'vol', 'close_ts'])
+        df_18d_closed = df_18d[df_18d['close_ts'] <= now_utc].reset_index(drop=True)
+
+        l3_state = 'NONE'
         temp_top = -1.0
         temp_bottom = float('inf')
         temp_top_date = "未知"
         temp_bottom_date = "未知"
-        
         confirmed_top = -1.0
         confirmed_bottom = float('inf')
         confirmed_top_date = "未知"
         confirmed_bottom_date = "未知"
-        
         pending_top = -1.0
-        pending_top_date = "未知"
         pending_bottom = float('inf')
+        pending_top_date = "未知"
         pending_bottom_date = "未知"
-
         all_historical_c2s = []
 
-        # 第一根 K 棒只作為 prev 不進入迴圈，須手動將其 high/low 納入初始 temp
-        # 避免新幣首根 K 棒的頂底點資料遺失
-        if len(df_1d_closed) > 0:
-            _first = df_1d_closed.iloc[0]
-            _first_date = pd.to_datetime(int(_first['ts']), unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d')
-            temp_top = float(_first['high'])
-            temp_top_date = _first_date
-            temp_bottom = float(_first['low'])
-            temp_bottom_date = _first_date
-        
-        for i in range(1, len(df_1d_closed)):
-            _prev = df_1d_closed.iloc[i-1]
-            _curr = df_1d_closed.iloc[i]
-            c_open = float(_curr['open'])
+        for i in range(1, len(df_3h_closed)):
+            _prev = df_3h_closed.iloc[i-1]
+            _curr = df_3h_closed.iloc[i]
             c_high = float(_curr['high'])
             c_low = float(_curr['low'])
             c_close = float(_curr['close'])
+            c_open = float(_curr['open'])
+            c_date = pd.to_datetime(int(_curr['ts']), unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d %H:%M')
             c_ts = int(_curr['ts'])
             c_close_ts = int(_curr['close_ts'])
-            c_date = pd.to_datetime(c_ts, unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d')
 
             sw = get_swallow(c_close, _prev['open'], _prev['close'])
-            
-            prev_state = l2_state
-            if sw == 'RED':
-                l2_state = 'RED'
-            elif sw == 'BLACK':
-                l2_state = 'BLACK'
+            prev_state = l3_state
+            if sw == 'RED': l3_state = 'RED'
+            elif sw == 'BLACK': l3_state = 'BLACK'
                 
-            if prev_state != l2_state:
-                if l2_state == 'RED':
-                    # 黑轉紅：產生了一個新的底部
-                    # 必須先把「紅吞當根」的最低點納入考慮
+            if prev_state != l3_state:
+                if l3_state == 'RED':
                     if c_low < temp_bottom:
-                        temp_bottom = c_low
-                        temp_bottom_date = c_date
-
+                        temp_bottom, temp_bottom_date = c_low, c_date
                     if confirmed_bottom == float('inf'):
-                        confirmed_bottom = temp_bottom
-                        confirmed_bottom_date = temp_bottom_date
-                        # 同步寫入 pending，確保新幣的第一個底在破頂時能被納入比較
-                        pending_bottom = temp_bottom
-                        pending_bottom_date = temp_bottom_date
+                        confirmed_bottom, confirmed_bottom_date = temp_bottom, temp_bottom_date
+                        pending_bottom, pending_bottom_date = temp_bottom, temp_bottom_date
                     else:
                         if temp_bottom < confirmed_bottom:
-                            # 產生了一個更低的底部 (破底) -> 此即為最新確立底
-                            confirmed_bottom = temp_bottom
-                            confirmed_bottom_date = temp_bottom_date
-                            
-                            # 若舊底與新底之間有產生潛在頂點，正式取代舊頂
+                            confirmed_bottom, confirmed_bottom_date = temp_bottom, temp_bottom_date
                             if pending_top != -1.0:
-                                confirmed_top = pending_top
-                                confirmed_top_date = pending_top_date
-                            
-                            # 區間破壞，清空暫存
+                                confirmed_top, confirmed_top_date = pending_top, pending_top_date
                             pending_top = -1.0
                             pending_bottom = float('inf')
                         else:
-                            # 較高的底部，暫存為潛在底點 (找最低的那個)
                             if temp_bottom < pending_bottom:
-                                pending_bottom = temp_bottom
-                                pending_bottom_date = temp_bottom_date
-                                
-                    # 開啟新紅吞
-                    temp_top = c_high
-                    temp_top_date = c_date
+                                pending_bottom, pending_bottom_date = temp_bottom, temp_bottom_date
+                    temp_top, temp_top_date = c_high, c_date
                     
-                elif l2_state == 'BLACK':
-                    # 紅轉黑：產生了一個新的頂部
-                    # 必須先把「黑吞當根」的最高點納入考慮
+                elif l3_state == 'BLACK':
                     if c_high > temp_top:
-                        temp_top = c_high
-                        temp_top_date = c_date
-
+                        temp_top, temp_top_date = c_high, c_date
                     if confirmed_top == -1.0:
-                        confirmed_top = temp_top
-                        confirmed_top_date = temp_top_date
-                        # 同步寫入 pending，確保新幣的第一個頂在破底時能被納入比較
-                        pending_top = temp_top
-                        pending_top_date = temp_top_date
+                        confirmed_top, confirmed_top_date = temp_top, temp_top_date
+                        pending_top, pending_top_date = temp_top, temp_top_date
                     else:
                         if temp_top > confirmed_top:
-                            # 產生了一個更高的頂部 (破頂) -> 此即為最新確立頂
-                            confirmed_top = temp_top
-                            confirmed_top_date = temp_top_date
-                            
-                            # 若舊頂與新頂之間有產生潛在底點，正式取代舊底
+                            confirmed_top, confirmed_top_date = temp_top, temp_top_date
                             if pending_bottom != float('inf'):
-                                confirmed_bottom = pending_bottom
-                                confirmed_bottom_date = pending_bottom_date
-                            
-                            # 區間破壞，清空暫存
-                            pending_top = -1.0
+                                confirmed_bottom, confirmed_bottom_date = pending_bottom, pending_bottom_date
                             pending_bottom = float('inf')
+                            pending_top = -1.0
                         else:
-                            # 較低的頂部，暫存為潛在頂點 (找最高的那個)
                             if temp_top > pending_top:
-                                pending_top = temp_top
-                                pending_top_date = temp_top_date
-                                
-                    # 開啟新黑吞
-                    temp_bottom = c_low
-                    temp_bottom_date = c_date
+                                pending_top, pending_top_date = temp_top, temp_top_date
+                    temp_bottom, temp_bottom_date = c_low, c_date
             else:
-                if l2_state == 'RED':
-                    if c_high > temp_top:
-                        temp_top = c_high
-                        temp_top_date = c_date
-                elif l2_state == 'BLACK':
-                    if c_low < temp_bottom:
-                        temp_bottom = c_low
-                        temp_bottom_date = c_date
+                if l3_state == 'RED' and c_high > temp_top:
+                    temp_top, temp_top_date = c_high, c_date
+                elif l3_state == 'BLACK' and c_low < temp_bottom:
+                    temp_bottom, temp_bottom_date = c_low, c_date
 
-            # 進場觸發：一日K棒由下往上實體貫穿最新頂點 (開盤<頂點 且 收盤>頂點)
             if confirmed_top > 0 and c_open < confirmed_top and c_close > confirmed_top:
-                # 取得當下日線突破時，18D 的狀態是否為紅吞
-                is_l1_valid, l1_dt_str, l1_start_ts = get_l1_status(c_close_ts)
-                
-                if is_l1_valid:
+                is_l1_valid, l1_dt_str, l1_start_ts = get_status(c_close_ts, l1_timeline)
+                is_l2_valid, l2_dt_str, l2_start_ts = get_status(c_close_ts, l2_timeline)
+                if is_l1_valid and is_l2_valid:
                     has_active = any(s['status'] == 'active' for s in all_historical_c2s)
-                    
                     if not has_active:
                         all_historical_c2s.append({
                             'symbol': symbol, 
                             'l1_18d_direction': 'LONG',
                             'l1_date': l1_dt_str, 
                             'l1_open_ts': l1_start_ts,
-                            'l2_date': c_date,
+                            'l2_date': l2_dt_str,
+                            'l2_open_ts': l2_start_ts,
+                            'l3_date': c_date,
                             'entry_price': c_close, 
                             'stop_loss': c_low, 
                             'initial_sl': c_low,
@@ -1365,13 +1371,6 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
                             'real_rr': 0.0
                         })
 
-
-
-
-
-            # 18D 移動保護止損檢查
-            # 規則：吞噬成立 且 K棒低點 > 進場價 且 K棒低點 > 現有保護止損 → 推進 trailing_sl
-            # 嚴禁直接覆寫 stop_loss，原始止損欄位永遠鎖定用於計算初始風險
             _closed_18d = df_18d_closed[df_18d_closed['close_ts'] <= c_ts]
             if len(_closed_18d) >= 2:
                 _last_18d = _closed_18d.iloc[-1]
@@ -1380,10 +1379,8 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
                 
                 for sig in all_historical_c2s:
                     if sig['status'] == 'active':
-                        _entry_ts = sig['trigger_ts']
-                        if int(_last_18d['close_ts']) > _entry_ts:
+                        if int(_last_18d['close_ts']) > sig['trigger_ts']:
                             _new_close = float(_last_18d['close'])
-                            _new_high  = float(_last_18d['high'])
                             _new_low   = float(_last_18d['low'])
                             _prev_open  = float(_prev_18d['open'])
                             _prev_close = float(_prev_18d['close'])
@@ -1393,313 +1390,188 @@ async def scan_for_symbol(exchange, symbol, name, precision, current_idx=0, tota
                             _prev_body_high = max(_prev_open, _prev_close)
                             _prev_body_low = min(_prev_open, _prev_close)
                             
-                            # 1. 黑吞失效判斷
                             if _new_close < _prev_body_low:
                                 sig['status'] = 'closed'
                                 sig['exit_type'] = 'black_swallow'
                                 sig['real_rr'] = 0.0
                                 continue
                                 
-                            # 2. 吞噬成立 且 低點高於進場價 且 只進不退（低點必須高於現有保護止損）
                             if (_new_close > _prev_body_high
                                     and _new_low > _entry_price
                                     and (_current_trailing < 0 or _new_low > _current_trailing)):
                                 sig['trailing_sl'] = _new_low
                                 sig['trailing_sl_date'] = _18d_dt
 
-            # 止損 / 100R 止盈檢查 (極端狀況優先判定為止損)
-            # trigger_ts = 進場K棒的 open_ts，c_ts == trigger_ts 的那根不計算
             for sig in all_historical_c2s:
                 if sig['status'] == 'active' and c_ts > sig['trigger_ts']:
-                    _is_sl = False
-                    _is_tp = False
-                    
-                    # 有效止損線：優先使用保護止損，否則使用原始止損
                     _trailing = sig.get('trailing_sl')
                     _effective_sl = _trailing if _trailing is not None else sig['stop_loss']
-                    
-                    # 100R 停利點永遠使用 initial_sl 計算原始風險，防止保護止損推進後壓縮 tp_price
                     _init_sl_for_tp = sig.get('initial_sl', sig['stop_loss'])
                     _base_risk = abs(sig['entry_price'] - _init_sl_for_tp)
                     
                     if c_low <= _effective_sl:
-                        _is_sl = True
-                    if _base_risk > 0:
-                        tp_price = sig['entry_price'] + 100 * _base_risk
-                        if c_high >= tp_price:
-                            _is_tp = True
-
-                    if _is_sl:
                         sig['status'] = 'closed'
-                        # 出場價以觸發止損的有效止損線為準
-                        _init_sl = sig.get('initial_sl', sig['stop_loss'])
-                        _risk = abs(sig['entry_price'] - _init_sl)
-                        if _risk > 0:
-                            sig['real_rr'] = (_effective_sl - sig['entry_price']) / _risk
-                        else:
-                            sig['real_rr'] = 0.0
+                        _risk = abs(sig['entry_price'] - _init_sl_for_tp)
+                        sig['real_rr'] = (_effective_sl - sig['entry_price']) / _risk if _risk > 0 else 0.0
                         sig['exit_type'] = 'trailing_sl' if _trailing is not None else 'stop_loss'
-                    elif _is_tp:
+                    elif _base_risk > 0 and c_high >= (sig['entry_price'] + 100 * _base_risk):
                         sig['status'] = 'closed'
                         sig['real_rr'] = 100.0
                         sig['exit_type'] = 'tp100'
 
         current_price = float(df_1d['close'].iloc[-1]) if not df_1d.empty else 0.0
-        
         active_sigs = [c2 for c2 in all_historical_c2s if c2['status'] == 'active']
         is_trigger_met = len(active_sigs) > 0
         
-        # 確認現在的最新 18D 狀態是否也是紅吞 (若不是，就不能成為下單目標)
-        current_l1_ok, _, _ = get_l1_status(now_utc)
-        if not current_l1_ok:
-            is_trigger_met = False
+        current_l1_ok, current_l1_date, current_l1_ts = get_status(now_utc, l1_timeline)
+        current_l2_ok, current_l2_date, current_l2_ts = get_status(now_utc, l2_timeline)
+        if not current_l1_ok or not current_l2_ok: is_trigger_met = False
             
-        if is_trigger_met:
-            final_state = 'triggered'
-        else:
-            final_state = 'l2_waiting'
-
+        final_state = 'triggered' if is_trigger_met else 'l2_waiting'
         last_active = active_sigs[-1] if is_trigger_met else None
         
         entry_price = last_active['entry_price'] if last_active else 0.0
         stop_loss = last_active['stop_loss'] if last_active else 0.0
         trigger_ts = last_active['trigger_ts'] if last_active else 0
-        l2_date_str = last_active['l2_date'] if last_active else "未知"
+        l3_date_str = last_active['l3_date'] if last_active else "未知"
         l2_direction = 'LONG' if last_active else ""
 
-        for c2 in all_historical_c2s:
-            c2['current_price'] = current_price
-
+        for c2 in all_historical_c2s: c2['current_price'] = current_price
         cache_ts = trigger_ts if is_trigger_met else 0
-        action = 'update' if (not cached_info or cached_info.get('ts') != cache_ts) else 'keep'
 
         return {
             'symbol':             symbol,
-            'action':             action,
+            'action':             'update',
             'data':               {'ts': cache_ts},
             'is_trigger_met':     is_trigger_met,
-            'is_watchlist_eligible': current_l1_ok,
+            'is_watchlist_eligible': current_l1_ok and current_l2_ok,
             'entry_price':        entry_price,
             'stop_loss':          stop_loss,
             'trigger_ts':         trigger_ts,
             'precision':          precision,
             'l1_18d_direction':   "LONG",
-            'l1_date':            l1_timeline[-1]['date'] if current_l1_ok else "未知",
-            'l2_date':            l2_date_str,
+            'l1_date':            current_l1_date if current_l1_ok else "未知",
+            'l2_date':            current_l2_date if current_l2_ok else "未知",
+            'l3_date':            l3_date_str,
             'l2_direction':       l2_direction,
             'scan_state':         final_state,
-            'l1_open_ts':         l1_timeline[-1]['start'] if current_l1_ok else 0,
+            'l1_open_ts':         current_l1_ts if current_l1_ok else 0,
+            'l2_open_ts':         current_l2_ts if current_l2_ok else 0,
             'historical_c2s':     all_historical_c2s,
             'l2_top':             confirmed_top,
             'l2_bottom':          confirmed_bottom,
             'l2_top_date':        confirmed_top_date,
             'l2_bottom_date':     confirmed_bottom_date,
         }
-
     except Exception as e:
         logger.warning(f"掃描異常 ({symbol}): {type(e).__name__}: {e}")
         return None
 
-# ============================================================================
-# 訊息推送模組
-# ============================================================================
 
-def send_grouped_message(item_list, title):
-    """合併傳入的幣種清單為一則群組訊息，按 L2 (1D 突破) 日期排列"""
-    if not item_list:
-        return
+def get_status(target_ts, timeline):
+    if not timeline: return True, "新幣首發", 0
+    for block in timeline:
+        if block['start'] <= target_ts < block['end']:
+            return block['valid'], block['date'], block['start']
+    return True, "新幣首發", 0
 
-    filtered_items = []
-    for item in item_list:
-        l2_dt = item.get('l2_date', '')
-        if not l2_dt or l2_dt in ('未知', '未知日期', ''):
-            ts = item.get('trigger_ts', 0)
-            if ts > 0:
-                l2_dt = pd.to_datetime(ts, unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d %H:%M:%S')
-        if l2_dt and l2_dt not in ('未知', '未知日期', '', '外部建倉', '持續追蹤'):
-            item = dict(item)
-            item['l2_date'] = l2_dt
-            filtered_items.append(item)
-
-    if not filtered_items:
-        return
-
-    date_groups = {}
-    for item in filtered_items:
-        raw_date = item.get('l2_date', '')
-        d = raw_date[:10] if len(raw_date) >= 10 else raw_date
-        if d not in date_groups:
-            date_groups[d] = []
-        date_groups[d].append(item)
-
-    lines = [f"<b>{title}</b>\n"]
-    for date_key in sorted(date_groups.keys()):
-        coin_strs = []
-        for item in date_groups[date_key]:
-            base = get_base_coin(item['symbol'])
-            direction = item.get('l2_direction', '')
-            dir_str = " 🟢" if direction == "LONG" else " 🔴" if direction == "SHORT" else ""
-            
-            if item.get('missed') and title != '🛑 <b>加密貨幣[未上車]</b>':
-                coin_strs.append(f"{base} (未上車){dir_str}")
-            else:
-                coin_strs.append(f"{base}{dir_str}")
-                
-        coins = " · ".join(coin_strs)
-        lines.append(f"📅 {date_key}")
-        lines.append(f"💎 {coins}\n")
-
-    send_telegram_message("\n".join(lines))
-
-
-
-def send_system_settings_message(config):
-    """獨立一則系統設定訊息"""
-    capital = config.get("total_capital", 300)
-    loss_pct = config.get("loss_pct", 2)
-    blacklist = config.get("blacklist", ["XAUT", "PAXG", "TQQQ", "SQQQ"])
-    bl_str = ", ".join(blacklist) if blacklist else "無"
-
-    msg = (
-        f"⚙️ <b>系統快速設定</b>\n\n"
-        f"💰 <b>預設總資金:</b> {capital} USDT\n"
-        f"📉 <b>每筆虧損:</b> {loss_pct}%\n"
-        f"🚫 <b>黑名單:</b> {bl_str}"
-    )
-
-    reply_markup = {
-        "inline_keyboard": [
-            [
-                {"text": "💰 修改總資金", "switch_inline_query_current_chat": "/set_capital "},
-                {"text": "📉 修改虧損比例", "switch_inline_query_current_chat": "/set_loss_pct "}
-            ],
-            [
-                {"text": "➕ 增加黑名單", "switch_inline_query_current_chat": "/add_blacklist "},
-                {"text": "➖ 移除黑名單", "switch_inline_query_current_chat": "/remove_blacklist "}
-            ]
-        ]
-    }
-
-    send_telegram_message(msg, reply_markup=reply_markup)
-
-# ============================================================================
-# Telegram 指令處理
-# ============================================================================
-
-_tg_update_offset = 0
-
-def poll_telegram_commands():
-    """輪詢 Telegram getUpdates，處理指令與 Callback Queries"""
-    global _tg_update_offset
-    if not TG_BOT_TOKEN:
-        return
-
-    url = f"https://api.telegram.org/bot{TG_BOT_TOKEN}/getUpdates"
-    params = {"offset": _tg_update_offset, "timeout": 0, "limit": 20}
-
+async def process_symbol(exchange, symbol, name, precision, current_idx, total_coins, cached_info):
     try:
-        resp = requests.get(url, params=params, timeout=10)
-        if resp.status_code != 200:
-            return
-        data = resp.json()
-        if not data.get("ok"):
-            return
-
-        for update in data.get("result", []):
-            _tg_update_offset = update["update_id"] + 1
-
-            message = update.get("message", {})
-            text = message.get("text", "").strip()
-            chat_id = str(message.get("chat", {}).get("id", ""))
-
-            if chat_id != str(TG_CHAT_ID) or not text:
-                continue
-
-            text = re.sub(r'^@\w+\s*', '', text).strip()
-
-            reply = ""
-            if text.startswith("/set_capital"):
-                parts = text.split()
-                if len(parts) >= 2:
-                    try:
-                        new_val = float(parts[1])
-                        if new_val <= 0:
-                            raise ValueError("金額必須大於 0")
-                        config = load_config()
-                        config["total_capital"] = new_val
-                        save_config(config)
-                        loss_pct = config.get("loss_pct", 2)
-                        reply = f"✅ 總資金已更新為 <b>{new_val} USDT</b>，每筆虧損 <b>{loss_pct}%</b>"
-                        logger.info(f"⚙️ /set_capital 指令: 總資金更新為 {new_val}")
-                    except ValueError:
-                        reply = "❌ 格式錯誤，請輸入大於零的數字。"
-                else:
-                    reply = "❌ 格式錯誤，未提供數字。"
-                    
-            elif text.startswith("/set_loss_pct"):
-                parts = text.split()
-                if len(parts) >= 2:
-                    try:
-                        new_val = float(parts[1])
-                        if new_val <= 0 or new_val > 100:
-                            raise ValueError("比例必須在 0 到 100 之間")
-                        config = load_config()
-                        config["loss_pct"] = new_val
-                        save_config(config)
-                        capital = config.get("total_capital", 300)
-                        reply = f"✅ 每筆虧損比例已更新為 <b>{new_val}%</b> (總資金: {capital} USDT)"
-                        logger.info(f"⚙️ /set_loss_pct 指令: 虧損比例更新為 {new_val}%")
-                    except ValueError:
-                        reply = "❌ 格式錯誤，請輸入大於 0 且小於等於 100 的數字。"
-                else:
-                    reply = "❌ 格式錯誤，未提供數字。"
-
-            elif text.startswith("/add_blacklist"):
-                parts = text.split(maxsplit=1)
-                if len(parts) >= 2:
-                    coin = parts[1].strip().upper()
-                    config = load_config()
-                    blacklist = config.get("blacklist", ["XAUT", "PAXG", "TQQQ", "SQQQ"])
-                    if coin not in blacklist:
-                        blacklist.append(coin)
-                        config["blacklist"] = blacklist
-                        save_config(config)
-                        reply = f"✅ 已將 <b>{coin}</b> 加入黑名單"
-                        logger.info(f"⚙️ /add_blacklist 指令: 新增 {coin}")
-                    else:
-                        reply = f"⚠️ <b>{coin}</b> 已經在黑名單中"
-                else:
-                    reply = "❌ 格式錯誤，未提供幣種名稱。"
-
-            elif text.startswith("/remove_blacklist"):
-                parts = text.split(maxsplit=1)
-                if len(parts) >= 2:
-                    coin = parts[1].strip().upper()
-                    config = load_config()
-                    blacklist = config.get("blacklist", ["XAUT", "PAXG", "TQQQ", "SQQQ"])
-                    if coin in blacklist:
-                        blacklist.remove(coin)
-                        config["blacklist"] = blacklist
-                        save_config(config)
-                        reply = f"✅ 已將 <b>{coin}</b> 從黑名單移除"
-                        logger.info(f"⚙️ /remove_blacklist 指令: 移除 {coin}")
-                    else:
-                        reply = f"⚠️ <b>{coin}</b> 不在黑名單中"
-                else:
-                    reply = "❌ 格式錯誤，未提供幣種名稱。"
-
-                send_url = f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendMessage"
-                payload = {"chat_id": chat_id, "text": reply, "parse_mode": "HTML"}
-                requests.post(send_url, json=payload, timeout=10)
-
-
-
+        if current_idx > 0 and (current_idx % 50 == 0 or current_idx == total_coins):
+            logger.info(f"📊 掃描進度: {current_idx}/{total_coins}...")
+            
+        now_utc = int(time.time() * 1000)
+        ohlcv_1d = []
+        _end_time = now_utc
+        for _pg in range(10):
+            _batch = await exchange.fetch_ohlcv(symbol, '1d', limit=100, params={'endTime': _end_time})
+            if not _batch: break
+            ohlcv_1d.extend(_batch)
+            _end_time = _batch[0][0] - 1
+            
+        ohlcv_1d = sorted({b[0]: b for b in ohlcv_1d}.values(), key=lambda x: x[0])
+        if not ohlcv_1d: return None
+        
+        intervals, l1_timeline, l2_timeline = get_active_intervals(ohlcv_1d, now_utc)
+        
+        current_l1_ok, _, _ = get_status(now_utc, l1_timeline)
+        current_l2_ok, _, _ = get_status(now_utc, l2_timeline)
+        
+        if not current_l1_ok or not current_l2_ok:
+            return None
+            
+        if not intervals:
+            return None
+            
+        last_interval = intervals[-1]
+        ohlcv_1h = await fetch_history_for_intervals(exchange, symbol, [last_interval], timeframe='1h', limit=100, max_pages_per_interval=10)
+        
+        return scan_for_symbol_logic(symbol, name, precision, ohlcv_1d, ohlcv_1h, l1_timeline, l2_timeline, now_utc)
     except Exception as e:
-        logger.warning(f"Telegram 指令輪詢異常: {e}")
+        logger.warning(f"掃描異常 ({symbol}): {type(e).__name__}: {e}")
+        return None
 
-# ============================================================================
-# 主掃描流程
-# ============================================================================
+async def run_history_scan_worker():
+    """背景歷史掃描任務"""
+    try:
+        logger.info("🚀 背景歷史掃描任務啟動！")
+        if not BITGET_API_KEY: return
+        ex = ccxt.bitget({
+            'apiKey': BITGET_API_KEY,
+            'secret': BITGET_API_SECRET,
+            'password': BITGET_API_PASSWORD,
+            'enableRateLimit': True,
+        })
+        
+        whitelist = _get_crypto_whitelist()
+        markets = await ex.load_markets()
+        coins = []
+        for ccxt_sym, m in markets.items():
+            if not (m.get('linear') and m.get('quote') == 'USDT' and m.get('settle') == 'USDT'): continue
+            base = ccxt_sym.split('/')[0]
+            raw_bitget_sym = f"{base}USDT"
+            if whitelist and raw_bitget_sym not in whitelist: continue
+            coins.append(ccxt_sym)
+            
+        precisions = {s: max(0, int(round(-math.log10(markets[s].get('precision', {}).get('price', 1e-8))))) for s in coins}
+        
+        all_past_events = []
+        total = len(coins)
+        for idx, sym in enumerate(coins):
+            try:
+                now_utc = int(time.time() * 1000)
+                ohlcv_1d = []
+                _end_time = now_utc
+                for _pg in range(10):
+                    _batch = await ex.fetch_ohlcv(sym, '1d', limit=100, params={'endTime': _end_time})
+                    if not _batch: break
+                    ohlcv_1d.extend(_batch)
+                    _end_time = _batch[0][0] - 1
+                ohlcv_1d = sorted({b[0]: b for b in ohlcv_1d}.values(), key=lambda x: x[0])
+                
+                intervals, l1_timeline, l2_timeline = get_active_intervals(ohlcv_1d, now_utc)
+                if intervals:
+                    ohlcv_1h = await fetch_history_for_intervals(ex, sym, intervals, timeframe='1h', limit=100, max_pages_per_interval=30)
+                    res = scan_for_symbol_logic(sym, get_base_coin(sym), precisions.get(sym, 4), ohlcv_1d, ohlcv_1h, l1_timeline, l2_timeline, now_utc)
+                    if res and 'historical_c2s' in res:
+                        all_past_events.extend(res['historical_c2s'])
+            except Exception as e:
+                logger.error(f"歷史掃描異常 ({sym}): {e}")
+            await asyncio.sleep(0.5)
+            if idx % 10 == 0: logger.info(f"⏳ 歷史掃描進度: {idx}/{total}")
+            
+        HISTORY_FULL_FILE = os.path.join(DATA_DIR, "history_signals_full.json")
+        try:
+            with open(HISTORY_FULL_FILE, 'w', encoding='utf-8') as f:
+                json.dump(all_past_events, f, ensure_ascii=False, indent=2)
+            logger.info("✅ 背景歷史掃描任務完成並已寫入 history_signals_full.json")
+        except Exception as e:
+            logger.error(f"寫入歷史報表失敗: {e}")
+            
+        await ex.close()
+    except Exception as e:
+        logger.error(f"歷史掃描整體異常: {e}")
+
 
 async def run_scan(ex=None):
     logger.info("⏰ 開始執行 極速系統...")
@@ -1781,7 +1653,7 @@ async def run_scan(ex=None):
         total_coins = len(coins)
         for i in range(0, total_coins, 20):
             batch = coins[i:i+20]
-            tasks = [scan_for_symbol(ex, s, get_base_coin(s), precisions[s], i + idx + 1, total_coins, watchlist.get(s)) for idx, s in enumerate(batch)]
+            tasks = [process_symbol(ex, s, get_base_coin(s), precisions[s], i + idx + 1, total_coins, watchlist.get(s)) for idx, s in enumerate(batch)]
             results = await asyncio.gather(*tasks, return_exceptions=True)
 
             for res in results:
@@ -2434,15 +2306,19 @@ HTML_TEMPLATE = """
             <div class="detail-value">${sig.l1_date || '—'}</div>
           </div>
           <div class="detail-block">
-            <div class="detail-label">L2進場時間</div>
+            <div class="detail-label">3D紅吞時間</div>
             <div class="detail-value">${fmt(sig.l2_date)}</div>
           </div>
           <div class="detail-block">
-            <div class="detail-label">L2頂點時間</div>
+            <div class="detail-label">3H觸發時間</div>
+            <div class="detail-value">${fmt(sig.l3_date)}</div>
+          </div>
+          <div class="detail-block">
+            <div class="detail-label">3H頂點時間</div>
             <div class="detail-value">${sig.l2_top > 0 ? (sig.l2_top_date||'—') + ' (' + fmt(sig.l2_top, prec) + ')' : '—'}</div>
           </div>
           <div class="detail-block">
-            <div class="detail-label">L2底點時間</div>
+            <div class="detail-label">3H底點時間</div>
             <div class="detail-value">${sig.l2_bottom !== null && sig.l2_bottom !== 'inf' && sig.l2_bottom !== 'Infinity' && sig.l2_bottom < 9999999 ? (sig.l2_bottom_date||'—') + ' (' + fmt(sig.l2_bottom, prec) + ')' : '—'}</div>
           </div>
         </div>
@@ -2556,15 +2432,19 @@ HTML_TEMPLATE = """
             <div class="detail-value">${sig.l1_date || '—'}</div>
           </div>
           <div class="detail-block">
-            <div class="detail-label">L2進場時間</div>
+            <div class="detail-label">3D紅吞時間</div>
             <div class="detail-value">${fmt(sig.l2_date)}</div>
           </div>
           <div class="detail-block">
-            <div class="detail-label">L2頂點時間</div>
+            <div class="detail-label">3H觸發時間</div>
+            <div class="detail-value">${fmt(sig.l3_date)}</div>
+          </div>
+          <div class="detail-block">
+            <div class="detail-label">3H頂點時間</div>
             <div class="detail-value">${sig.l2_top > 0 ? (sig.l2_top_date||'—') + ' (' + fmt(sig.l2_top, prec) + ')' : '—'}</div>
           </div>
           <div class="detail-block">
-            <div class="detail-label">L2底點時間</div>
+            <div class="detail-label">3H底點時間</div>
             <div class="detail-value">${sig.l2_bottom !== null && sig.l2_bottom !== 'inf' && sig.l2_bottom !== 'Infinity' && sig.l2_bottom < 9999999 ? (sig.l2_bottom_date||'—') + ' (' + fmt(sig.l2_bottom, prec) + ')' : '—'}</div>
           </div>
         </div>
@@ -2624,11 +2504,11 @@ HTML_TEMPLATE = """
             <div class="detail-value">${sig.l1_date || '—'}</div>
           </div>
           <div class="detail-block">
-            <div class="detail-label">L2頂點時間</div>
+            <div class="detail-label">3H頂點時間</div>
             <div class="detail-value">${topStr}</div>
           </div>
           <div class="detail-block">
-            <div class="detail-label">L2底點時間</div>
+            <div class="detail-label">3H底點時間</div>
             <div class="detail-value">${botStr}</div>
           </div>
         </div>
@@ -2773,6 +2653,7 @@ def run_flask():
 def run_background_system():
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
+    loop.create_task(run_history_scan_worker())
     loop.run_until_complete(scheduler())
 
 def tg_polling_background():
