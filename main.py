@@ -1239,7 +1239,7 @@ async def fetch_history_for_intervals(exchange, symbol, intervals, timeframe='1h
         while _end > start_ts and pages < max_pages_per_interval:
             try:
                 if _end < 1514764800000: break
-                _batch = await exchange.fetch_ohlcv(symbol, timeframe, limit=limit, params={'endTime': int(_end)})
+                _batch = await exchange.fetch_ohlcv(symbol, timeframe, limit=limit, params={'until': int(_end)})
                 if not _batch: break
                 interval_data.extend(_batch)
                 _end = _batch[0][0] - 1
@@ -1491,7 +1491,7 @@ async def process_symbol(exchange, symbol, name, precision, current_idx, total_c
         _end_time = now_utc
         for _pg in range(30):
             if _end_time < 1514764800000: break
-            _batch = await exchange.fetch_ohlcv(symbol, '1d', limit=1000, params={'endTime': int(_end_time)})
+            _batch = await exchange.fetch_ohlcv(symbol, '1d', limit=1000, params={'until': int(_end_time)})
             if not _batch: break
             ohlcv_1d.extend(_batch)
             _end_time = _batch[0][0] - 1
@@ -1560,7 +1560,7 @@ async def run_history_scan_worker():
                 _end_time = now_utc
                 for _pg in range(30):
                     if _end_time < 1514764800000: break
-                    _batch = await ex.fetch_ohlcv(sym, '1d', limit=1000, params={'endTime': int(_end_time)})
+                    _batch = await ex.fetch_ohlcv(sym, '1d', limit=1000, params={'until': int(_end_time)})
                     if not _batch: break
                     ohlcv_1d.extend(_batch)
                     _end_time = _batch[0][0] - 1
