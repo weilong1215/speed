@@ -1534,15 +1534,8 @@ async def process_symbol(exchange, symbol, name, precision, current_idx, total_c
             logger.info(f"📊 掃描進度: {current_idx}/{total_coins}...")
             
         now_utc = int(time.time() * 1000)
-        ohlcv_1d = []
-        _end_time = now_utc
-        for _pg in range(6):
-            if _end_time < 1514764800000: break
-            _batch = await exchange.fetch_ohlcv(symbol, '1d', limit=1000, params={'until': int(_end_time)})
-            if not _batch: break
-            ohlcv_1d.extend(_batch)
-            _end_time = _batch[0][0] - 1
-            await asyncio.sleep(0.2)
+        _batch = await exchange.fetch_ohlcv(symbol, '1d', limit=1000)
+        ohlcv_1d = _batch if _batch else []
             
         ohlcv_1d = sorted({b[0]: b for b in ohlcv_1d}.values(), key=lambda x: x[0])
         if not ohlcv_1d: return None
@@ -1602,15 +1595,8 @@ async def run_history_scan_worker():
         for idx, sym in enumerate(coins):
             try:
                 now_utc = int(time.time() * 1000)
-                ohlcv_1d = []
-                _end_time = now_utc
-                for _pg in range(6):
-                    if _end_time < 1514764800000: break
-                    _batch = await ex.fetch_ohlcv(sym, '1d', limit=1000, params={'until': int(_end_time)})
-                    if not _batch: break
-                    ohlcv_1d.extend(_batch)
-                    _end_time = _batch[0][0] - 1
-                    await asyncio.sleep(0.2)
+                _batch = await ex.fetch_ohlcv(sym, '1d', limit=1000)
+                ohlcv_1d = _batch if _batch else []
                 ohlcv_1d = sorted({b[0]: b for b in ohlcv_1d}.values(), key=lambda x: x[0])
                 
                 intervals, l1_timeline, l2_timeline = get_active_intervals(ohlcv_1d, now_utc)
