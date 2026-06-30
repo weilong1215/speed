@@ -1259,6 +1259,19 @@ def build_1d_structure_global(df_1d):
                     
                     if current_valid_bottom is not None:
                         current_valid_bottom = lowest_since_top
+                        current_valid_bottom_date = lowest_since_top_date
+                        
+                        # New Boundary (Top) established due to Top Break confirmation
+                        if len(boundaries) > 0 and boundaries[-1]['until_ts'] == float('inf'):
+                            boundaries[-1]['until_ts'] = c_close_ts
+                            
+                        boundaries.append({
+                            'level': current_valid_top,
+                            'from_ts': c_close_ts,
+                            'until_ts': float('inf'),
+                            't1_date': current_valid_top_date,
+                            'b2_date': current_valid_bottom_date,
+                        })
                         
                     lowest_since_top = float('inf')
                     has_broken_top = False
@@ -1523,12 +1536,13 @@ async def process_symbol(exchange, symbol, name, precision, current_idx, total_c
         now_utc = int(time.time() * 1000)
         ohlcv_1d = []
         _end_time = now_utc
-        for _pg in range(30):
+        for _pg in range(6):
             if _end_time < 1514764800000: break
             _batch = await exchange.fetch_ohlcv(symbol, '1d', limit=1000, params={'until': int(_end_time)})
             if not _batch: break
             ohlcv_1d.extend(_batch)
             _end_time = _batch[0][0] - 1
+            await asyncio.sleep(0.2)
             
         ohlcv_1d = sorted({b[0]: b for b in ohlcv_1d}.values(), key=lambda x: x[0])
         if not ohlcv_1d: return None
@@ -1590,12 +1604,13 @@ async def run_history_scan_worker():
                 now_utc = int(time.time() * 1000)
                 ohlcv_1d = []
                 _end_time = now_utc
-                for _pg in range(30):
+                for _pg in range(6):
                     if _end_time < 1514764800000: break
                     _batch = await ex.fetch_ohlcv(sym, '1d', limit=1000, params={'until': int(_end_time)})
                     if not _batch: break
                     ohlcv_1d.extend(_batch)
                     _end_time = _batch[0][0] - 1
+                    await asyncio.sleep(0.2)
                 ohlcv_1d = sorted({b[0]: b for b in ohlcv_1d}.values(), key=lambda x: x[0])
                 
                 intervals, l1_timeline, l2_timeline = get_active_intervals(ohlcv_1d, now_utc)
