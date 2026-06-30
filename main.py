@@ -1462,7 +1462,8 @@ def scan_for_symbol_logic(symbol, name, precision, ohlcv_1d, l1_timeline, now_ut
             is_trigger_met = False
 
         current_boundary = get_active_boundary(now_utc)
-        if current_boundary and current_boundary['l1_start_ts'] != current_l1_ts:
+        # \u5168\u57df boundary \u4e0d\u9700\u8981\u6bd4\u5c0d l1_start_ts\uff0c\u53ea\u9700\u78ba\u8a8d\u76ee\u524d\u5728 L1 \u6709\u6548\u671f\u5167
+        if current_boundary and not current_l1_ok:
             current_boundary = None
 
         final_state  = 'triggered' if is_trigger_met else ('l2_watching' if current_boundary else 'l1_waiting')
