@@ -1405,6 +1405,11 @@ def scan_for_symbol_logic(symbol, name, precision, ohlcv_1d, l1_timeline, now_ut
                 _effective_sl = _trailing if _trailing is not None else sig['stop_loss']
                 _init_sl      = sig.get('initial_sl', sig['stop_loss'])
                 _base_risk    = abs(sig['entry_price'] - _init_sl)
+                # 追蹤曾達最高 RR
+                if _base_risk > 0:
+                    _cur_rr = (c_high - sig['entry_price']) / _base_risk
+                    if _cur_rr > sig.get('max_rr', 0.0):
+                        sig['max_rr'] = round(_cur_rr, 2)
                 if c_low <= _effective_sl:
                     sig['status']    = 'closed'
                     _risk = abs(sig['entry_price'] - _init_sl)
@@ -1451,6 +1456,7 @@ def scan_for_symbol_logic(symbol, name, precision, ohlcv_1d, l1_timeline, now_ut
                     'l2_bottom_date':  '—',
                     'max_tp_stage':    -1,
                     'real_rr':         0.0,
+                    'max_rr':          0.0,
                 })
 
         current_price = float(df_1d['close'].iloc[-1]) if not df_1d.empty else 0.0
@@ -2477,24 +2483,24 @@ HTML_TEMPLATE = """
             <div class="detail-value">${sig.l1_date || '—'}</div>
           </div>
           <div class="detail-block">
-            <div class="detail-label">界線價格(T1)</div>
-            <div class="detail-value">${sig.l2_top > 0 ? sig.l2_top : '—'}</div>
+            <div class="detail-label">1D頂點時間</div>
+            <div class="detail-value">${sig.l2_top > 0 ? (sig.l2_top_date||'—') : '—'}</div>
           </div>
           <div class="detail-block">
-            <div class="detail-label">界線確立(B2)</div>
+            <div class="detail-label">1D底點確立(B2)</div>
             <div class="detail-value">${fmt(sig.l2_date)}</div>
           </div>
           <div class="detail-block">
-            <div class="detail-label">3H觸發時間</div>
+            <div class="detail-label">1D突破時間</div>
             <div class="detail-value">${fmt(sig.l3_date)}</div>
           </div>
           <div class="detail-block">
-            <div class="detail-label">3H頂點時間</div>
-            <div class="detail-value">${sig.l2_top > 0 ? (sig.l2_top_date||'—') + ' (' + fmt(sig.l2_top, prec) + ')' : '—'}</div>
+            <div class="detail-label">界線價格</div>
+            <div class="detail-value">${sig.l2_top > 0 ? fmt(sig.l2_top, prec) : '—'}</div>
           </div>
           <div class="detail-block">
-            <div class="detail-label">3H底點時間</div>
-            <div class="detail-value">${sig.l2_bottom !== null && sig.l2_bottom !== 'inf' && sig.l2_bottom !== 'Infinity' && sig.l2_bottom < 9999999 ? (sig.l2_bottom_date||'—') + ' (' + fmt(sig.l2_bottom, prec) + ')' : '—'}</div>
+            <div class="detail-label">曾達最高RR</div>
+            <div class="detail-value" style="color:${(sig.max_rr||0)>=1?'#3fb950':'#8b949e'}">${sig.max_rr != null ? '+' + Number(sig.max_rr||0).toFixed(2) + 'R' : '—'}</div>
           </div>
         </div>
         <div class="card-grid" style="margin-top: 12px;">
@@ -2607,24 +2613,24 @@ HTML_TEMPLATE = """
             <div class="detail-value">${sig.l1_date || '—'}</div>
           </div>
           <div class="detail-block">
-            <div class="detail-label">界線價格(T1)</div>
-            <div class="detail-value">${sig.l2_top > 0 ? sig.l2_top : '—'}</div>
+            <div class="detail-label">1D頂點時間</div>
+            <div class="detail-value">${sig.l2_top > 0 ? (sig.l2_top_date||'—') : '—'}</div>
           </div>
           <div class="detail-block">
-            <div class="detail-label">界線確立(B2)</div>
+            <div class="detail-label">1D底點確立(B2)</div>
             <div class="detail-value">${fmt(sig.l2_date)}</div>
           </div>
           <div class="detail-block">
-            <div class="detail-label">3H觸發時間</div>
+            <div class="detail-label">1D突破時間</div>
             <div class="detail-value">${fmt(sig.l3_date)}</div>
           </div>
           <div class="detail-block">
-            <div class="detail-label">3H頂點時間</div>
-            <div class="detail-value">${sig.l2_top > 0 ? (sig.l2_top_date||'—') + ' (' + fmt(sig.l2_top, prec) + ')' : '—'}</div>
+            <div class="detail-label">界線價格</div>
+            <div class="detail-value">${sig.l2_top > 0 ? fmt(sig.l2_top, prec) : '—'}</div>
           </div>
           <div class="detail-block">
-            <div class="detail-label">3H底點時間</div>
-            <div class="detail-value">${sig.l2_bottom !== null && sig.l2_bottom !== 'inf' && sig.l2_bottom !== 'Infinity' && sig.l2_bottom < 9999999 ? (sig.l2_bottom_date||'—') + ' (' + fmt(sig.l2_bottom, prec) + ')' : '—'}</div>
+            <div class="detail-label">曾達最高RR</div>
+            <div class="detail-value" style="color:${(sig.max_rr||0)>=1?'#3fb950':'#8b949e'}">${sig.max_rr != null ? '+' + Number(sig.max_rr||0).toFixed(2) + 'R' : '—'}</div>
           </div>
         </div>
         <div class="card-grid" style="margin-top: 12px;">
@@ -2683,20 +2689,16 @@ HTML_TEMPLATE = """
             <div class="detail-value">${sig.l1_date || '—'}</div>
           </div>
           <div class="detail-block">
-            <div class="detail-label">界線價格(T1)</div>
-            <div class="detail-value">${sig.l2_top > 0 ? sig.l2_top : '—'}</div>
-          </div>
-          <div class="detail-block">
-            <div class="detail-label">界線確立(B2)</div>
-            <div class="detail-value">${sig.l2_date || '—'}</div>
-          </div>
-          <div class="detail-block">
-            <div class="detail-label">3H頂點時間</div>
+            <div class="detail-label">1D頂點時間</div>
             <div class="detail-value">${topStr}</div>
           </div>
           <div class="detail-block">
-            <div class="detail-label">3H底點時間</div>
-            <div class="detail-value">${botStr}</div>
+            <div class="detail-label">1D底點確立(B2)</div>
+            <div class="detail-value">${sig.l2_date || '—'}</div>
+          </div>
+          <div class="detail-block">
+            <div class="detail-label">界線價格</div>
+            <div class="detail-value">${sig.l2_top > 0 ? fmt(sig.l2_top, 4) : '—'}</div>
           </div>
         </div>
       </div>`;
