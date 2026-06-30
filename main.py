@@ -1548,13 +1548,7 @@ async def process_symbol(exchange, symbol, name, precision, current_idx, total_c
         if not current_l1_ok:
             return None
 
-        if not intervals:
-            return None
-
-        last_interval = intervals[-1]
-        ohlcv_1h = await fetch_history_for_intervals(exchange, symbol, [last_interval], timeframe='1h', limit=1000, max_pages_per_interval=10)
-
-        return scan_for_symbol_logic(symbol, name, precision, ohlcv_1d, ohlcv_1h, l1_timeline, now_utc)
+        return scan_for_symbol_logic(symbol, name, precision, ohlcv_1d, l1_timeline, now_utc)
     except Exception as e:
         logger.warning(f"掃描異常 ({symbol}): {type(e).__name__}: {e}")
         return None
