@@ -2326,8 +2326,21 @@ HTML_TEMPLATE = """
   function updateStats() {
     if (currentView === 'signals') {
       let activeSigs = 0, closedSigs = 0, totalRR = 0;
+      let rrCounts = { 10:0, 20:0, 30:0, 40:0, 50:0, 60:0, 70:0, 80:0, 90:0, 100:0 };
       Object.values(allData).forEach(sigs => {
         sigs.forEach(s => {
+          const maxRR = s.max_rr ? parseFloat(s.max_rr) : 0;
+          if (maxRR >= 100) rrCounts[100]++;
+          else if (maxRR >= 90) rrCounts[90]++;
+          else if (maxRR >= 80) rrCounts[80]++;
+          else if (maxRR >= 70) rrCounts[70]++;
+          else if (maxRR >= 60) rrCounts[60]++;
+          else if (maxRR >= 50) rrCounts[50]++;
+          else if (maxRR >= 40) rrCounts[40]++;
+          else if (maxRR >= 30) rrCounts[30]++;
+          else if (maxRR >= 20) rrCounts[20]++;
+          else if (maxRR >= 10) rrCounts[10]++;
+
           if (s.status === 'closed') { 
             closedSigs++; 
             totalRR += s.real_rr !== undefined ? parseFloat(s.real_rr) : -1.0; 
@@ -2348,11 +2361,20 @@ HTML_TEMPLATE = """
       const winRate = totalSigs > 0 ? ((totalSigs - closedSigs) / totalSigs * 100).toFixed(1) : 0;
       const rrText = totalRR >= 0 ? `+${totalRR.toFixed(2)}` : `${totalRR.toFixed(2)}`;
       const rrColor = totalRR >= 0 ? '#3fb950' : '#f85149';
+      
+      let rrStatsHtml = Object.keys(rrCounts).sort((a,b)=>parseInt(a)-parseInt(b)).map(k => {
+        if (rrCounts[k] > 0) return `<span style="display:inline-block; margin-right:8px; padding:2px 6px; background:rgba(63,185,80,0.1); color:#3fb950; border-radius:4px; font-size:0.75rem;">${k}R: ${rrCounts[k]}筆</span>`;
+        return '';
+      }).join('');
+
       document.getElementById('global-stats').innerHTML = `
-        <span>📊 總訊號數：<strong style="color:#58a6ff">${totalSigs}</strong></span>
-        <span>❌ 止損：<strong style="color:#f85149">${closedSigs}</strong></span>
-        <span>🏆 勝率：<strong style="color:#3fb950">${winRate}%</strong></span>
-        <span>💰 訊號總 RR：<strong style="color:${rrColor}">${rrText}</strong></span>
+        <div style="width: 100%; display: flex; gap: 15px; flex-wrap: wrap; margin-bottom: 8px;">
+          <span>📊 總訊號數：<strong style="color:#58a6ff">${totalSigs}</strong></span>
+          <span>❌ 止損：<strong style="color:#f85149">${closedSigs}</strong></span>
+          <span>🏆 勝率：<strong style="color:#3fb950">${winRate}%</strong></span>
+          <span>💰 訊號總 RR：<strong style="color:${rrColor}">${rrText}</strong></span>
+        </div>
+        ${rrStatsHtml ? `<div style="width: 100%; display: flex; gap: 4px; flex-wrap: wrap;">🎯 目標達成：${rrStatsHtml}</div>` : ''}
       `;
     }   }
 
@@ -2482,16 +2504,16 @@ HTML_TEMPLATE = """
             <div class="detail-value">${sig.l1_date || '—'}</div>
           </div>
           <div class="detail-block">
+            <div class="detail-label">1D突破時間</div>
+            <div class="detail-value">${fmt(sig.l3_date)}</div>
+          </div>
+          <div class="detail-block">
             <div class="detail-label">1D頂點時間</div>
             <div class="detail-value">${sig.l2_top > 0 ? (sig.l2_top_date||'—') : '—'}</div>
           </div>
           <div class="detail-block">
             <div class="detail-label">1D底點確立(B2)</div>
             <div class="detail-value">${fmt(sig.l2_date)}</div>
-          </div>
-          <div class="detail-block">
-            <div class="detail-label">1D突破時間</div>
-            <div class="detail-value">${fmt(sig.l3_date)}</div>
           </div>
           <div class="detail-block">
             <div class="detail-label">界線價格</div>
@@ -2612,16 +2634,16 @@ HTML_TEMPLATE = """
             <div class="detail-value">${sig.l1_date || '—'}</div>
           </div>
           <div class="detail-block">
+            <div class="detail-label">1D突破時間</div>
+            <div class="detail-value">${fmt(sig.l3_date)}</div>
+          </div>
+          <div class="detail-block">
             <div class="detail-label">1D頂點時間</div>
             <div class="detail-value">${sig.l2_top > 0 ? (sig.l2_top_date||'—') : '—'}</div>
           </div>
           <div class="detail-block">
             <div class="detail-label">1D底點確立(B2)</div>
             <div class="detail-value">${fmt(sig.l2_date)}</div>
-          </div>
-          <div class="detail-block">
-            <div class="detail-label">1D突破時間</div>
-            <div class="detail-value">${fmt(sig.l3_date)}</div>
           </div>
           <div class="detail-block">
             <div class="detail-label">界線價格</div>
