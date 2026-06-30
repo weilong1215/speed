@@ -2610,7 +2610,11 @@ HTML_TEMPLATE = """
             <div class="detail-value">${sig.l1_date || '—'}</div>
           </div>
           <div class="detail-block">
-            <div class="detail-label">3D紅吞時間</div>
+            <div class="detail-label">界線價格(T1)</div>
+            <div class="detail-value">${sig.l2_top > 0 ? sig.l2_top : '—'}</div>
+          </div>
+          <div class="detail-block">
+            <div class="detail-label">界線確立(B2)</div>
             <div class="detail-value">${fmt(sig.l2_date)}</div>
           </div>
           <div class="detail-block">
@@ -2736,7 +2740,11 @@ HTML_TEMPLATE = """
             <div class="detail-value">${sig.l1_date || '—'}</div>
           </div>
           <div class="detail-block">
-            <div class="detail-label">3D紅吞時間</div>
+            <div class="detail-label">界線價格(T1)</div>
+            <div class="detail-value">${sig.l2_top > 0 ? sig.l2_top : '—'}</div>
+          </div>
+          <div class="detail-block">
+            <div class="detail-label">界線確立(B2)</div>
             <div class="detail-value">${fmt(sig.l2_date)}</div>
           </div>
           <div class="detail-block">
@@ -2808,7 +2816,11 @@ HTML_TEMPLATE = """
             <div class="detail-value">${sig.l1_date || '—'}</div>
           </div>
           <div class="detail-block">
-            <div class="detail-label">3D紅吞時間</div>
+            <div class="detail-label">界線價格(T1)</div>
+            <div class="detail-value">${sig.l2_top > 0 ? sig.l2_top : '—'}</div>
+          </div>
+          <div class="detail-block">
+            <div class="detail-label">界線確立(B2)</div>
             <div class="detail-value">${sig.l2_date || '—'}</div>
           </div>
           <div class="detail-block">
