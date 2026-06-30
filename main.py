@@ -1610,14 +1610,13 @@ async def run_history_scan_worker():
                 ohlcv_1d = sorted({b[0]: b for b in ohlcv_1d}.values(), key=lambda x: x[0])
                 
                 intervals, l1_timeline, l2_timeline = get_active_intervals(ohlcv_1d, now_utc)
-                if intervals:
-                    # 全用 1D 算，超級快，不用再拉 1H
-                    res = scan_for_symbol_logic(sym, get_base_coin(sym), precisions.get(sym, 4), ohlcv_1d, l1_timeline, now_utc)
-                    if res and 'historical_c2s' in res:
-                        all_past_events.extend(res['historical_c2s'])
+                # 全用 1D 算，超級快，不用再拉 1H
+                res = scan_for_symbol_logic(sym, get_base_coin(sym), precisions.get(sym, 4), ohlcv_1d, l1_timeline, now_utc)
+                if res and 'historical_c2s' in res:
+                    all_past_events.extend(res['historical_c2s'])
             except Exception as e:
                 logger.error(f"歷史掃描異常 ({sym}): {e}")
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(0.1)
             if idx % 10 == 0: logger.info(f"⏳ 歷史掃描進度: {idx}/{total}")
             
         HISTORY_FULL_FILE = os.path.join(DATA_DIR, "history_signals_full.json")
