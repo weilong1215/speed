@@ -1421,7 +1421,9 @@ def scan_for_symbol_logic(symbol, name, precision, ohlcv_1d, l1_timeline, now_ut
 
             bd = get_active_boundary(c_ts)
             if bd is None: continue
-            if bd['l1_start_ts'] != l1_start_ts: continue
+
+            # 確認這根 K 棒在某個有效的 L1 (18D 紅吞) 保護期內
+            if not is_l1_valid: continue
 
             boundary_level = bd['level']
             if c_open < boundary_level and c_close > boundary_level:
