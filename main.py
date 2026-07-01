@@ -1190,12 +1190,6 @@ def build_18d_black_swallow_boundaries(df_18d_closed):
     return boundaries, is_latest_red_swallow
 
 
-def get_swallow(c_close, p_open, p_close):
-    p_body_high = max(p_open, p_close)
-    p_body_low  = min(p_open, p_close)
-    if c_close > p_body_high: return 'RED'
-    elif c_close < p_body_low: return 'BLACK'
-    return 'NONE'
 
 
 def get_status(target_ts, timeline):
@@ -1206,76 +1200,180 @@ def get_status(target_ts, timeline):
     return True, "新幣首發", 0
 
 
+def get_swallow(c_close, p_open, p_close):
+    p_body_high = max(p_open, p_close)
+    p_body_low  = min(p_open, p_close)
+    if c_close > p_body_high: return 'RED'
+    elif c_close < p_body_low: return 'BLACK'
+    return 'NONE'
+
+def build_timeline(df_closed):
+    import pandas as pd
+    timeline = []
+    current_valid = True
+    current_start = 0
+    current_date = "新幣首發"
+    for i in range(1, len(df_closed)):
+        _prev = df_closed.iloc[i-1]
+        _curr = df_closed.iloc[i]
+        sw = get_swallow(_curr['close'], _prev['open'], _prev['close'])
+        c_ts = int(_curr['close_ts'])
+        if sw == 'RED':
+            if not current_valid or current_date == "新幣首發":
+                if not current_valid:
+                    timeline.append({'start': current_start, 'end': c_ts, 'valid': False, 'date': "未知"})
+                current_valid = True
+                current_start = c_ts
+                current_date = pd.to_datetime(int(_curr['ts']), unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d')
+        elif sw == 'BLACK':
+            if current_valid:
+                timeline.append({'start': current_start, 'end': c_ts, 'valid': True, 'date': current_date})
+                current_valid = False
+                current_start = c_ts
+                current_date = "未知"
+    timeline.append({'start': current_start, 'end': float('inf'), 'valid': current_valid, 'date': current_date})
+    return timeline
+
+def build_1d_structure_global(df_1d):
+    import pandas as pd
+    boundaries = []
+    state = 'NONE'
+    temp_high = -1.0; temp_high_ts = 0; temp_high_date = ''
+    temp_low = float('inf'); temp_low_ts = 0; temp_low_date = ''
+    
+    current_valid_top = -1.0
+    current_valid_top_date = ''
+    current_valid_bottom = float('inf')
+    current_valid_bottom_date = ''
+    
+    def _fmt_ts(ts_ms):
+        return pd.to_datetime(int(ts_ms), unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d')
+        
+    for i in range(1, len(df_1d)):
+        prev = df_1d.iloc[i-1]
+        curr = df_1d.iloc[i]
+        c_high = float(curr['high'])
+        c_low = float(curr['low'])
+        c_close = float(curr['close'])
+        c_ts = int(curr['ts'])
+        c_close_ts = int(curr['close_ts'])
+        c_date = _fmt_ts(c_ts)
+        
+        sw = get_swallow(c_close, prev['open'], prev['close'])
+        prev_state = state
+        if sw == 'RED': state = 'RED'
+        elif sw == 'BLACK': state = 'BLACK'
+        
+        state_changed = (prev_state != state)
+        if state_changed:
+            if state == 'RED':
+                current_valid_bottom = temp_low
+                current_valid_bottom_date = temp_low_date
+                temp_high = -1.0
+            elif state == 'BLACK':
+                current_valid_top = temp_high
+                current_valid_top_date = temp_high_date
+                boundaries.append({
+                    'level': current_valid_top,
+                    'from_ts': c_close_ts,
+                    't1_date': current_valid_top_date,
+                    'b2_level': current_valid_bottom,
+                    'b2_date': current_valid_bottom_date
+                })
+                temp_low = float('inf')
+                
+        if state == 'RED':
+            if c_high > temp_high:
+                temp_high = c_high; temp_high_ts = c_ts; temp_high_date = c_date
+        elif state == 'BLACK':
+            if c_low < temp_low:
+                temp_low = c_low; temp_low_ts = c_ts; temp_low_date = c_date
+                
+    return boundaries
+
 def scan_for_symbol_logic(symbol, name, precision, ohlcv_1d, ohlcv_1h, now_utc):
     import logging
+    import pandas as pd
     logger = logging.getLogger("SPEED")
     try:
         def _fmt(ts_ms, fmt='%Y-%m-%d'):
             return pd.to_datetime(int(ts_ms), unit='ms', utc=True).tz_convert('Asia/Taipei').strftime(fmt)
+            
+        def get_status(target_ts, timeline):
+            if not timeline: return True, "新幣首發", 0
+            for block in timeline:
+                if block['start'] <= target_ts < block['end']:
+                    return block['valid'], block['date'], block['start']
+            return True, "新幣首發", 0
 
+        # Build 18D Timeline
+        from main import compose_18d_bars
         ohlcv_18d = compose_18d_bars(ohlcv_1d)
         if not ohlcv_18d: return None
         df_18d = pd.DataFrame(ohlcv_18d, columns=['ts', 'open', 'high', 'low', 'close', 'vol', 'close_ts'])
         df_18d_closed = df_18d[df_18d['close_ts'] <= now_utc].reset_index(drop=True)
+        l1_timeline = build_timeline(df_18d_closed)
 
-        ohlcv_3h = compose_3h_bars(ohlcv_1h)
-        if not ohlcv_3h: return None
-        df_3h = pd.DataFrame(ohlcv_3h, columns=['ts', 'open', 'high', 'low', 'close', 'vol', 'close_ts'])
-        df_3h_closed = df_3h[df_3h['close_ts'] <= now_utc].reset_index(drop=True)
+        # Build 1D Boundaries
+        df_1d = pd.DataFrame(ohlcv_1d, columns=['ts', 'open', 'high', 'low', 'close', 'vol'])
+        df_1d['close_ts'] = df_1d['ts'] + 24 * 3600 * 1000
+        df_1d_closed = df_1d[df_1d['close_ts'] <= now_utc].reset_index(drop=True)
+        if df_1d_closed.empty: return None
+        
+        all_boundaries = build_1d_structure_global(df_1d_closed)
+
+        def get_active_boundary(c_ts):
+            matched = None
+            for bd in all_boundaries:
+                if bd['from_ts'] <= c_ts:
+                    matched = bd
+            return matched
 
         all_historical_c2s = []
         active_signal = None
-        current_boundary = None
-        
-        idx_18d = 0
-        n_18d = len(df_18d_closed)
 
-        for row_idx in range(len(df_3h_closed)):
-            row = df_3h_closed.iloc[row_idx]
-            c_ts       = int(row['ts'])
-            c_close_ts = int(row['close_ts'])
-            c_open     = float(row['open'])
-            c_close    = float(row['close'])
-            c_low      = float(row['low'])
-            c_high     = float(row['high'])
-            c_date     = _fmt(c_ts, '%Y-%m-%d %H:%M')
+        for i in range(1, len(df_1d_closed)):
+            _curr = df_1d_closed.iloc[i]
+            c_high     = float(_curr['high'])
+            c_low      = float(_curr['low'])
+            c_close    = float(_curr['close'])
+            c_open     = float(_curr['open'])
+            c_date     = _fmt(int(_curr['ts']))
+            c_ts       = int(_curr['ts'])
+            c_close_ts = int(_curr['close_ts'])
 
-            while idx_18d < n_18d and int(df_18d_closed.iloc[idx_18d]['close_ts']) <= c_ts:
-                curr_18d = df_18d_closed.iloc[idx_18d]
-                if idx_18d > 0:
-                    prev_18d = df_18d_closed.iloc[idx_18d - 1]
-                    sw = get_swallow(float(curr_18d['close']), float(prev_18d['open']), float(prev_18d['close']))
-                    
-                    if sw == 'BLACK':
-                        if active_signal:
-                            _init_sl = active_signal.get('initial_sl', active_signal['stop_loss'])
-                            _risk    = abs(active_signal['entry_price'] - _init_sl)
-                            active_signal['status'] = 'closed'
-                            active_signal['exit_type'] = 'black_swallow_18d'
-                            _exit_price = float(curr_18d['close'])
-                            active_signal['real_rr'] = (_exit_price - active_signal['entry_price']) / _risk if _risk > 0 else 0.0
-                            active_signal = None
-                            
-                        current_boundary = {
-                            'level': float(curr_18d['high']),
-                            'date': _fmt(int(curr_18d['ts'])),
-                            'from_ts': int(curr_18d['close_ts'])
-                        }
-                    elif sw == 'RED':
-                        if active_signal:
-                            _l_low = float(curr_18d['low'])
-                            _cur_trailing = float(active_signal.get('trailing_sl', -1.0))
-                            if _l_low > float(active_signal['entry_price']) and (_cur_trailing < 0 or _l_low > _cur_trailing):
-                                active_signal['trailing_sl'] = _l_low
-                                active_signal['trailing_sl_date'] = _fmt(int(curr_18d['ts']))
-                
-                idx_18d += 1
+            is_l1_valid, l1_dt_str, l1_start_ts = get_status(c_close_ts, l1_timeline)
 
             if active_signal:
-                _trailing     = active_signal.get('trailing_sl')
+                _closed_18d = df_18d_closed[df_18d_closed['close_ts'] <= c_ts]
+                if len(_closed_18d) >= 2:
+                    _last_18d = _closed_18d.iloc[-1]
+                    _prev_18d = _closed_18d.iloc[-2]
+                    
+                    if int(_last_18d['close_ts']) > active_signal['trigger_ts']:
+                        _l_close = float(_last_18d['close'])
+                        _l_low = float(_last_18d['low'])
+                        _p_body_high = max(float(_prev_18d['open']), float(_prev_18d['close']))
+                        _p_body_low = min(float(_prev_18d['open']), float(_prev_18d['close']))
+                        
+                        _cur_trailing = float(active_signal.get('trailing_sl', -1.0))
+                        
+                        if _l_close < _p_body_low:
+                            _init_sl = active_signal.get('initial_sl', active_signal['stop_loss'])
+                            _risk = abs(active_signal['entry_price'] - _init_sl)
+                            active_signal['status'] = 'closed'
+                            active_signal['exit_type'] = 'black_swallow'
+                            active_signal['real_rr'] = (_p_body_low - active_signal['entry_price']) / _risk if _risk > 0 else 0.0
+                            active_signal = None
+                        elif _l_close > _p_body_high and _l_low > float(active_signal['entry_price']) and (_cur_trailing < 0 or _l_low > _cur_trailing):
+                            active_signal['trailing_sl'] = _l_low
+                            active_signal['trailing_sl_date'] = _fmt(int(_last_18d['ts']))
+                            
+            if active_signal:
+                _trailing = active_signal.get('trailing_sl')
                 _effective_sl = _trailing if _trailing is not None else active_signal['stop_loss']
-                _init_sl      = active_signal.get('initial_sl', active_signal['stop_loss'])
-                _base_risk    = abs(active_signal['entry_price'] - _init_sl)
+                _init_sl = active_signal.get('initial_sl', active_signal['stop_loss'])
+                _base_risk = abs(active_signal['entry_price'] - _init_sl)
                 
                 if _base_risk > 0:
                     _cur_rr = (c_high - active_signal['entry_price']) / _base_risk
@@ -1293,62 +1391,72 @@ def scan_for_symbol_logic(symbol, name, precision, ohlcv_1d, ohlcv_1h, now_utc):
                     active_signal['real_rr'] = 100.0
                     active_signal['exit_type'] = 'tp100'
                     active_signal = None
-                    
-            if not active_signal and current_boundary:
-                if c_open < current_boundary['level'] and c_close > current_boundary['level']:
+
+            if not active_signal:
+                if not is_l1_valid: continue
+                
+                bd = get_active_boundary(c_ts)
+                if not bd: continue
+                
+                boundary_level = bd['level']
+                if c_open < boundary_level and c_close > boundary_level:
                     new_sig = {
-                        'symbol':           symbol,
+                        'symbol': symbol,
                         'l1_18d_direction': 'LONG',
-                        'l1_date':          current_boundary['date'],
-                        'l2_top':           current_boundary['level'],
-                        'l3_date':          c_date,
-                        'entry_price':      c_close,
-                        'stop_loss':        c_low,
-                        'initial_sl':       c_low,
-                        'trigger_ts':       c_ts,
-                        'precision':        precision,
-                        'status':           'active',
-                        'has_entered':      True,
-                        'real_rr':          0.0,
-                        'max_rr':           0.0,
+                        'l1_date': l1_dt_str,
+                        'l1_open_ts': l1_start_ts,
+                        'l3_date': c_date,
+                        'l2_top_date': bd['t1_date'],
+                        'l2_top': bd['level'],
+                        'l2_bottom_date': bd['b2_date'],
+                        'l2_bottom': bd['b2_level'],
+                        'entry_price': c_close,
+                        'stop_loss': c_low,
+                        'initial_sl': c_low,
+                        'trigger_ts': c_ts,
+                        'precision': precision,
+                        'status': 'active',
+                        'has_entered': True,
+                        'real_rr': 0.0,
+                        'max_rr': 0.0
                     }
                     all_historical_c2s.append(new_sig)
                     active_signal = new_sig
 
-        _df_1d_tmp = pd.DataFrame(ohlcv_1d, columns=['ts', 'open', 'high', 'low', 'close', 'vol'])
-        current_price = float(_df_1d_tmp['close'].iloc[-1]) if not _df_1d_tmp.empty else 0.0
+        current_price = float(df_1d['close'].iloc[-1]) if not df_1d.empty else 0.0
         for c2 in all_historical_c2s:
             c2['current_price'] = current_price
 
         is_trigger_met = active_signal is not None
+        current_l1_ok, current_l1_date, current_l1_ts = get_status(now_utc, l1_timeline)
         
-        is_latest_red = False
-        if n_18d >= 2:
-            last = df_18d_closed.iloc[-1]
-            prev = df_18d_closed.iloc[-2]
-            if get_swallow(float(last['close']), float(prev['open']), float(prev['close'])) == 'RED':
-                is_latest_red = True
-
-        is_watchlist_eligible = (current_boundary is not None) and (not is_latest_red)
-        final_state   = 'triggered' if is_trigger_met else ('l2_watching' if is_watchlist_eligible else 'l1_waiting')
-        cache_ts      = active_signal['trigger_ts'] if active_signal else 0
-
+        current_boundary = get_active_boundary(now_utc)
+        if current_boundary and not current_l1_ok:
+            current_boundary = None
+            
+        final_state = 'triggered' if is_trigger_met else ('l2_watching' if current_boundary else 'l1_waiting')
+        
+        cache_ts = active_signal['trigger_ts'] if active_signal else 0
+        
         return {
             'symbol':                symbol,
             'action':                'update',
             'data':                  {'ts': cache_ts},
             'is_trigger_met':        is_trigger_met,
-            'is_watchlist_eligible': is_watchlist_eligible,
+            'is_watchlist_eligible': current_l1_ok,
             'entry_price':           active_signal['entry_price'] if active_signal else 0.0,
             'stop_loss':             active_signal['stop_loss'] if active_signal else 0.0,
             'trigger_ts':            cache_ts,
             'precision':             precision,
             'l1_18d_direction':      'LONG',
-            'l1_date':               active_signal['l1_date'] if active_signal else (current_boundary['date'] if current_boundary else '未知'),
-            'l2_top':                active_signal['l2_top'] if active_signal else (current_boundary['level'] if current_boundary else -1.0),
+            'l1_date':               active_signal['l1_date'] if active_signal else (current_l1_date if current_l1_ok else '未知'),
             'l3_date':               active_signal['l3_date'] if active_signal else '未知',
             'scan_state':            final_state,
             'historical_c2s':        all_historical_c2s,
+            'l2_top':                active_signal['l2_top'] if active_signal else (current_boundary['level'] if current_boundary else -1.0),
+            'l2_top_date':           active_signal['l2_top_date'] if active_signal else (current_boundary['t1_date'] if current_boundary else '未知'),
+            'l2_bottom':             active_signal['l2_bottom'] if active_signal else (current_boundary['b2_level'] if current_boundary else -1.0),
+            'l2_bottom_date':        active_signal['l2_bottom_date'] if active_signal else (current_boundary['b2_date'] if current_boundary else '未知'),
         }
     except Exception as e:
         logger.warning(f"掃描異常 ({symbol}): {type(e).__name__}: {e}")
@@ -2336,16 +2444,28 @@ HTML_TEMPLATE = """
         </div>
         <div class="card-grid">
           <div class="detail-block">
-            <div class="detail-label">18D黑吞日期</div>
+            <div class="detail-label">18D紅吞時間</div>
             <div class="detail-value">${sig.l1_date || '—'}</div>
           </div>
           <div class="detail-block">
-            <div class="detail-label">18D黑吞界線</div>
+            <div class="detail-label">1D突破時間</div>
+            <div class="detail-value">${fmt(sig.l3_date)}</div>
+          </div>
+          <div class="detail-block">
+            <div class="detail-label">1D頂點時間</div>
+            <div class="detail-value">${sig.l2_top > 0 ? (sig.l2_top_date||'—') : '—'}</div>
+          </div>
+          <div class="detail-block">
+            <div class="detail-label">界線價格(頂)</div>
             <div class="detail-value">${sig.l2_top > 0 ? fmt(sig.l2_top, prec) : '—'}</div>
           </div>
           <div class="detail-block">
-            <div class="detail-label">3H突破時間</div>
-            <div class="detail-value">${fmt(sig.l3_date)}</div>
+            <div class="detail-label">1D底點時間</div>
+            <div class="detail-value">${sig.l2_bottom_date || '—'}</div>
+          </div>
+          <div class="detail-block">
+            <div class="detail-label">底點價格</div>
+            <div class="detail-value">${sig.l2_bottom > 0 && sig.l2_bottom != Infinity ? fmt(sig.l2_bottom, prec) : '—'}</div>
           </div>
           <div class="detail-block">
             <div class="detail-label">曾達最高RR</div>
@@ -2458,16 +2578,28 @@ HTML_TEMPLATE = """
         </div>
         <div class="card-grid">
           <div class="detail-block">
-            <div class="detail-label">18D黑吞日期</div>
+            <div class="detail-label">18D紅吞時間</div>
             <div class="detail-value">${sig.l1_date || '—'}</div>
           </div>
           <div class="detail-block">
-            <div class="detail-label">18D黑吞界線</div>
+            <div class="detail-label">1D突破時間</div>
+            <div class="detail-value">${fmt(sig.l3_date)}</div>
+          </div>
+          <div class="detail-block">
+            <div class="detail-label">1D頂點時間</div>
+            <div class="detail-value">${sig.l2_top > 0 ? (sig.l2_top_date||'—') : '—'}</div>
+          </div>
+          <div class="detail-block">
+            <div class="detail-label">界線價格(頂)</div>
             <div class="detail-value">${sig.l2_top > 0 ? fmt(sig.l2_top, prec) : '—'}</div>
           </div>
           <div class="detail-block">
-            <div class="detail-label">3H突破時間</div>
-            <div class="detail-value">${fmt(sig.l3_date)}</div>
+            <div class="detail-label">1D底點時間</div>
+            <div class="detail-value">${sig.l2_bottom_date || '—'}</div>
+          </div>
+          <div class="detail-block">
+            <div class="detail-label">底點價格</div>
+            <div class="detail-value">${sig.l2_bottom > 0 && sig.l2_bottom != Infinity ? fmt(sig.l2_bottom, prec) : '—'}</div>
           </div>
           <div class="detail-block">
             <div class="detail-label">曾達最高RR</div>
