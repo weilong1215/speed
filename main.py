@@ -1271,38 +1271,46 @@ def build_timeline(df_closed):
 
 def build_1d_structure_global(df_1d):
     """
-    回復舊版 pending 邏輯，完美解決連續多重盤整未能正確判定頂底的問題
+    日線鋸齒結構（純轉折頂底），完全還原舊版 1D 頂底界線邏輯
     """
     import pandas as pd
-
-    def _fmt(ts_ms):
-        return pd.to_datetime(int(ts_ms), unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d')
-
     boundaries = []
-    
+
+    if df_1d.empty:
+        return boundaries
+
     l2_state = 'NONE'
     temp_top = -1.0
     temp_bottom = float('inf')
-    temp_top_date = "未定"
-    temp_bottom_date = "未定"
+    temp_top_date = "未知"
+    temp_bottom_date = "未知"
     
     confirmed_top = -1.0
     confirmed_bottom = float('inf')
-    confirmed_top_date = "未定"
-    confirmed_bottom_date = "未定"
+    confirmed_top_date = "未知"
+    confirmed_bottom_date = "未知"
     
     pending_top = -1.0
-    pending_top_date = "未定"
+    pending_top_date = "未知"
     pending_bottom = float('inf')
-    pending_bottom_date = "未定"
+    pending_bottom_date = "未知"
 
-    if len(df_1d) > 0:
-        _first = df_1d.iloc[0]
-        _first_date = _fmt(_first['ts'])
-        temp_top = float(_first['high'])
-        temp_top_date = _first_date
-        temp_bottom = float(_first['low'])
-        temp_bottom_date = _first_date
+    _first = df_1d.iloc[0]
+    _first_date = pd.to_datetime(int(_first['ts']), unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d')
+    temp_top = float(_first['high'])
+    temp_top_date = _first_date
+    temp_bottom = float(_first['low'])
+    temp_bottom_date = _first_date
+
+    def push_boundary(c_ts):
+        if confirmed_top != -1.0:
+            boundaries.append({
+                'level': confirmed_top,
+                'from_ts': c_ts,
+                't1_date': confirmed_top_date,
+                'b2_level': confirmed_bottom,
+                'b2_date': confirmed_bottom_date
+            })
 
     for i in range(1, len(df_1d)):
         _prev = df_1d.iloc[i-1]
@@ -1313,7 +1321,7 @@ def build_1d_structure_global(df_1d):
         c_close = float(_curr['close'])
         c_ts = int(_curr['ts'])
         c_close_ts = int(_curr['close_ts'])
-        c_date = _fmt(c_ts)
+        c_date = pd.to_datetime(c_ts, unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d')
 
         sw = get_swallow(c_close, float(_prev['open']), float(_prev['close']))
         
@@ -1323,6 +1331,8 @@ def build_1d_structure_global(df_1d):
         elif sw == 'BLACK':
             l2_state = 'BLACK'
             
+        boundary_changed = False
+
         if prev_state != l2_state:
             if l2_state == 'RED':
                 if c_low < temp_bottom:
@@ -1334,6 +1344,7 @@ def build_1d_structure_global(df_1d):
                     confirmed_bottom_date = temp_bottom_date
                     pending_bottom = temp_bottom
                     pending_bottom_date = temp_bottom_date
+                    boundary_changed = True
                 else:
                     if temp_bottom < confirmed_bottom:
                         confirmed_bottom = temp_bottom
@@ -1342,16 +1353,10 @@ def build_1d_structure_global(df_1d):
                         if pending_top != -1.0:
                             confirmed_top = pending_top
                             confirmed_top_date = pending_top_date
-                            boundaries.append({
-                                'level': confirmed_top,
-                                'from_ts': c_close_ts,
-                                't1_date': confirmed_top_date,
-                                'b2_level': confirmed_bottom,
-                                'b2_date': confirmed_bottom_date
-                            })
-                            
+                        
                         pending_top = -1.0
                         pending_bottom = float('inf')
+                        boundary_changed = True
                     else:
                         if temp_bottom < pending_bottom:
                             pending_bottom = temp_bottom
@@ -1370,13 +1375,7 @@ def build_1d_structure_global(df_1d):
                     confirmed_top_date = temp_top_date
                     pending_top = temp_top
                     pending_top_date = temp_top_date
-                    boundaries.append({
-                        'level': confirmed_top,
-                        'from_ts': c_close_ts,
-                        't1_date': confirmed_top_date,
-                        'b2_level': confirmed_bottom,
-                        'b2_date': confirmed_bottom_date
-                    })
+                    boundary_changed = True
                 else:
                     if temp_top > confirmed_top:
                         confirmed_top = temp_top
@@ -1385,17 +1384,10 @@ def build_1d_structure_global(df_1d):
                         if pending_bottom != float('inf'):
                             confirmed_bottom = pending_bottom
                             confirmed_bottom_date = pending_bottom_date
-                            
-                        boundaries.append({
-                            'level': confirmed_top,
-                            'from_ts': c_close_ts,
-                            't1_date': confirmed_top_date,
-                            'b2_level': confirmed_bottom,
-                            'b2_date': confirmed_bottom_date
-                        })
                         
                         pending_top = -1.0
                         pending_bottom = float('inf')
+                        boundary_changed = True
                     else:
                         if temp_top > pending_top:
                             pending_top = temp_top
@@ -1412,6 +1404,9 @@ def build_1d_structure_global(df_1d):
                 if c_low < temp_bottom:
                     temp_bottom = c_low
                     temp_bottom_date = c_date
+
+        if boundary_changed:
+            push_boundary(c_close_ts)
 
     return boundaries
 
