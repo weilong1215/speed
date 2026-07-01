@@ -259,6 +259,34 @@ def _get_crypto_whitelist():
     return _crypto_whitelist_cache["symbols"]
 
 
+def compose_3h_bars(ohlcv_1h):
+    """將 1H OHLCV 合成 3H K 棒 (按 UTC 00:00, 03:00, 06:00 基準對齊)"""
+    if not ohlcv_1h:
+        return []
+
+    PERIOD_MS = 3 * 3600 * 1000
+    groups = {}
+    for bar in ohlcv_1h:
+        ts = bar[0]
+        # 使用 UTC epoch 計算
+        group_key = (ts // PERIOD_MS) * PERIOD_MS
+        if group_key not in groups:
+            groups[group_key] = []
+        groups[group_key].append(bar)
+
+    composed = []
+    sorted_keys = sorted(groups.keys())
+    for gk in sorted_keys:
+        bars = groups[gk]
+        c_open = bars[0][1]
+        c_high = max(b[2] for b in bars)
+        c_low = min(b[3] for b in bars)
+        c_close = bars[-1][4]
+        c_vol = sum(b[5] for b in bars)
+        composed.append([gk, c_open, c_high, c_low, c_close, c_vol, gk + PERIOD_MS])
+    return composed
+
+
 def compose_18d_bars(ohlcv_1d):
     """將 1D OHLCV 合成 18D K 棒 (按每年 1/1 起算)"""
     if not ohlcv_1d or len(ohlcv_1d) < 3:
@@ -1119,415 +1147,55 @@ async def monitor_positions(exchange):
 # ============================================================================
 
 
-def build_1d_structure_global(df_1d):
+def build_18d_black_swallow_boundaries(df_18d_closed):
     """
-    全域掃描 1D K 棒，追蹤基於「紅黑吞反轉 + 收盤價破底/破頂」的雙重確認市場結構。
-    回傳一個 boundaries 列表，每個元素代表一個有效頂（做多界線）：
-    {
-       'level': 有效頂的價格,
-       'from_ts': 這個有效頂被確認的 ts (此後生效),
-       'until_ts': 這個界線失效或被突破的 ts,
-       't1_date': 頂部日期,
-       'b2_date': 確認這個頂部的新底日期,
-    }
+    掃描所有已收盤的 18D K棒，找出所有黑吞棒並建立空頭界線。
+    黑吞定義：收盤價 < min(前棒 open, 前棒 close)
+    界線 = 此黑吞棒的最高點 (high)
+    回傳:
+        boundaries: list of {'level': float, 'from_ts': int, 'date': str}
+        is_latest_red_swallow: bool  (最新一根是否為紅吞，抑制新進場)
     """
     boundaries = []
-    
-    state = 'NONE'
-    temp_high = -1.0; temp_high_ts = 0; temp_high_date = ''
-    temp_low = float('inf'); temp_low_ts = 0; temp_low_date = ''
-    
-    current_valid_top = None
-    current_valid_bottom = None
-    
-    has_broken_bottom = False
-    has_broken_top = False
-    
-    highest_since_bottom = -1.0
-    highest_since_bottom_date = ''
-    
-    lowest_since_top = float('inf')
-    lowest_since_top_date = ''
-    
-    def _fmt_ts(ts_ms):
+    is_latest_red_swallow = False
+
+    if len(df_18d_closed) < 2:
+        return boundaries, is_latest_red_swallow
+
+    def _fmt(ts_ms):
         return pd.to_datetime(int(ts_ms), unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d')
-        
-    for i in range(1, len(df_1d)):
-        prev = df_1d.iloc[i-1]
-        curr = df_1d.iloc[i]
-        c_high = float(curr['high'])
-        c_low = float(curr['low'])
-        c_close = float(curr['close'])
-        c_ts = int(curr['ts'])
+
+    for i in range(1, len(df_18d_closed)):
+        prev = df_18d_closed.iloc[i - 1]
+        curr = df_18d_closed.iloc[i]
+        p_open  = float(prev['open']);  p_close = float(prev['close'])
+        c_high  = float(curr['high']);  c_close = float(curr['close'])
         c_close_ts = int(curr['close_ts'])
-        c_date = _fmt_ts(c_ts)
-        
-        sw = get_swallow(c_close, prev['open'], prev['close'])
-        prev_state = state
-        if sw == 'RED': state = 'RED'
-        elif sw == 'BLACK': state = 'BLACK'
-        
-        state_changed = (prev_state != state)
-        
-        if state == 'RED':
-            if c_high > temp_high:
-                temp_high = c_high; temp_high_ts = c_ts; temp_high_date = c_date
-            if c_high > highest_since_bottom:
-                highest_since_bottom = c_high; highest_since_bottom_date = c_date
-        elif state == 'BLACK':
-            if c_low < temp_low:
-                temp_low = c_low; temp_low_ts = c_ts; temp_low_date = c_date
-            if c_low < lowest_since_top:
-                lowest_since_top = c_low; lowest_since_top_date = c_date
-                
-        # Break checks must happen at close
-        if current_valid_bottom is not None and c_close < current_valid_bottom:
-            has_broken_bottom = True
-        if current_valid_top is not None and c_close > current_valid_top:
-            has_broken_top = True
-            # if we break the top, the current boundary is effectively broken/invalidated.
-            if len(boundaries) > 0 and boundaries[-1]['until_ts'] == float('inf'):
-                boundaries[-1]['until_ts'] = c_close_ts
 
-        if state_changed:
-            if state == 'RED':
-                # We completed a BLACK phase -> found a Trough
-                if c_low < temp_low:
-                    temp_low = c_low; temp_low_ts = c_ts; temp_low_date = c_date
-                if c_low < lowest_since_top:
-                    lowest_since_top = c_low; lowest_since_top_date = c_date
-                if current_valid_bottom is not None and c_close < current_valid_bottom:
-                    has_broken_bottom = True
+        p_body_low  = min(p_open, p_close)
+        p_body_high = max(p_open, p_close)
+        is_black = c_close < p_body_low
+        is_red   = c_close > p_body_high
 
-                trough = temp_low
-                trough_date = temp_low_date
-                
-                if current_valid_bottom is None:
-                    current_valid_bottom = trough
-                elif has_broken_bottom:
-                    # Confirmed True Bottom!
-                    current_valid_bottom = trough
-                    
-                    if current_valid_top is not None:
-                        # NEW Boundary (Top) is established
-                        current_valid_top = highest_since_bottom
-                        current_valid_top_date = highest_since_bottom_date
-                        
-                        # Close the previous boundary if still open
-                        if len(boundaries) > 0 and boundaries[-1]['until_ts'] == float('inf'):
-                            boundaries[-1]['until_ts'] = c_close_ts
-                            
-                        boundaries.append({
-                            'level': current_valid_top,
-                            'from_ts': c_close_ts,  # active from the moment the bottom is confirmed
-                            'until_ts': float('inf'),
-                            't1_date': current_valid_top_date,
-                            'b2_date': trough_date,  # the bottom that confirmed it
-                        })
-                        
-                    highest_since_bottom = -1.0
-                    has_broken_bottom = False
-                    has_broken_top = False
-                    lowest_since_top = trough
-                else:
-                    lowest_since_top = min(lowest_since_top, trough)
-                    
-                temp_high = c_high; temp_high_ts = c_ts; temp_high_date = c_date
-                temp_low = float('inf')
+        if is_black:
+            boundaries.append({
+                'level':   c_high,
+                'from_ts': c_close_ts,
+                'date':    _fmt(int(curr['ts'])),
+            })
 
-            elif state == 'BLACK':
-                # We completed a RED phase -> found a Peak
-                if c_high > temp_high:
-                    temp_high = c_high; temp_high_ts = c_ts; temp_high_date = c_date
-                if c_high > highest_since_bottom:
-                    highest_since_bottom = c_high; highest_since_bottom_date = c_date
-                if current_valid_top is not None and c_close > current_valid_top:
-                    has_broken_top = True
-                    if len(boundaries) > 0 and boundaries[-1]['until_ts'] == float('inf'):
-                        boundaries[-1]['until_ts'] = c_close_ts
+        if i == len(df_18d_closed) - 1:
+            is_latest_red_swallow = is_red
 
-                peak = temp_high
-                peak_date = temp_high_date
-                
-                if current_valid_top is None:
-                    current_valid_top = peak
-                    current_valid_top_date = peak_date
-                elif has_broken_top:
-                    # Confirmed True Top!
-                    current_valid_top = peak
-                    current_valid_top_date = peak_date
-                    
-                    if current_valid_bottom is not None:
-                        current_valid_bottom = lowest_since_top
-                        current_valid_bottom_date = lowest_since_top_date
-                        
-                        # New Boundary (Top) established due to Top Break confirmation
-                        if len(boundaries) > 0 and boundaries[-1]['until_ts'] == float('inf'):
-                            boundaries[-1]['until_ts'] = c_close_ts
-                            
-                        boundaries.append({
-                            'level': current_valid_top,
-                            'from_ts': c_close_ts,
-                            'until_ts': float('inf'),
-                            't1_date': current_valid_top_date,
-                            'b2_date': current_valid_bottom_date,
-                        })
-                        
-                    lowest_since_top = float('inf')
-                    has_broken_top = False
-                    has_broken_bottom = False
-                    highest_since_bottom = peak
-                else:
-                    highest_since_bottom = max(highest_since_bottom, peak)
+    return boundaries, is_latest_red_swallow
 
-                temp_low = c_low; temp_low_ts = c_ts; temp_low_date = c_date
-                temp_high = -1.0
-                
-    return boundaries
 
 def get_swallow(c_close, p_open, p_close):
     p_body_high = max(p_open, p_close)
-    p_body_low = min(p_open, p_close)
+    p_body_low  = min(p_open, p_close)
     if c_close > p_body_high: return 'RED'
     elif c_close < p_body_low: return 'BLACK'
     return 'NONE'
-
-def build_timeline(df_closed):
-    timeline = []
-    current_valid = True
-    current_start = 0
-    current_date = "新幣首發"
-    for i in range(1, len(df_closed)):
-        _prev = df_closed.iloc[i-1]
-        _curr = df_closed.iloc[i]
-        sw = get_swallow(_curr['close'], _prev['open'], _prev['close'])
-        c_ts = int(_curr['close_ts'])
-        if sw == 'RED':
-            if not current_valid or current_date == "新幣首發":
-                if not current_valid:
-                    timeline.append({'start': current_start, 'end': c_ts, 'valid': False, 'date': "未知"})
-                current_valid = True
-                current_start = c_ts
-                current_date = pd.to_datetime(int(_curr['ts']), unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d')
-        elif sw == 'BLACK':
-            if current_valid:
-                timeline.append({'start': current_start, 'end': c_ts, 'valid': True, 'date': current_date})
-                current_valid = False
-                current_start = c_ts
-                current_date = "未知"
-    timeline.append({'start': current_start, 'end': float('inf'), 'valid': current_valid, 'date': current_date})
-    return timeline
-
-def get_active_intervals(ohlcv_1d, now_utc):
-    if not ohlcv_1d or len(ohlcv_1d) < 3: return [], None, None
-    ohlcv_18d = compose_18d_bars(ohlcv_1d)
-    df_18d = pd.DataFrame(ohlcv_18d, columns=['ts', 'open', 'high', 'low', 'close', 'vol', 'close_ts']) if ohlcv_18d else pd.DataFrame(columns=['ts', 'open', 'high', 'low', 'close', 'vol', 'close_ts'])
-    df_18d_closed = df_18d[df_18d['close_ts'] <= now_utc].reset_index(drop=True)
-    l1_timeline = build_timeline(df_18d_closed)
-
-    return [], l1_timeline, None
-
-def scan_for_symbol_logic(symbol, name, precision, ohlcv_1d, l1_timeline, now_utc):
-    import logging
-    logger = logging.getLogger("SPEED")
-    try:
-        def get_status(target_ts, timeline):
-            for block in timeline:
-                if block['start'] <= target_ts < block['end']:
-                    return block['valid'], block['date'], block['start']
-            return True, "新幣首發", 0
-
-        df_1d = pd.DataFrame(ohlcv_1d, columns=['ts', 'open', 'high', 'low', 'close', 'vol'])
-        df_1d['close_ts'] = df_1d['ts'] + 24 * 3600 * 1000
-        df_1d_closed = df_1d[df_1d['close_ts'] <= now_utc].reset_index(drop=True)
-        if df_1d_closed.empty: return None
-
-        ohlcv_18d = compose_18d_bars(ohlcv_1d)
-        df_18d = pd.DataFrame(ohlcv_18d, columns=['ts', 'open', 'high', 'low', 'close', 'vol', 'close_ts']) if ohlcv_18d else pd.DataFrame(columns=['ts', 'open', 'high', 'low', 'close', 'vol', 'close_ts'])
-        df_18d_closed = df_18d[df_18d['close_ts'] <= now_utc].reset_index(drop=True)
-
-        # ── 提前全域計算 1D 市場結構 Boundaries ──────────────────────────────────
-        # 從歷史第一根 K 棒開始推算，找出真正的有效頂界線
-        all_boundaries = build_1d_structure_global(df_1d_closed)
-
-        def get_active_boundary(c_ts):
-            matched = None
-            for bd in all_boundaries:
-                if bd['from_ts'] <= c_ts:
-                    if c_ts < bd['until_ts']:
-                        matched = bd
-            return matched
-
-        all_historical_c2s = []
-
-        for i in range(1, len(df_1d_closed)):
-            _curr = df_1d_closed.iloc[i]
-            c_high     = float(_curr['high'])
-            c_low      = float(_curr['low'])
-            c_close    = float(_curr['close'])
-            c_open     = float(_curr['open'])
-            c_date     = pd.to_datetime(int(_curr['ts']), unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d')
-            c_ts       = int(_curr['ts'])
-            c_close_ts = int(_curr['close_ts'])
-
-            is_l1_valid, l1_dt_str, l1_start_ts = get_status(c_close_ts, l1_timeline)
-            if not is_l1_valid:
-                continue
-
-            _closed_18d = df_18d_closed[df_18d_closed['close_ts'] <= c_ts]
-            if len(_closed_18d) >= 2:
-                _last_18d = _closed_18d.iloc[-1]
-                _prev_18d = _closed_18d.iloc[-2]
-                for sig in all_historical_c2s:
-                    if sig['status'] != 'active': continue
-                    if int(_last_18d['close_ts']) <= sig['trigger_ts']: continue
-                    _new_close = float(_last_18d['close'])
-                    _new_low   = float(_last_18d['low'])
-                    _prev_open  = float(_prev_18d['open'])
-                    _prev_close = float(_prev_18d['close'])
-                    _current_trailing = float(sig.get('trailing_sl', -1.0))
-                    _prev_body_high = max(_prev_open, _prev_close)
-                    _prev_body_low  = min(_prev_open, _prev_close)
-                    if _new_close < _prev_body_low:
-                        sig['status'] = 'closed'
-                        sig['exit_type'] = 'black_swallow'
-                        sig['real_rr'] = 0.0
-                        continue
-                    if (_new_close > _prev_body_high
-                            and _new_low > float(sig['entry_price'])
-                            and (_current_trailing < 0 or _new_low > _current_trailing)):
-                        sig['trailing_sl'] = _new_low
-                        sig['trailing_sl_date'] = pd.to_datetime(int(_last_18d['ts']), unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d')
-
-            for sig in all_historical_c2s:
-                if sig['status'] != 'active' or c_ts <= sig['trigger_ts']: continue
-                _trailing    = sig.get('trailing_sl')
-                _effective_sl = _trailing if _trailing is not None else sig['stop_loss']
-                _init_sl      = sig.get('initial_sl', sig['stop_loss'])
-                _base_risk    = abs(sig['entry_price'] - _init_sl)
-                # 追蹤曾達最高 RR
-                if _base_risk > 0:
-                    _cur_rr = (c_high - sig['entry_price']) / _base_risk
-                    if _cur_rr > sig.get('max_rr', 0.0):
-                        sig['max_rr'] = round(_cur_rr, 2)
-                if c_low <= _effective_sl:
-                    sig['status']    = 'closed'
-                    _risk = abs(sig['entry_price'] - _init_sl)
-                    sig['real_rr']   = (_effective_sl - sig['entry_price']) / _risk if _risk > 0 else 0.0
-                    sig['exit_type'] = 'trailing_sl' if _trailing is not None else 'stop_loss'
-                elif _base_risk > 0 and c_high >= (sig['entry_price'] + 100 * _base_risk):
-                    sig['status']   = 'closed'
-                    sig['real_rr']  = 100.0
-                    sig['exit_type'] = 'tp100'
-
-            has_active = any(s['status'] == 'active' for s in all_historical_c2s)
-            if has_active:
-                continue
-
-            bd = get_active_boundary(c_ts)
-            if bd is None: continue
-
-            # 確認這根 K 棒在某個有效的 L1 (18D 紅吞) 保護期內
-            if not is_l1_valid: continue
-
-            boundary_level = bd['level']
-            if c_open < boundary_level and c_close > boundary_level:
-                bd['until_ts'] = c_ts
-
-                all_historical_c2s.append({
-                    'symbol':          symbol,
-                    'l1_18d_direction': 'LONG',
-                    'l1_date':         l1_dt_str,
-                    'l1_open_ts':      l1_start_ts,
-                    'l2_date':         bd['b2_date'],
-                    'l2_open_ts':      bd['from_ts'],
-                    'l3_date':         c_date,
-                    'entry_price':     c_close,
-                    'stop_loss':       c_low,
-                    'initial_sl':      c_low,
-                    'trigger_ts':      c_ts,
-                    'l2_direction':    'LONG',
-                    'precision':       precision,
-                    'status':          'active',
-                    'has_entered':     True,
-                    'l2_top':          bd['level'],
-                    'l2_top_date':     bd['t1_date'],
-                    'l2_bottom':       0,
-                    'l2_bottom_date':  '—',
-                    'max_tp_stage':    -1,
-                    'real_rr':         0.0,
-                    'max_rr':          0.0,
-                })
-
-        current_price = float(df_1d['close'].iloc[-1]) if not df_1d.empty else 0.0
-        active_sigs   = [c2 for c2 in all_historical_c2s if c2['status'] == 'active']
-        is_trigger_met = len(active_sigs) > 0
-
-        current_l1_ok, current_l1_date, current_l1_ts = get_status(now_utc, l1_timeline)
-        if not current_l1_ok:
-            is_trigger_met = False
-
-        current_boundary = get_active_boundary(now_utc)
-        # \u5168\u57df boundary \u4e0d\u9700\u8981\u6bd4\u5c0d l1_start_ts\uff0c\u53ea\u9700\u78ba\u8a8d\u76ee\u524d\u5728 L1 \u6709\u6548\u671f\u5167
-        if current_boundary and not current_l1_ok:
-            current_boundary = None
-
-        final_state  = 'triggered' if is_trigger_met else ('l2_watching' if current_boundary else 'l1_waiting')
-        last_active  = active_sigs[-1] if is_trigger_met else None
-
-        entry_price  = last_active['entry_price'] if last_active else 0.0
-        stop_loss    = last_active['stop_loss']    if last_active else 0.0
-        trigger_ts   = last_active['trigger_ts']   if last_active else 0
-        l3_date_str  = last_active['l3_date']      if last_active else '未知'
-        l2_direction = 'LONG' if last_active else ''
-
-        l2_date_display = ''
-        if current_boundary:
-            l2_date_display = current_boundary.get('b2_date', '')
-        elif last_active:
-            l2_date_display = last_active.get('l2_date', '')
-
-        for c2 in all_historical_c2s:
-            c2['current_price'] = current_price
-        cache_ts = trigger_ts if is_trigger_met else 0
-
-        _bd = current_boundary or (all_boundaries[-1] if all_boundaries else None)
-        l2_top_val    = _bd['level']   if _bd else -1.0
-        l2_top_date   = _bd['t1_date'] if _bd else '未知'
-        l2_bot_val    = float('inf')
-        l2_bot_date   = '—'
-
-        return {
-            'symbol':              symbol,
-            'action':              'update',
-            'data':                {'ts': cache_ts},
-            'is_trigger_met':      is_trigger_met,
-            'is_watchlist_eligible': current_l1_ok,
-            'entry_price':         entry_price,
-            'stop_loss':           stop_loss,
-            'trigger_ts':          trigger_ts,
-            'precision':           precision,
-            'l1_18d_direction':    'LONG',
-            'l1_date':             current_l1_date if current_l1_ok else '未知',
-            'l2_date':             l2_date_display,
-            'l3_date':             l3_date_str,
-            'l2_direction':        l2_direction,
-            'scan_state':          final_state,
-            'l1_open_ts':          current_l1_ts if current_l1_ok else 0,
-            'l2_open_ts':          current_boundary['from_ts'] if current_boundary else 0,
-            'historical_c2s':      all_historical_c2s,
-            'l2_top':              l2_top_val,
-            'l2_bottom':           l2_bot_val,
-            'l2_top_date':         l2_top_date,
-            'l2_bottom_date':      l2_bot_date,
-            'l2_t1_level':         l2_top_val,
-            'l2_b1_date':          l2_bot_date,
-            'l2_b2_date':          l2_date_display,
-        }
-    except Exception as e:
-        logger.warning(f"掃描異常 ({symbol}): {type(e).__name__}: {e}")
-        import traceback; logger.debug(traceback.format_exc())
-        return None
 
 
 def get_status(target_ts, timeline):
@@ -1537,35 +1205,251 @@ def get_status(target_ts, timeline):
             return block['valid'], block['date'], block['start']
     return True, "新幣首發", 0
 
+
+def scan_for_symbol_logic(symbol, name, precision, ohlcv_1d, ohlcv_1h, now_utc):
+    import logging
+    logger = logging.getLogger("SPEED")
+    try:
+        def _fmt(ts_ms, fmt='%Y-%m-%d'):
+            return pd.to_datetime(int(ts_ms), unit='ms', utc=True).tz_convert('Asia/Taipei').strftime(fmt)
+
+        # ── 建立 18D K棒並找出所有黑吞界線 ────────────────────────────────────
+        ohlcv_18d = compose_18d_bars(ohlcv_1d)
+        if not ohlcv_18d:
+            return None
+        df_18d = pd.DataFrame(ohlcv_18d, columns=['ts', 'open', 'high', 'low', 'close', 'vol', 'close_ts'])
+        df_18d_closed = df_18d[df_18d['close_ts'] <= now_utc].reset_index(drop=True)
+
+        boundaries, is_latest_red_swallow = build_18d_black_swallow_boundaries(df_18d_closed)
+        if not boundaries:
+            return None
+
+        # ── 建立 3H K棒 ──────────────────────────────────────────────────────
+        ohlcv_3h = compose_3h_bars(ohlcv_1h)
+        if not ohlcv_3h:
+            return None
+        df_3h = pd.DataFrame(ohlcv_3h, columns=['ts', 'open', 'high', 'low', 'close', 'vol', 'close_ts'])
+        df_3h_closed = df_3h[df_3h['close_ts'] <= now_utc].reset_index(drop=True)
+        if df_3h_closed.empty:
+            return None
+
+        # ── 初始化各界線 active 旗標 ──────────────────────────────────────────
+        # boundaries_active[i] = True 代表第 i 個界線目前有 active 訊號
+        boundaries_active = [False] * len(boundaries)
+        all_historical_c2s = []
+
+        # ── 單次正向掃描 3H K棒 ───────────────────────────────────────────────
+        for row_idx in range(len(df_3h_closed)):
+            row = df_3h_closed.iloc[row_idx]
+            c_ts       = int(row['ts'])
+            c_open     = float(row['open'])
+            c_close    = float(row['close'])
+            c_low      = float(row['low'])
+            c_high     = float(row['high'])
+            c_date     = _fmt(c_ts, '%Y-%m-%d %H:%M')
+
+            # ── Step 1: 依最新已收盤 18D 棒更新移動止損 ────────────────────
+            _closed_18d = df_18d_closed[df_18d_closed['close_ts'] <= c_ts]
+            _last_18d = _prev_18d = None
+            if len(_closed_18d) >= 2:
+                _last_18d = _closed_18d.iloc[-1]
+                _prev_18d = _closed_18d.iloc[-2]
+
+            if _last_18d is not None:
+                _l_close      = float(_last_18d['close'])
+                _l_low        = float(_last_18d['low'])
+                _p_body_high  = max(float(_prev_18d['open']), float(_prev_18d['close']))
+                _p_body_low   = min(float(_prev_18d['open']), float(_prev_18d['close']))
+                _l_close_ts   = int(_last_18d['close_ts'])
+
+                for sig in all_historical_c2s:
+                    if sig['status'] != 'active': continue
+                    if _l_close_ts <= sig['trigger_ts']: continue
+                    _cur_trailing = float(sig.get('trailing_sl', -1.0))
+                    # 18D 黑吞 → 出場
+                    if _l_close < _p_body_low:
+                        _init_sl = sig.get('initial_sl', sig['stop_loss'])
+                        _risk    = abs(sig['entry_price'] - _init_sl)
+                        sig['status']    = 'closed'
+                        sig['exit_type'] = 'black_swallow_18d'
+                        sig['real_rr']   = (_p_body_low - sig['entry_price']) / _risk if _risk > 0 else 0.0
+                        # 重置此界線的 active 旗標
+                        for bi, bd in enumerate(boundaries):
+                            if bd['from_ts'] == sig['l1_open_ts']:
+                                boundaries_active[bi] = False
+                        continue
+                    # 18D 紅吞 → 移動止損
+                    if (_l_close > _p_body_high
+                            and _l_low > float(sig['entry_price'])
+                            and (_cur_trailing < 0 or _l_low > _cur_trailing)):
+                        sig['trailing_sl']      = _l_low
+                        sig['trailing_sl_date'] = _fmt(int(_last_18d['ts']))
+
+            # ── Step 2: 檢查 3H 棒的止損 / 止盈觸發 ─────────────────────────
+            for sig in all_historical_c2s:
+                if sig['status'] != 'active' or c_ts <= sig['trigger_ts']: continue
+                _trailing     = sig.get('trailing_sl')
+                _effective_sl = _trailing if _trailing is not None else sig['stop_loss']
+                _init_sl      = sig.get('initial_sl', sig['stop_loss'])
+                _base_risk    = abs(sig['entry_price'] - _init_sl)
+                # max_rr 追蹤（以 3H high 計算）
+                if _base_risk > 0:
+                    _cur_rr = (c_high - sig['entry_price']) / _base_risk
+                    if _cur_rr > sig.get('max_rr', 0.0):
+                        sig['max_rr'] = round(_cur_rr, 2)
+                # 止損觸發
+                if c_low <= _effective_sl:
+                    _risk = abs(sig['entry_price'] - _init_sl)
+                    sig['status']    = 'closed'
+                    sig['real_rr']   = (_effective_sl - sig['entry_price']) / _risk if _risk > 0 else 0.0
+                    sig['exit_type'] = 'trailing_sl' if _trailing is not None else 'stop_loss'
+                    for bi, bd in enumerate(boundaries):
+                        if bd['from_ts'] == sig['l1_open_ts']:
+                            boundaries_active[bi] = False
+                # TP100 觸發
+                elif _base_risk > 0 and c_high >= (sig['entry_price'] + 100 * _base_risk):
+                    sig['status']    = 'closed'
+                    sig['real_rr']   = 100.0
+                    sig['exit_type'] = 'tp100'
+                    for bi, bd in enumerate(boundaries):
+                        if bd['from_ts'] == sig['l1_open_ts']:
+                            boundaries_active[bi] = False
+
+            # ── Step 3: 判斷當前時點最新 18D 棒是否為紅吞（抑制新觸發） ────
+            _current_is_red = False
+            if len(_closed_18d) >= 2:
+                _lc = float(_closed_18d.iloc[-1]['close'])
+                _pp = float(_closed_18d.iloc[-2]['open'])
+                _pc = float(_closed_18d.iloc[-2]['close'])
+                if _lc > max(_pp, _pc):
+                    _current_is_red = True
+
+            if _current_is_red:
+                continue
+
+            # ── Step 4: 掃描各界線，檢查 3H 突破進場 ────────────────────────
+            for bi, bd in enumerate(boundaries):
+                if bd['from_ts'] > c_ts:
+                    continue  # 界線尚未生效
+                if boundaries_active[bi]:
+                    continue  # 此界線下已有 active 訊號
+
+                if c_open < bd['level'] and c_close > bd['level']:
+                    new_sig = {
+                        'symbol':           symbol,
+                        'l1_18d_direction': 'LONG',
+                        'l1_date':          bd['date'],
+                        'l1_open_ts':       bd['from_ts'],
+                        'l2_date':          bd['date'],
+                        'l2_open_ts':       bd['from_ts'],
+                        'l3_date':          c_date,
+                        'entry_price':      c_close,
+                        'stop_loss':        c_low,
+                        'initial_sl':       c_low,
+                        'trigger_ts':       c_ts,
+                        'l2_direction':     'LONG',
+                        'precision':        precision,
+                        'status':           'active',
+                        'has_entered':      True,
+                        'l2_top':           bd['level'],
+                        'l2_top_date':      bd['date'],
+                        'l2_bottom':        0,
+                        'l2_bottom_date':   '—',
+                        'max_tp_stage':     -1,
+                        'real_rr':          0.0,
+                        'max_rr':           0.0,
+                    }
+                    all_historical_c2s.append(new_sig)
+                    boundaries_active[bi] = True
+
+        # ── 後處理 ────────────────────────────────────────────────────────────
+        _df_1d_tmp = pd.DataFrame(ohlcv_1d, columns=['ts', 'open', 'high', 'low', 'close', 'vol'])
+        current_price = float(_df_1d_tmp['close'].iloc[-1]) if not _df_1d_tmp.empty else 0.0
+        for c2 in all_historical_c2s:
+            c2['current_price'] = current_price
+
+        active_sigs    = [c2 for c2 in all_historical_c2s if c2['status'] == 'active']
+        is_trigger_met = len(active_sigs) > 0
+
+        latest_bd     = boundaries[-1] if boundaries else None
+        l2_top_val    = latest_bd['level'] if latest_bd else -1.0
+        l2_top_date   = latest_bd['date']  if latest_bd else '未知'
+
+        last_active   = active_sigs[-1] if active_sigs else None
+        entry_price   = last_active['entry_price'] if last_active else 0.0
+        stop_loss     = last_active['stop_loss']    if last_active else 0.0
+        trigger_ts    = last_active['trigger_ts']   if last_active else 0
+        l3_date_str   = last_active['l3_date']      if last_active else '未知'
+
+        # watchlist 資格：有界線且最新 18D 不是紅吞
+        is_watchlist_eligible = (latest_bd is not None) and (not is_latest_red_swallow)
+        final_state   = 'triggered' if is_trigger_met else ('l2_watching' if is_watchlist_eligible else 'l1_waiting')
+        cache_ts      = trigger_ts if is_trigger_met else 0
+
+        return {
+            'symbol':                symbol,
+            'action':                'update',
+            'data':                  {'ts': cache_ts},
+            'is_trigger_met':        is_trigger_met,
+            'is_watchlist_eligible': is_watchlist_eligible,
+            'entry_price':           entry_price,
+            'stop_loss':             stop_loss,
+            'trigger_ts':            trigger_ts,
+            'precision':             precision,
+            'l1_18d_direction':      'LONG',
+            'l1_date':               last_active['l1_date'] if last_active else (latest_bd['date'] if latest_bd else '未知'),
+            'l2_date':               last_active.get('l2_date', '') if last_active else '',
+            'l3_date':               l3_date_str,
+            'l2_direction':          'LONG' if last_active else '',
+            'scan_state':            final_state,
+            'l1_open_ts':            last_active['l1_open_ts'] if last_active else 0,
+            'l2_open_ts':            last_active['l2_open_ts'] if last_active else 0,
+            'historical_c2s':        all_historical_c2s,
+            'l2_top':                l2_top_val,
+            'l2_bottom':             float('inf'),
+            'l2_top_date':           l2_top_date,
+            'l2_bottom_date':        '—',
+            'l2_t1_level':           l2_top_val,
+            'l2_b1_date':            '—',
+            'l2_b2_date':            '',
+        }
+    except Exception as e:
+        logger.warning(f"掃描異常 ({symbol}): {type(e).__name__}: {e}")
+        import traceback; logger.debug(traceback.format_exc())
+        return None
+
+
 async def process_symbol(exchange, symbol, name, precision, current_idx, total_coins, cached_info):
     try:
         if current_idx > 0 and (current_idx % 50 == 0 or current_idx == total_coins):
             logger.info(f"📊 掃描進度: {current_idx}/{total_coins}...")
-            
-        now_utc = int(time.time() * 1000)
-        _batch = await exchange.fetch_ohlcv(symbol, '1d', limit=1000)
-        ohlcv_1d = _batch if _batch else []
-            
-        ohlcv_1d = sorted({b[0]: b for b in ohlcv_1d}.values(), key=lambda x: x[0])
-        if not ohlcv_1d: return None
-        
-        intervals, l1_timeline, l2_timeline = get_active_intervals(ohlcv_1d, now_utc)
 
-        current_l1_ok, _, _ = get_status(now_utc, l1_timeline)
-        if not current_l1_ok:
+        now_utc = int(time.time() * 1000)
+
+        # 拉取 1D 資料（最近 1000 根）
+        _batch_1d = await exchange.fetch_ohlcv(symbol, '1d', limit=1000)
+        ohlcv_1d  = sorted({b[0]: b for b in _batch_1d}.values(), key=lambda x: x[0]) if _batch_1d else []
+        if not ohlcv_1d:
             return None
 
-        return scan_for_symbol_logic(symbol, name, precision, ohlcv_1d, l1_timeline, now_utc)
+        # 拉取 1H 資料（最近 500 根 ≈ 20 天，足以偵測近期 3H 突破）
+        _batch_1h = await exchange.fetch_ohlcv(symbol, '1h', limit=500)
+        ohlcv_1h  = sorted({b[0]: b for b in _batch_1h}.values(), key=lambda x: x[0]) if _batch_1h else []
+        if not ohlcv_1h:
+            return None
+
+        return scan_for_symbol_logic(symbol, name, precision, ohlcv_1d, ohlcv_1h, now_utc)
     except Exception as e:
         logger.warning(f"掃描異常 ({symbol}): {type(e).__name__}: {e}")
         return None
 
+
 async def run_history_scan_worker():
-    """背景歷史掃描任務"""
+    """背景歷史掃描任務（全量 1D + 全量 1H）"""
     try:
         logger.info("🚀 背景歷史掃描任務啟動！")
         if not BITGET_API_KEY: return
-        # 每次啟動都刪除舊的狀態與歷史結果，強制重建（方便修改策略後無痛重啟）
+        # 每次重啟強制清除舊資料，確保策略邏輯重建
         for _f in ["history_signals_full.json", "history_signals.json", "watchlist.json"]:
             _path = os.path.join(DATA_DIR, _f)
             if os.path.exists(_path):
@@ -1574,51 +1458,68 @@ async def run_history_scan_worker():
                     logger.info(f"🗑️ 已清除舊版 {_f}，重新建立中...")
                 except Exception as _del_e:
                     logger.warning(f"清除舊檔案失敗 ({_f}): {_del_e}")
+
         ex = ccxt.bitget({
             'apiKey': BITGET_API_KEY,
             'secret': BITGET_SECRET_KEY,
             'password': BITGET_PASSWORD,
             'enableRateLimit': True,
         })
-        
+
         whitelist = _get_crypto_whitelist()
-        markets = await ex.load_markets()
+        markets   = await ex.load_markets()
         coins = []
         for ccxt_sym, m in markets.items():
             if not (m.get('linear') and m.get('quote') == 'USDT' and m.get('settle') == 'USDT'): continue
             base = ccxt_sym.split('/')[0]
-            raw_bitget_sym = f"{base}USDT"
-            if whitelist and raw_bitget_sym not in whitelist: continue
+            if whitelist and f"{base}USDT" not in whitelist: continue
             coins.append(ccxt_sym)
-            
+
         precisions = {s: max(0, int(round(-math.log10(markets[s].get('precision', {}).get('price', 1e-8))))) for s in coins}
-        
+
         all_past_events = []
         total = len(coins)
         for idx, sym in enumerate(coins):
             try:
                 now_utc = int(time.time() * 1000)
+
+                # 全量 1D（最多 30 頁）
                 ohlcv_1d = []
-                _end_time = now_utc
+                _end = now_utc
                 for _pg in range(30):
-                    if _end_time < 1514764800000: break
-                    _batch = await ex.fetch_ohlcv(sym, '1d', limit=1000, params={'until': int(_end_time)})
-                    if not _batch: break
-                    ohlcv_1d.extend(_batch)
-                    _end_time = _batch[0][0] - 1
-                    await asyncio.sleep(0.1)
+                    if _end < 1514764800000: break
+                    _b = await ex.fetch_ohlcv(sym, '1d', limit=1000, params={'until': int(_end)})
+                    if not _b: break
+                    ohlcv_1d.extend(_b)
+                    _end = _b[0][0] - 1
+                    await asyncio.sleep(0.15)
                 ohlcv_1d = sorted({b[0]: b for b in ohlcv_1d}.values(), key=lambda x: x[0])
-                
-                intervals, l1_timeline, l2_timeline = get_active_intervals(ohlcv_1d, now_utc)
-                # 全用 1D 算，超級快，不用再拉 1H
-                res = scan_for_symbol_logic(sym, get_base_coin(sym), precisions.get(sym, 4), ohlcv_1d, l1_timeline, now_utc)
+
+                # 全量 1H（最多 50 頁 ≈ 5.7 年歷史）
+                ohlcv_1h = []
+                _end = now_utc
+                for _pg in range(50):
+                    if _end < 1514764800000: break
+                    _b = await ex.fetch_ohlcv(sym, '1h', limit=1000, params={'until': int(_end)})
+                    if not _b: break
+                    ohlcv_1h.extend(_b)
+                    _end = _b[0][0] - 1
+                    await asyncio.sleep(0.15)
+                ohlcv_1h = sorted({b[0]: b for b in ohlcv_1h}.values(), key=lambda x: x[0])
+
+                if not ohlcv_1d or not ohlcv_1h:
+                    continue
+
+                res = scan_for_symbol_logic(sym, get_base_coin(sym), precisions.get(sym, 4), ohlcv_1d, ohlcv_1h, now_utc)
                 if res and 'historical_c2s' in res:
                     all_past_events.extend(res['historical_c2s'])
+
             except Exception as e:
                 logger.error(f"歷史掃描異常 ({sym}): {e}")
-            await asyncio.sleep(0.1)
-            if idx % 10 == 0: logger.info(f"⏳ 歷史掃描進度: {idx}/{total}")
-            
+            await asyncio.sleep(0.2)
+            if idx % 5 == 0:
+                logger.info(f"⏳ 歷史掃描進度: {idx}/{total}")
+
         HISTORY_FULL_FILE = os.path.join(DATA_DIR, "history_signals_full.json")
         try:
             with open(HISTORY_FULL_FILE, 'w', encoding='utf-8') as f:
@@ -1626,12 +1527,10 @@ async def run_history_scan_worker():
             logger.info("✅ 背景歷史掃描任務完成並已寫入 history_signals_full.json")
         except Exception as e:
             logger.error(f"寫入歷史報表失敗: {e}")
-            
+
         await ex.close()
     except Exception as e:
         logger.error(f"歷史掃描整體異常: {e}")
-
-
 
 _tg_update_offset = 0
 
