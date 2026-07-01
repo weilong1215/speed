@@ -1389,10 +1389,11 @@ def scan_for_symbol_logic(symbol, name, precision, ohlcv_1d, ohlcv_1h, now_utc):
         
         all_boundaries = build_1d_structure_global(df_1d_closed)
 
-        def get_active_boundary(c_ts):
+        def get_active_boundary(c_ts, l1_start_ts):
+            """只採用當前 18D 紅吞週期內形成的頂底界線，避免舊週期污染"""
             matched = None
             for bd in all_boundaries:
-                if bd['from_ts'] <= c_ts:
+                if l1_start_ts <= bd['from_ts'] <= c_ts:
                     matched = bd
             return matched
 
@@ -1462,7 +1463,7 @@ def scan_for_symbol_logic(symbol, name, precision, ohlcv_1d, ohlcv_1h, now_utc):
             if not active_signal:
                 if not is_l1_valid: continue
                 
-                bd = get_active_boundary(c_ts)
+                bd = get_active_boundary(c_ts, l1_start_ts)
                 if not bd: continue
                 
                 boundary_level = bd['level']
@@ -1497,7 +1498,7 @@ def scan_for_symbol_logic(symbol, name, precision, ohlcv_1d, ohlcv_1h, now_utc):
         is_trigger_met = active_signal is not None
         current_l1_ok, current_l1_date, current_l1_ts = get_status(now_utc, l1_timeline)
         
-        current_boundary = get_active_boundary(now_utc)
+        current_boundary = get_active_boundary(now_utc, current_l1_ts)
         if current_boundary and not current_l1_ok:
             current_boundary = None
             
