@@ -1418,18 +1418,299 @@ def scan_for_symbol_logic(symbol, name, precision, ohlcv_1d, ohlcv_1h, now_utc):
     try:
         def _fmt(ts_ms, fmt='%Y-%m-%d'):
             return pd.to_datetime(int(ts_ms), unit='ms', utc=True).tz_convert('Asia/Taipei').strftime(fmt)
-            
-        def get_status(target_ts, timeline):
-            if not timeline: return True, "新幣首發", 0
-            for block in timeline:
-                if block['start'] <= target_ts < block['end']:
-                    return block['valid'], block['date'], block['start']
-            return True, "新幣首發", 0
 
-        # Build 18D Timeline
+        def get_swallow(c_close, p_open, p_close):
+            p_body_high = max(p_open, p_close)
+            p_body_low = min(p_open, p_close)
+            if c_close > p_body_high:
+                return 'RED'
+            elif c_close < p_body_low:
+                return 'BLACK'
+            return 'NONE'
+
         from main import compose_18d_bars
         ohlcv_18d = compose_18d_bars(ohlcv_1d)
-        if not ohlcv_18d: return None
+        if not ohlcv_18d:
+            return None
+        df_18d = pd.DataFrame(ohlcv_18d, columns=['ts', 'open', 'high', 'low', 'close', 'vol', 'close_ts'])
+        df_18d_closed = df_18d[df_18d['close_ts'] <= now_utc].reset_index(drop=True)
+
+        df_1d = pd.DataFrame(ohlcv_1d, columns=['ts', 'open', 'high', 'low', 'close', 'vol'])
+        df_1d['close_ts'] = df_1d['ts'] + 24 * 3600 * 1000
+        df_1d_closed = df_1d[df_1d['close_ts'] <= now_utc].reset_index(drop=True)
+
+        if df_1d_closed.empty:
+            return None
+
+        # ================= L1 (18D) =================
+        l1_valid = True
+        l1_valid_ts = 0
+        l1_date_str = "未知"
+        for i in range(1, len(df_18d_closed)):
+            _prev = df_18d_closed.iloc[i-1]
+            _curr = df_18d_closed.iloc[i]
+            sw = get_swallow(_curr['close'], _prev['open'], _prev['close'])
+            if sw == 'RED':
+                if not l1_valid or l1_date_str == "未知":
+                    l1_valid = True
+                    l1_valid_ts = int(_curr['close_ts'])
+                    l1_date_str = pd.to_datetime(int(_curr['ts']), unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d')
+            elif sw == 'BLACK':
+                l1_valid = False
+                l1_valid_ts = -1
+                l1_date_str = "未知"
+
+        if not l1_valid or l1_valid_ts == -1:
+            return None
+
+        # ================= L2 (1D) =================
+        l2_state = 'NONE'
+        temp_top = -1.0
+        temp_bottom = float('inf')
+        temp_top_date = "未知"
+        temp_bottom_date = "未知"
+        
+        confirmed_top = -1.0
+        confirmed_bottom = float('inf')
+        confirmed_top_date = "未知"
+        confirmed_bottom_date = "未知"
+        
+        pending_top = -1.0
+        pending_top_date = "未知"
+        pending_bottom = float('inf')
+        pending_bottom_date = "未知"
+
+        all_historical_c2s = []
+
+        if len(df_1d_closed) > 0:
+            _first = df_1d_closed.iloc[0]
+            _first_date = pd.to_datetime(int(_first['ts']), unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d')
+            temp_top = float(_first['high'])
+            temp_top_date = _first_date
+            temp_bottom = float(_first['low'])
+            temp_bottom_date = _first_date
+        
+        for i in range(1, len(df_1d_closed)):
+            _prev = df_1d_closed.iloc[i-1]
+            _curr = df_1d_closed.iloc[i]
+            c_open = float(_curr['open'])
+            c_high = float(_curr['high'])
+            c_low = float(_curr['low'])
+            c_close = float(_curr['close'])
+            c_ts = int(_curr['ts'])
+            c_close_ts = int(_curr['close_ts'])
+            c_date = pd.to_datetime(c_ts, unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d')
+
+            sw = get_swallow(c_close, _prev['open'], _prev['close'])
+            
+            prev_state = l2_state
+            if sw == 'RED':
+                l2_state = 'RED'
+            elif sw == 'BLACK':
+                l2_state = 'BLACK'
+                
+            if prev_state != l2_state:
+                if l2_state == 'RED':
+                    if c_low < temp_bottom:
+                        temp_bottom = c_low
+                        temp_bottom_date = c_date
+
+                    if confirmed_bottom == float('inf'):
+                        confirmed_bottom = temp_bottom
+                        confirmed_bottom_date = temp_bottom_date
+                        pending_bottom = temp_bottom
+                        pending_bottom_date = temp_bottom_date
+                    else:
+                        if temp_bottom < confirmed_bottom:
+                            confirmed_bottom = temp_bottom
+                            confirmed_bottom_date = temp_bottom_date
+                            
+                            if pending_top != -1.0:
+                                confirmed_top = pending_top
+                                confirmed_top_date = pending_top_date
+                            
+                            pending_top = -1.0
+                            pending_bottom = float('inf')
+                        else:
+                            if temp_bottom < pending_bottom:
+                                pending_bottom = temp_bottom
+                                pending_bottom_date = temp_bottom_date
+                                
+                    temp_top = c_high
+                    temp_top_date = c_date
+                    
+                elif l2_state == 'BLACK':
+                    if c_high > temp_top:
+                        temp_top = c_high
+                        temp_top_date = c_date
+
+                    if confirmed_top == -1.0:
+                        confirmed_top = temp_top
+                        confirmed_top_date = temp_top_date
+                        pending_top = temp_top
+                        pending_top_date = temp_top_date
+                    else:
+                        if temp_top > confirmed_top:
+                            confirmed_top = temp_top
+                            confirmed_top_date = temp_top_date
+                            
+                            if pending_bottom != float('inf'):
+                                confirmed_bottom = pending_bottom
+                                confirmed_bottom_date = pending_bottom_date
+                            
+                            pending_top = -1.0
+                            pending_bottom = float('inf')
+                        else:
+                            if temp_top > pending_top:
+                                pending_top = temp_top
+                                pending_top_date = temp_top_date
+                                
+                    temp_bottom = c_low
+                    temp_bottom_date = c_date
+            else:
+                if l2_state == 'RED':
+                    if c_high > temp_top:
+                        temp_top = c_high
+                        temp_top_date = c_date
+                elif l2_state == 'BLACK':
+                    if c_low < temp_bottom:
+                        temp_bottom = c_low
+                        temp_bottom_date = c_date
+
+            if confirmed_top > 0 and c_open < confirmed_top and c_close > confirmed_top:
+                if l1_valid_ts != -1 and c_close_ts >= l1_valid_ts:
+                    has_active = any(s['status'] == 'active' for s in all_historical_c2s)
+                    
+                    if not has_active:
+                        all_historical_c2s.append({
+                            'symbol': symbol, 
+                            'l1_18d_direction': 'LONG',
+                            'l1_date': l1_date_str, 
+                            'l1_open_ts': l1_valid_ts,
+                            'l2_date': c_date,
+                            'entry_price': c_close, 
+                            'stop_loss': c_low, 
+                            'initial_sl': c_low,
+                            'trigger_ts': c_ts,
+                            'l2_direction': 'LONG', 
+                            'precision': precision, 
+                            'status': 'active', 
+                            'has_entered': True,
+                            'l2_top': confirmed_top, 
+                            'l2_top_date': confirmed_top_date,
+                            'l2_bottom': confirmed_bottom, 
+                            'l2_bottom_date': confirmed_bottom_date,
+                            'max_tp_stage': -1,
+                            'real_rr': 0.0
+                        })
+
+            _closed_18d = df_18d_closed[df_18d_closed['close_ts'] <= c_ts]
+            if len(_closed_18d) >= 2:
+                _last_18d = _closed_18d.iloc[-1]
+                _prev_18d = _closed_18d.iloc[-2]
+                _18d_dt = pd.to_datetime(int(_last_18d['ts']), unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d')
+                
+                for sig in all_historical_c2s:
+                    if sig['status'] == 'active':
+                        _entry_ts = sig['trigger_ts']
+                        if int(_last_18d['close_ts']) > _entry_ts:
+                            _new_close = float(_last_18d['close'])
+                            _new_high  = float(_last_18d['high'])
+                            _new_low   = float(_last_18d['low'])
+                            _prev_open  = float(_prev_18d['open'])
+                            _prev_close = float(_prev_18d['close'])
+                            _entry_price = float(sig['entry_price'])
+                            _current_trailing = float(sig.get('trailing_sl', -1.0))
+                            
+                            _prev_body_high = max(_prev_open, _prev_close)
+                            if (_new_close > _prev_body_high
+                                    and _new_low > _entry_price
+                                    and (_current_trailing < 0 or _new_low > _current_trailing)):
+                                sig['trailing_sl'] = _new_low
+                                sig['trailing_sl_date'] = _18d_dt
+
+            for sig in all_historical_c2s:
+                if sig['status'] == 'active' and c_ts > sig['trigger_ts']:
+                    _is_sl = False
+                    _is_tp = False
+                    
+                    _trailing = sig.get('trailing_sl')
+                    _effective_sl = _trailing if _trailing is not None else sig['stop_loss']
+                    
+                    _init_sl_for_tp = sig.get('initial_sl', sig['stop_loss'])
+                    _base_risk = abs(sig['entry_price'] - _init_sl_for_tp)
+                    
+                    if c_low <= _effective_sl:
+                        _is_sl = True
+                    if _base_risk > 0:
+                        tp_price = sig['entry_price'] + 100 * _base_risk
+                        if c_high >= tp_price:
+                            _is_tp = True
+
+                    if _is_sl:
+                        sig['status'] = 'closed'
+                        _init_sl = sig.get('initial_sl', sig['stop_loss'])
+                        _risk = abs(sig['entry_price'] - _init_sl)
+                        if _risk > 0:
+                            sig['real_rr'] = (_effective_sl - sig['entry_price']) / _risk
+                        else:
+                            sig['real_rr'] = 0.0
+                        sig['exit_type'] = 'trailing_sl' if _trailing is not None else 'stop_loss'
+                    elif _is_tp:
+                        sig['status'] = 'closed'
+                        sig['real_rr'] = 100.0
+                        sig['exit_type'] = 'tp100'
+
+        current_price = float(df_1d['close'].iloc[-1]) if not df_1d.empty else 0.0
+        
+        active_sigs = [c2 for c2 in all_historical_c2s if c2['status'] == 'active']
+        is_trigger_met = len(active_sigs) > 0
+        
+        if is_trigger_met:
+            final_state = 'triggered'
+        else:
+            final_state = 'l2_waiting'
+
+        last_active = active_sigs[-1] if is_trigger_met else None
+        
+        entry_price = last_active['entry_price'] if last_active else 0.0
+        stop_loss = last_active['stop_loss'] if last_active else 0.0
+        trigger_ts = last_active['trigger_ts'] if last_active else 0
+        l2_date_str = last_active['l2_date'] if last_active else "未知"
+        l2_direction = 'LONG' if last_active else ""
+
+        for c2 in all_historical_c2s:
+            c2['current_price'] = current_price
+
+        cache_ts = trigger_ts if is_trigger_met else l1_valid_ts
+        action = 'keep'
+
+        return {
+            'symbol':             symbol,
+            'action':             action,
+            'data':               {'ts': cache_ts},
+            'is_trigger_met':     is_trigger_met,
+            'is_watchlist_eligible': (l1_valid_ts != -1),
+            'entry_price':        entry_price,
+            'stop_loss':          stop_loss,
+            'trigger_ts':         trigger_ts,
+            'precision':          precision,
+            'l1_18d_direction':   "LONG",
+            'l1_date':            l1_date_str,
+            'l2_date':            l2_date_str,
+            'l2_direction':       l2_direction,
+            'scan_state':         final_state,
+            'l1_open_ts':         l1_valid_ts,
+            'historical_c2s':     all_historical_c2s,
+            'l2_top':             confirmed_top,
+            'l2_bottom':          confirmed_bottom,
+            'l2_top_date':        confirmed_top_date,
+            'l2_bottom_date':     confirmed_bottom_date,
+        }
+
+    except Exception as e:
+        logger.warning(f"掃描異常 ({symbol}): {type(e).__name__}: {e}")
+        return None
         df_18d = pd.DataFrame(ohlcv_18d, columns=['ts', 'open', 'high', 'low', 'close', 'vol', 'close_ts'])
         df_18d_closed = df_18d[df_18d['close_ts'] <= now_utc].reset_index(drop=True)
         l1_timeline = build_timeline(df_18d_closed)
