@@ -1442,28 +1442,45 @@ def scan_for_symbol_logic(symbol, name, precision, ohlcv_1d, ohlcv_1h, now_utc):
         if df_1d_closed.empty:
             return None
 
-        # ================= L1 (18D) =================
-        l1_valid = True
-        l1_valid_ts = 0
-        l1_date_str = "未知"
+        # ================= L1 (18D) Timeline =================
+        l1_timeline = []
+        current_l1_valid = False  # 取消新幣首發，初始為無效
+        current_l1_start = 0
+        current_l1_date = "未知"
         for i in range(1, len(df_18d_closed)):
             _prev = df_18d_closed.iloc[i-1]
             _curr = df_18d_closed.iloc[i]
             sw = get_swallow(_curr['close'], _prev['open'], _prev['close'])
+            c_ts = int(_curr['close_ts'])
             if sw == 'RED':
-                if not l1_valid or l1_date_str == "未知":
-                    l1_valid = True
-                    l1_valid_ts = int(_curr['close_ts'])
-                    l1_date_str = pd.to_datetime(int(_curr['ts']), unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d')
+                if not current_l1_valid:
+                    l1_timeline.append({
+                        'start': current_l1_start, 'end': c_ts, 'valid': False, 'date': "未知"
+                    })
+                    current_l1_valid = True
+                    current_l1_start = c_ts
+                    current_l1_date = _fmt(int(_curr['ts']))
             elif sw == 'BLACK':
-                l1_valid = False
-                l1_valid_ts = -1
-                l1_date_str = "未知"
+                if current_l1_valid:
+                    l1_timeline.append({
+                        'start': current_l1_start, 'end': c_ts, 'valid': True, 'date': current_l1_date
+                    })
+                    current_l1_valid = False
+                    current_l1_start = c_ts
+                    current_l1_date = "未知"
+        l1_timeline.append({
+            'start': current_l1_start, 'end': float('inf'), 'valid': current_l1_valid, 'date': current_l1_date
+        })
 
-        if not l1_valid or l1_valid_ts == -1:
-            return None
+        def get_status(target_ts):
+            if not l1_timeline:
+                return False, "未知", 0
+            for block in l1_timeline:
+                if block['start'] <= target_ts < block['end']:
+                    return block['valid'], block['date'], block['start']
+            return False, "未知", 0
 
-        # ================= L2 (1D) =================
+        # ================= L2 (1D) Zigzag =================
         l2_state = 'NONE'
         temp_top = -1.0
         temp_bottom = float('inf')
@@ -1481,10 +1498,11 @@ def scan_for_symbol_logic(symbol, name, precision, ohlcv_1d, ohlcv_1h, now_utc):
         pending_bottom_date = "未知"
 
         all_historical_c2s = []
+        active_signal = None
 
         if len(df_1d_closed) > 0:
             _first = df_1d_closed.iloc[0]
-            _first_date = pd.to_datetime(int(_first['ts']), unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d')
+            _first_date = _fmt(int(_first['ts']))
             temp_top = float(_first['high'])
             temp_top_date = _first_date
             temp_bottom = float(_first['low'])
@@ -1499,7 +1517,7 @@ def scan_for_symbol_logic(symbol, name, precision, ohlcv_1d, ohlcv_1h, now_utc):
             c_close = float(_curr['close'])
             c_ts = int(_curr['ts'])
             c_close_ts = int(_curr['close_ts'])
-            c_date = pd.to_datetime(c_ts, unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d')
+            c_date = _fmt(c_ts)
 
             sw = get_swallow(c_close, _prev['open'], _prev['close'])
             
@@ -1577,174 +1595,7 @@ def scan_for_symbol_logic(symbol, name, precision, ohlcv_1d, ohlcv_1h, now_utc):
                         temp_bottom = c_low
                         temp_bottom_date = c_date
 
-            if confirmed_top > 0 and c_open < confirmed_top and c_close > confirmed_top:
-                if l1_valid_ts != -1 and c_close_ts >= l1_valid_ts:
-                    has_active = any(s['status'] == 'active' for s in all_historical_c2s)
-                    
-                    if not has_active:
-                        all_historical_c2s.append({
-                            'symbol': symbol, 
-                            'l1_18d_direction': 'LONG',
-                            'l1_date': l1_date_str, 
-                            'l1_open_ts': l1_valid_ts,
-                            'l2_date': c_date,
-                            'entry_price': c_close, 
-                            'stop_loss': c_low, 
-                            'initial_sl': c_low,
-                            'trigger_ts': c_ts,
-                            'l2_direction': 'LONG', 
-                            'precision': precision, 
-                            'status': 'active', 
-                            'has_entered': True,
-                            'l2_top': confirmed_top, 
-                            'l2_top_date': confirmed_top_date,
-                            'l2_bottom': confirmed_bottom, 
-                            'l2_bottom_date': confirmed_bottom_date,
-                            'max_tp_stage': -1,
-                            'real_rr': 0.0
-                        })
-
-            _closed_18d = df_18d_closed[df_18d_closed['close_ts'] <= c_ts]
-            if len(_closed_18d) >= 2:
-                _last_18d = _closed_18d.iloc[-1]
-                _prev_18d = _closed_18d.iloc[-2]
-                _18d_dt = pd.to_datetime(int(_last_18d['ts']), unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d')
-                
-                for sig in all_historical_c2s:
-                    if sig['status'] == 'active':
-                        _entry_ts = sig['trigger_ts']
-                        if int(_last_18d['close_ts']) > _entry_ts:
-                            _new_close = float(_last_18d['close'])
-                            _new_high  = float(_last_18d['high'])
-                            _new_low   = float(_last_18d['low'])
-                            _prev_open  = float(_prev_18d['open'])
-                            _prev_close = float(_prev_18d['close'])
-                            _entry_price = float(sig['entry_price'])
-                            _current_trailing = float(sig.get('trailing_sl', -1.0))
-                            
-                            _prev_body_high = max(_prev_open, _prev_close)
-                            if (_new_close > _prev_body_high
-                                    and _new_low > _entry_price
-                                    and (_current_trailing < 0 or _new_low > _current_trailing)):
-                                sig['trailing_sl'] = _new_low
-                                sig['trailing_sl_date'] = _18d_dt
-
-            for sig in all_historical_c2s:
-                if sig['status'] == 'active' and c_ts > sig['trigger_ts']:
-                    _is_sl = False
-                    _is_tp = False
-                    
-                    _trailing = sig.get('trailing_sl')
-                    _effective_sl = _trailing if _trailing is not None else sig['stop_loss']
-                    
-                    _init_sl_for_tp = sig.get('initial_sl', sig['stop_loss'])
-                    _base_risk = abs(sig['entry_price'] - _init_sl_for_tp)
-                    
-                    if c_low <= _effective_sl:
-                        _is_sl = True
-                    if _base_risk > 0:
-                        tp_price = sig['entry_price'] + 100 * _base_risk
-                        if c_high >= tp_price:
-                            _is_tp = True
-
-                    if _is_sl:
-                        sig['status'] = 'closed'
-                        _init_sl = sig.get('initial_sl', sig['stop_loss'])
-                        _risk = abs(sig['entry_price'] - _init_sl)
-                        if _risk > 0:
-                            sig['real_rr'] = (_effective_sl - sig['entry_price']) / _risk
-                        else:
-                            sig['real_rr'] = 0.0
-                        sig['exit_type'] = 'trailing_sl' if _trailing is not None else 'stop_loss'
-                    elif _is_tp:
-                        sig['status'] = 'closed'
-                        sig['real_rr'] = 100.0
-                        sig['exit_type'] = 'tp100'
-
-        current_price = float(df_1d['close'].iloc[-1]) if not df_1d.empty else 0.0
-        
-        active_sigs = [c2 for c2 in all_historical_c2s if c2['status'] == 'active']
-        is_trigger_met = len(active_sigs) > 0
-        
-        if is_trigger_met:
-            final_state = 'triggered'
-        else:
-            final_state = 'l2_waiting'
-
-        last_active = active_sigs[-1] if is_trigger_met else None
-        
-        entry_price = last_active['entry_price'] if last_active else 0.0
-        stop_loss = last_active['stop_loss'] if last_active else 0.0
-        trigger_ts = last_active['trigger_ts'] if last_active else 0
-        l2_date_str = last_active['l2_date'] if last_active else "未知"
-        l2_direction = 'LONG' if last_active else ""
-
-        for c2 in all_historical_c2s:
-            c2['current_price'] = current_price
-
-        cache_ts = trigger_ts if is_trigger_met else l1_valid_ts
-        action = 'keep'
-
-        return {
-            'symbol':             symbol,
-            'action':             action,
-            'data':               {'ts': cache_ts},
-            'is_trigger_met':     is_trigger_met,
-            'is_watchlist_eligible': (l1_valid_ts != -1),
-            'entry_price':        entry_price,
-            'stop_loss':          stop_loss,
-            'trigger_ts':         trigger_ts,
-            'precision':          precision,
-            'l1_18d_direction':   "LONG",
-            'l1_date':            l1_date_str,
-            'l2_date':            l2_date_str,
-            'l2_direction':       l2_direction,
-            'scan_state':         final_state,
-            'l1_open_ts':         l1_valid_ts,
-            'historical_c2s':     all_historical_c2s,
-            'l2_top':             confirmed_top,
-            'l2_bottom':          confirmed_bottom,
-            'l2_top_date':        confirmed_top_date,
-            'l2_bottom_date':     confirmed_bottom_date,
-        }
-
-    except Exception as e:
-        logger.warning(f"掃描異常 ({symbol}): {type(e).__name__}: {e}")
-        return None
-        df_18d = pd.DataFrame(ohlcv_18d, columns=['ts', 'open', 'high', 'low', 'close', 'vol', 'close_ts'])
-        df_18d_closed = df_18d[df_18d['close_ts'] <= now_utc].reset_index(drop=True)
-        l1_timeline = build_timeline(df_18d_closed)
-
-        # Build 1D Boundaries
-        df_1d = pd.DataFrame(ohlcv_1d, columns=['ts', 'open', 'high', 'low', 'close', 'vol'])
-        df_1d['close_ts'] = df_1d['ts'] + 24 * 3600 * 1000
-        df_1d_closed = df_1d[df_1d['close_ts'] <= now_utc].reset_index(drop=True)
-        if df_1d_closed.empty: return None
-        
-        all_boundaries = build_1d_structure_global(df_1d_closed)
-
-        def get_active_boundary(c_ts):
-            matched = None
-            for bd in all_boundaries:
-                if bd['from_ts'] <= c_ts:
-                    matched = bd
-            return matched
-
-        all_historical_c2s = []
-        active_signal = None
-
-        for i in range(1, len(df_1d_closed)):
-            _curr = df_1d_closed.iloc[i]
-            c_high     = float(_curr['high'])
-            c_low      = float(_curr['low'])
-            c_close    = float(_curr['close'])
-            c_open     = float(_curr['open'])
-            c_date     = _fmt(int(_curr['ts']))
-            c_ts       = int(_curr['ts'])
-            c_close_ts = int(_curr['close_ts'])
-
-            is_l1_valid, l1_dt_str, l1_start_ts = get_status(c_close_ts, l1_timeline)
-
+            # Trailing SL update on active signal
             if active_signal:
                 _closed_18d = df_18d_closed[df_18d_closed['close_ts'] <= c_ts]
                 if len(_closed_18d) >= 2:
@@ -1759,6 +1610,7 @@ def scan_for_symbol_logic(symbol, name, precision, ohlcv_1d, ohlcv_1h, now_utc):
                         
                         _cur_trailing = float(active_signal.get('trailing_sl', -1.0))
                         
+                        # 18D Black swallow invalidation
                         if _l_close < _p_body_low:
                             _init_sl = active_signal.get('initial_sl', active_signal['stop_loss'])
                             _risk = abs(active_signal['entry_price'] - _init_sl)
@@ -1766,79 +1618,87 @@ def scan_for_symbol_logic(symbol, name, precision, ohlcv_1d, ohlcv_1h, now_utc):
                             active_signal['exit_type'] = 'black_swallow'
                             active_signal['real_rr'] = (_p_body_low - active_signal['entry_price']) / _risk if _risk > 0 else 0.0
                             active_signal = None
+                        # 18D Red swallow PS
                         elif _l_close > _p_body_high and _l_low > float(active_signal['entry_price']) and (_cur_trailing < 0 or _l_low > _cur_trailing):
                             active_signal['trailing_sl'] = _l_low
                             active_signal['trailing_sl_date'] = _fmt(int(_last_18d['ts']))
-                            
+
+            # Active signal intraday check (SL / TP / max_rr) using daily prices
             if active_signal:
                 _trailing = active_signal.get('trailing_sl')
                 _effective_sl = _trailing if _trailing is not None else active_signal['stop_loss']
                 _init_sl = active_signal.get('initial_sl', active_signal['stop_loss'])
                 _base_risk = abs(active_signal['entry_price'] - _init_sl)
                 
+                # Update max_rr using c_high
                 if _base_risk > 0:
                     _cur_rr = (c_high - active_signal['entry_price']) / _base_risk
                     if _cur_rr > active_signal.get('max_rr', 0.0):
                         active_signal['max_rr'] = round(_cur_rr, 2)
                         
+                # Check SL
                 if c_low <= _effective_sl:
                     _risk = abs(active_signal['entry_price'] - _init_sl)
                     active_signal['status'] = 'closed'
                     active_signal['real_rr'] = (_effective_sl - active_signal['entry_price']) / _risk if _risk > 0 else 0.0
                     active_signal['exit_type'] = 'trailing_sl' if _trailing is not None else 'stop_loss'
                     active_signal = None
+                # Check TP
                 elif _base_risk > 0 and c_high >= (active_signal['entry_price'] + 100 * _base_risk):
                     active_signal['status'] = 'closed'
                     active_signal['real_rr'] = 100.0
                     active_signal['exit_type'] = 'tp100'
                     active_signal = None
 
+            # Generate new signal if not active
             if not active_signal:
-                if not is_l1_valid: continue
-                
-                bd = get_active_boundary(c_ts)
-                if not bd: continue
-                
-                boundary_level = bd['level']
-                if c_open < boundary_level and c_close > boundary_level:
-                    new_sig = {
-                        'symbol': symbol,
-                        'l1_18d_direction': 'LONG',
-                        'l1_date': l1_dt_str,
-                        'l1_open_ts': l1_start_ts,
-                        'l3_date': c_date,
-                        'l2_top_date': bd['t1_date'],
-                        'l2_top': bd['level'],
-                        'l2_bottom_date': bd['b2_date'],
-                        'l2_bottom': bd['b2_level'],
-                        'entry_price': c_close,
-                        'stop_loss': c_low,
-                        'initial_sl': c_low,
-                        'trigger_ts': c_ts,
-                        'precision': precision,
-                        'status': 'active',
-                        'has_entered': True,
-                        'real_rr': 0.0,
-                        'max_rr': 0.0
-                    }
-                    all_historical_c2s.append(new_sig)
-                    active_signal = new_sig
+                is_l1_valid, l1_dt_str, l1_start_ts = get_status(c_close_ts)
+                if is_l1_valid:
+                    if confirmed_top > 0 and c_open < confirmed_top and c_close > confirmed_top:
+                        new_sig = {
+                            'symbol': symbol,
+                            'l1_18d_direction': 'LONG',
+                            'l1_date': l1_dt_str,
+                            'l1_open_ts': l1_start_ts,
+                            'l3_date': c_date,  # 一日突破時間
+                            'l2_top_date': confirmed_top_date,
+                            'l2_top': confirmed_top,
+                            'l2_bottom_date': confirmed_bottom_date,
+                            'l2_bottom': confirmed_bottom,
+                            'entry_price': c_close,
+                            'stop_loss': c_low,
+                            'initial_sl': c_low,
+                            'trigger_ts': c_ts,
+                            'precision': precision,
+                            'status': 'active',
+                            'has_entered': True,
+                            'real_rr': 0.0,
+                            'max_rr': 0.0
+                        }
+                        all_historical_c2s.append(new_sig)
+                        active_signal = new_sig
 
         current_price = float(df_1d['close'].iloc[-1]) if not df_1d.empty else 0.0
         for c2 in all_historical_c2s:
             c2['current_price'] = current_price
 
         is_trigger_met = active_signal is not None
-        current_l1_ok, current_l1_date, current_l1_ts = get_status(now_utc, l1_timeline)
+        current_l1_ok, current_l1_date, current_l1_ts = get_status(now_utc)
         
-        current_boundary = get_active_boundary(now_utc)
+        # Calculate current boundary if we were waiting (needed for rendering watchlist)
+        current_boundary = {
+            'level': confirmed_top,
+            't1_date': confirmed_top_date,
+            'b2_level': confirmed_bottom,
+            'b2_date': confirmed_bottom_date
+        } if confirmed_top > 0 else None
+        
         if current_boundary and not current_l1_ok:
             current_boundary = None
             
         final_state = 'triggered' if is_trigger_met else ('l2_watching' if current_boundary else 'l1_waiting')
-        
         cache_ts = active_signal['trigger_ts'] if active_signal else 0
-        
+
         return {
             'symbol':                symbol,
             'action':                'update',
@@ -1853,6 +1713,7 @@ def scan_for_symbol_logic(symbol, name, precision, ohlcv_1d, ohlcv_1h, now_utc):
             'l1_date':               active_signal['l1_date'] if active_signal else (current_l1_date if current_l1_ok else '未知'),
             'l3_date':               active_signal['l3_date'] if active_signal else '未知',
             'scan_state':            final_state,
+            'l1_open_ts':            active_signal['l1_open_ts'] if active_signal else (current_l1_ts if current_l1_ok else 0),
             'historical_c2s':        all_historical_c2s,
             'l2_top':                active_signal['l2_top'] if active_signal else (current_boundary['level'] if current_boundary else -1.0),
             'l2_top_date':           active_signal['l2_top_date'] if active_signal else (current_boundary['t1_date'] if current_boundary else '未知'),
