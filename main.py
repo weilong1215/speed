@@ -1208,88 +1208,155 @@ def get_swallow(c_close, p_open, p_close):
     return 'NONE'
 
 def build_timeline(df_closed):
+    """
+    18D 紅黑吞 timeline 建立。
+    修正：從第一根 18D 棒的實際日期開始計算，不再顯示「新幣首發」。
+    """
     import pandas as pd
     timeline = []
-    current_valid = True
-    current_start = 0
-    current_date = "新幣首發"
+    if df_closed.empty:
+        return timeline
+
+    # 初始狀態：從第一根 18D 棒的開盤時間開始（而非 epoch=0）
+    first_ts_ms = int(df_closed.iloc[0]['ts'])
+    current_start = int(df_closed.iloc[0]['close_ts'])
+    current_date  = pd.to_datetime(first_ts_ms, unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d')
+    current_valid  = True  # 假設新幣上市時預設有效（先找到紅吞再確認）
+
     for i in range(1, len(df_closed)):
         _prev = df_closed.iloc[i-1]
         _curr = df_closed.iloc[i]
-        sw = get_swallow(_curr['close'], _prev['open'], _prev['close'])
+        sw = get_swallow(float(_curr['close']), float(_prev['open']), float(_prev['close']))
         c_ts = int(_curr['close_ts'])
         if sw == 'RED':
-            if not current_valid or current_date == "新幣首發":
-                if not current_valid:
-                    timeline.append({'start': current_start, 'end': c_ts, 'valid': False, 'date': "未知"})
-                current_valid = True
-                current_start = c_ts
-                current_date = pd.to_datetime(int(_curr['ts']), unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d')
+            if not current_valid:
+                # 黑吞區段結束，封存黑吞區段
+                timeline.append({'start': current_start, 'end': c_ts, 'valid': False, 'date': current_date})
+                current_valid  = True
+                current_start  = c_ts
+                current_date   = pd.to_datetime(int(_curr['ts']), unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d')
         elif sw == 'BLACK':
             if current_valid:
+                # 紅吞區段結束，封存紅吞區段
                 timeline.append({'start': current_start, 'end': c_ts, 'valid': True, 'date': current_date})
-                current_valid = False
-                current_start = c_ts
-                current_date = "未知"
+                current_valid  = False
+                current_start  = c_ts
+                current_date   = pd.to_datetime(int(_curr['ts']), unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d')
+
+    # 最後一個區段延伸至永遠
     timeline.append({'start': current_start, 'end': float('inf'), 'valid': current_valid, 'date': current_date})
     return timeline
 
 def build_1d_structure_global(df_1d):
+    """
+    日線鋸齒結構（純轉折頂底），含擺動更新規則：
+    - SEEKING_TOP 階段（紅吞期間找最高點）：
+        當 BLACK 吞噬確認 → 新頂 = 區間內最高點。
+        若新頂 > 舊頂 → 新底 = 舊頂到新頂之間最低點（更新底部）。
+    - SEEKING_BOTTOM 階段（黑吞期間找最低點）：
+        當 RED 吞噬確認 → 新底 = 區間內最低點。
+        若新底 < 舊底 → 新頂 = 舊底到新底之間最高點（更新頂部）。
+    """
     import pandas as pd
-    boundaries = []
-    state = 'NONE'
-    temp_high = -1.0; temp_high_ts = 0; temp_high_date = ''
-    temp_low = float('inf'); temp_low_ts = 0; temp_low_date = ''
-    
-    current_valid_top = -1.0
-    current_valid_top_date = ''
-    current_valid_bottom = float('inf')
-    current_valid_bottom_date = ''
-    
-    def _fmt_ts(ts_ms):
+
+    def _fmt(ts_ms):
         return pd.to_datetime(int(ts_ms), unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d')
-        
+
+    boundaries = []
+    phase = 'INIT'
+
+    # 本輪追蹤（當前 phase 內）
+    run_h = -1.0;          run_h_date = ''   # 本輪最高價（SEEKING_TOP 用）
+    run_l = float('inf'); run_l_date = ''   # 本輪最低價（SEEKING_BOTTOM 用）
+
+    # 跨向追蹤（用於擺動更新）
+    inter_h = -1.0;          inter_h_date = ''  # SEEKING_BOTTOM 期間記錄的最高點
+    inter_l = float('inf'); inter_l_date = ''  # SEEKING_TOP 期間記錄的最低點
+
+    # 上一個確認的頂底
+    conf_top = None   # {'price', 'date'}
+    conf_bot = None   # {'price', 'date'}
+
+    def push_boundary(top, bot, c_close_ts):
+        if top:
+            boundaries.append({
+                'level':   top['price'],
+                'from_ts': c_close_ts,
+                't1_date': top['date'],
+                'b2_level': bot['price'] if bot else float('inf'),
+                'b2_date':  bot['date']  if bot else '',
+            })
+
     for i in range(1, len(df_1d)):
         prev = df_1d.iloc[i-1]
         curr = df_1d.iloc[i]
-        c_high = float(curr['high'])
-        c_low = float(curr['low'])
-        c_close = float(curr['close'])
-        c_ts = int(curr['ts'])
+        c_high     = float(curr['high'])
+        c_low      = float(curr['low'])
+        c_close    = float(curr['close'])
+        c_ts       = int(curr['ts'])
         c_close_ts = int(curr['close_ts'])
-        c_date = _fmt_ts(c_ts)
-        
-        sw = get_swallow(c_close, prev['open'], prev['close'])
-        prev_state = state
-        if sw == 'RED': state = 'RED'
-        elif sw == 'BLACK': state = 'BLACK'
-        
-        state_changed = (prev_state != state)
-        if state_changed:
-            if state == 'RED':
-                current_valid_bottom = temp_low
-                current_valid_bottom_date = temp_low_date
-                temp_high = -1.0
-            elif state == 'BLACK':
-                current_valid_top = temp_high
-                current_valid_top_date = temp_high_date
-                boundaries.append({
-                    'level': current_valid_top,
-                    'from_ts': c_close_ts,
-                    't1_date': current_valid_top_date,
-                    'b2_level': current_valid_bottom,
-                    'b2_date': current_valid_bottom_date
-                })
-                temp_low = float('inf')
-                
-        if state == 'RED':
-            if c_high > temp_high:
-                temp_high = c_high; temp_high_ts = c_ts; temp_high_date = c_date
-        elif state == 'BLACK':
-            if c_low < temp_low:
-                temp_low = c_low; temp_low_ts = c_ts; temp_low_date = c_date
-                
+        c_date     = _fmt(c_ts)
+
+        sw = get_swallow(c_close, float(prev['open']), float(prev['close']))
+
+        # ──── INIT：等第一個吞噬訊號 ────
+        if phase == 'INIT':
+            if sw == 'RED':
+                phase     = 'SEEKING_TOP'
+                run_h     = c_high; run_h_date = c_date
+                inter_l   = c_low;  inter_l_date = c_date
+            elif sw == 'BLACK':
+                phase     = 'SEEKING_BOTTOM'
+                run_l     = c_low;  run_l_date = c_date
+                inter_h   = c_high; inter_h_date = c_date
+            continue
+
+        # ──── SEEKING_TOP（紅吞期）────
+        if phase == 'SEEKING_TOP':
+            if c_high > run_h: run_h = c_high; run_h_date = c_date
+            if c_low  < inter_l: inter_l = c_low; inter_l_date = c_date
+
+            if sw == 'BLACK':
+                new_top = {'price': run_h, 'date': run_h_date}
+
+                # 若新頂高於舊頂 → 舊頂到新頂之間最低點成為新底
+                if conf_top and new_top['price'] > conf_top['price']:
+                    conf_bot = {'price': inter_l, 'date': inter_l_date}
+
+                conf_top = new_top
+                push_boundary(conf_top, conf_bot, c_close_ts)
+
+                # 切換到 SEEKING_BOTTOM
+                phase    = 'SEEKING_BOTTOM'
+                run_l    = c_low;  run_l_date = c_date
+                inter_h  = c_high; inter_h_date = c_date
+
+        # ──── SEEKING_BOTTOM（黑吞期）────
+        elif phase == 'SEEKING_BOTTOM':
+            if c_low  < run_l: run_l = c_low; run_l_date = c_date
+            if c_high > inter_h: inter_h = c_high; inter_h_date = c_date
+
+            if sw == 'RED':
+                new_bot = {'price': run_l, 'date': run_l_date}
+
+                # 若新底低於舊底 → 舊底到新底之間最高點成為新頂
+                if conf_bot and new_bot['price'] < conf_bot['price']:
+                    candidate_top_price = inter_h
+                    candidate_top_date  = inter_h_date
+                    if candidate_top_price > (conf_top['price'] if conf_top else -1.0):
+                        conf_top = {'price': candidate_top_price, 'date': candidate_top_date}
+                        # 發布更新後的頂 + 新底配對
+                        push_boundary(conf_top, new_bot, c_close_ts)
+
+                conf_bot = new_bot
+
+                # 切換到 SEEKING_TOP
+                phase    = 'SEEKING_TOP'
+                run_h    = c_high; run_h_date = c_date
+                inter_l  = c_low;  inter_l_date = c_date
+
     return boundaries
+
 
 def scan_for_symbol_logic(symbol, name, precision, ohlcv_1d, ohlcv_1h, now_utc):
     import logging
