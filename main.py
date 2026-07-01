@@ -1213,178 +1213,125 @@ def scan_for_symbol_logic(symbol, name, precision, ohlcv_1d, ohlcv_1h, now_utc):
         def _fmt(ts_ms, fmt='%Y-%m-%d'):
             return pd.to_datetime(int(ts_ms), unit='ms', utc=True).tz_convert('Asia/Taipei').strftime(fmt)
 
-        # ── 建立 18D K棒並找出所有黑吞界線 ────────────────────────────────────
         ohlcv_18d = compose_18d_bars(ohlcv_1d)
-        if not ohlcv_18d:
-            return None
+        if not ohlcv_18d: return None
         df_18d = pd.DataFrame(ohlcv_18d, columns=['ts', 'open', 'high', 'low', 'close', 'vol', 'close_ts'])
         df_18d_closed = df_18d[df_18d['close_ts'] <= now_utc].reset_index(drop=True)
 
-        boundaries, is_latest_red_swallow = build_18d_black_swallow_boundaries(df_18d_closed)
-        if not boundaries:
-            return None
-
-        # ── 建立 3H K棒 ──────────────────────────────────────────────────────
         ohlcv_3h = compose_3h_bars(ohlcv_1h)
-        if not ohlcv_3h:
-            return None
+        if not ohlcv_3h: return None
         df_3h = pd.DataFrame(ohlcv_3h, columns=['ts', 'open', 'high', 'low', 'close', 'vol', 'close_ts'])
         df_3h_closed = df_3h[df_3h['close_ts'] <= now_utc].reset_index(drop=True)
-        if df_3h_closed.empty:
-            return None
 
-        # ── 初始化各界線 active 旗標 ──────────────────────────────────────────
-        # boundaries_active[i] = True 代表第 i 個界線目前有 active 訊號
-        boundaries_active = [False] * len(boundaries)
         all_historical_c2s = []
+        active_signal = None
+        current_boundary = None
+        
+        idx_18d = 0
+        n_18d = len(df_18d_closed)
 
-        # ── 單次正向掃描 3H K棒 ───────────────────────────────────────────────
         for row_idx in range(len(df_3h_closed)):
             row = df_3h_closed.iloc[row_idx]
             c_ts       = int(row['ts'])
+            c_close_ts = int(row['close_ts'])
             c_open     = float(row['open'])
             c_close    = float(row['close'])
             c_low      = float(row['low'])
             c_high     = float(row['high'])
             c_date     = _fmt(c_ts, '%Y-%m-%d %H:%M')
 
-            # ── Step 1: 依最新已收盤 18D 棒更新移動止損 ────────────────────
-            _closed_18d = df_18d_closed[df_18d_closed['close_ts'] <= c_ts]
-            _last_18d = _prev_18d = None
-            if len(_closed_18d) >= 2:
-                _last_18d = _closed_18d.iloc[-1]
-                _prev_18d = _closed_18d.iloc[-2]
+            while idx_18d < n_18d and int(df_18d_closed.iloc[idx_18d]['close_ts']) <= c_ts:
+                curr_18d = df_18d_closed.iloc[idx_18d]
+                if idx_18d > 0:
+                    prev_18d = df_18d_closed.iloc[idx_18d - 1]
+                    sw = get_swallow(float(curr_18d['close']), float(prev_18d['open']), float(prev_18d['close']))
+                    
+                    if sw == 'BLACK':
+                        if active_signal:
+                            _init_sl = active_signal.get('initial_sl', active_signal['stop_loss'])
+                            _risk    = abs(active_signal['entry_price'] - _init_sl)
+                            active_signal['status'] = 'closed'
+                            active_signal['exit_type'] = 'black_swallow_18d'
+                            _exit_price = float(curr_18d['close'])
+                            active_signal['real_rr'] = (_exit_price - active_signal['entry_price']) / _risk if _risk > 0 else 0.0
+                            active_signal = None
+                            
+                        current_boundary = {
+                            'level': float(curr_18d['high']),
+                            'date': _fmt(int(curr_18d['ts'])),
+                            'from_ts': int(curr_18d['close_ts'])
+                        }
+                    elif sw == 'RED':
+                        if active_signal:
+                            _l_low = float(curr_18d['low'])
+                            _cur_trailing = float(active_signal.get('trailing_sl', -1.0))
+                            if _l_low > float(active_signal['entry_price']) and (_cur_trailing < 0 or _l_low > _cur_trailing):
+                                active_signal['trailing_sl'] = _l_low
+                                active_signal['trailing_sl_date'] = _fmt(int(curr_18d['ts']))
+                
+                idx_18d += 1
 
-            if _last_18d is not None:
-                _l_close      = float(_last_18d['close'])
-                _l_low        = float(_last_18d['low'])
-                _p_body_high  = max(float(_prev_18d['open']), float(_prev_18d['close']))
-                _p_body_low   = min(float(_prev_18d['open']), float(_prev_18d['close']))
-                _l_close_ts   = int(_last_18d['close_ts'])
-
-                for sig in all_historical_c2s:
-                    if sig['status'] != 'active': continue
-                    if _l_close_ts <= sig['trigger_ts']: continue
-                    _cur_trailing = float(sig.get('trailing_sl', -1.0))
-                    # 18D 黑吞 → 出場
-                    if _l_close < _p_body_low:
-                        _init_sl = sig.get('initial_sl', sig['stop_loss'])
-                        _risk    = abs(sig['entry_price'] - _init_sl)
-                        sig['status']    = 'closed'
-                        sig['exit_type'] = 'black_swallow_18d'
-                        sig['real_rr']   = (_p_body_low - sig['entry_price']) / _risk if _risk > 0 else 0.0
-                        # 重置此界線的 active 旗標
-                        for bi, bd in enumerate(boundaries):
-                            if bd['from_ts'] == sig['l1_open_ts']:
-                                boundaries_active[bi] = False
-                        continue
-                    # 18D 紅吞 → 移動止損
-                    if (_l_close > _p_body_high
-                            and _l_low > float(sig['entry_price'])
-                            and (_cur_trailing < 0 or _l_low > _cur_trailing)):
-                        sig['trailing_sl']      = _l_low
-                        sig['trailing_sl_date'] = _fmt(int(_last_18d['ts']))
-
-            # ── Step 2: 檢查 3H 棒的止損 / 止盈觸發 ─────────────────────────
-            for sig in all_historical_c2s:
-                if sig['status'] != 'active' or c_ts <= sig['trigger_ts']: continue
-                _trailing     = sig.get('trailing_sl')
-                _effective_sl = _trailing if _trailing is not None else sig['stop_loss']
-                _init_sl      = sig.get('initial_sl', sig['stop_loss'])
-                _base_risk    = abs(sig['entry_price'] - _init_sl)
-                # max_rr 追蹤（以 3H high 計算）
+            if active_signal:
+                _trailing     = active_signal.get('trailing_sl')
+                _effective_sl = _trailing if _trailing is not None else active_signal['stop_loss']
+                _init_sl      = active_signal.get('initial_sl', active_signal['stop_loss'])
+                _base_risk    = abs(active_signal['entry_price'] - _init_sl)
+                
                 if _base_risk > 0:
-                    _cur_rr = (c_high - sig['entry_price']) / _base_risk
-                    if _cur_rr > sig.get('max_rr', 0.0):
-                        sig['max_rr'] = round(_cur_rr, 2)
-                # 止損觸發
+                    _cur_rr = (c_high - active_signal['entry_price']) / _base_risk
+                    if _cur_rr > active_signal.get('max_rr', 0.0):
+                        active_signal['max_rr'] = round(_cur_rr, 2)
+                        
                 if c_low <= _effective_sl:
-                    _risk = abs(sig['entry_price'] - _init_sl)
-                    sig['status']    = 'closed'
-                    sig['real_rr']   = (_effective_sl - sig['entry_price']) / _risk if _risk > 0 else 0.0
-                    sig['exit_type'] = 'trailing_sl' if _trailing is not None else 'stop_loss'
-                    for bi, bd in enumerate(boundaries):
-                        if bd['from_ts'] == sig['l1_open_ts']:
-                            boundaries_active[bi] = False
-                # TP100 觸發
-                elif _base_risk > 0 and c_high >= (sig['entry_price'] + 100 * _base_risk):
-                    sig['status']    = 'closed'
-                    sig['real_rr']   = 100.0
-                    sig['exit_type'] = 'tp100'
-                    for bi, bd in enumerate(boundaries):
-                        if bd['from_ts'] == sig['l1_open_ts']:
-                            boundaries_active[bi] = False
-
-            # ── Step 3: 判斷當前時點最新 18D 棒是否為紅吞（抑制新觸發） ────
-            _current_is_red = False
-            if len(_closed_18d) >= 2:
-                _lc = float(_closed_18d.iloc[-1]['close'])
-                _pp = float(_closed_18d.iloc[-2]['open'])
-                _pc = float(_closed_18d.iloc[-2]['close'])
-                if _lc > max(_pp, _pc):
-                    _current_is_red = True
-
-            if _current_is_red:
-                continue
-
-            # ── Step 4: 掃描各界線，檢查 3H 突破進場 ────────────────────────
-            for bi, bd in enumerate(boundaries):
-                if bd['from_ts'] > c_ts:
-                    continue  # 界線尚未生效
-                if boundaries_active[bi]:
-                    continue  # 此界線下已有 active 訊號
-
-                if c_open < bd['level'] and c_close > bd['level']:
+                    _risk = abs(active_signal['entry_price'] - _init_sl)
+                    active_signal['status'] = 'closed'
+                    active_signal['real_rr'] = (_effective_sl - active_signal['entry_price']) / _risk if _risk > 0 else 0.0
+                    active_signal['exit_type'] = 'trailing_sl' if _trailing is not None else 'stop_loss'
+                    active_signal = None
+                elif _base_risk > 0 and c_high >= (active_signal['entry_price'] + 100 * _base_risk):
+                    active_signal['status'] = 'closed'
+                    active_signal['real_rr'] = 100.0
+                    active_signal['exit_type'] = 'tp100'
+                    active_signal = None
+                    
+            if not active_signal and current_boundary:
+                if c_open < current_boundary['level'] and c_close > current_boundary['level']:
                     new_sig = {
                         'symbol':           symbol,
                         'l1_18d_direction': 'LONG',
-                        'l1_date':          bd['date'],
-                        'l1_open_ts':       bd['from_ts'],
-                        'l2_date':          bd['date'],
-                        'l2_open_ts':       bd['from_ts'],
+                        'l1_date':          current_boundary['date'],
+                        'l2_top':           current_boundary['level'],
                         'l3_date':          c_date,
                         'entry_price':      c_close,
                         'stop_loss':        c_low,
                         'initial_sl':       c_low,
                         'trigger_ts':       c_ts,
-                        'l2_direction':     'LONG',
                         'precision':        precision,
                         'status':           'active',
                         'has_entered':      True,
-                        'l2_top':           bd['level'],
-                        'l2_top_date':      bd['date'],
-                        'l2_bottom':        0,
-                        'l2_bottom_date':   '—',
-                        'max_tp_stage':     -1,
                         'real_rr':          0.0,
                         'max_rr':           0.0,
                     }
                     all_historical_c2s.append(new_sig)
-                    boundaries_active[bi] = True
+                    active_signal = new_sig
 
-        # ── 後處理 ────────────────────────────────────────────────────────────
         _df_1d_tmp = pd.DataFrame(ohlcv_1d, columns=['ts', 'open', 'high', 'low', 'close', 'vol'])
         current_price = float(_df_1d_tmp['close'].iloc[-1]) if not _df_1d_tmp.empty else 0.0
         for c2 in all_historical_c2s:
             c2['current_price'] = current_price
 
-        active_sigs    = [c2 for c2 in all_historical_c2s if c2['status'] == 'active']
-        is_trigger_met = len(active_sigs) > 0
+        is_trigger_met = active_signal is not None
+        
+        is_latest_red = False
+        if n_18d >= 2:
+            last = df_18d_closed.iloc[-1]
+            prev = df_18d_closed.iloc[-2]
+            if get_swallow(float(last['close']), float(prev['open']), float(prev['close'])) == 'RED':
+                is_latest_red = True
 
-        latest_bd     = boundaries[-1] if boundaries else None
-        l2_top_val    = latest_bd['level'] if latest_bd else -1.0
-        l2_top_date   = latest_bd['date']  if latest_bd else '未知'
-
-        last_active   = active_sigs[-1] if active_sigs else None
-        entry_price   = last_active['entry_price'] if last_active else 0.0
-        stop_loss     = last_active['stop_loss']    if last_active else 0.0
-        trigger_ts    = last_active['trigger_ts']   if last_active else 0
-        l3_date_str   = last_active['l3_date']      if last_active else '未知'
-
-        # watchlist 資格：有界線且最新 18D 不是紅吞
-        is_watchlist_eligible = (latest_bd is not None) and (not is_latest_red_swallow)
+        is_watchlist_eligible = (current_boundary is not None) and (not is_latest_red)
         final_state   = 'triggered' if is_trigger_met else ('l2_watching' if is_watchlist_eligible else 'l1_waiting')
-        cache_ts      = trigger_ts if is_trigger_met else 0
+        cache_ts      = active_signal['trigger_ts'] if active_signal else 0
 
         return {
             'symbol':                symbol,
@@ -1392,26 +1339,16 @@ def scan_for_symbol_logic(symbol, name, precision, ohlcv_1d, ohlcv_1h, now_utc):
             'data':                  {'ts': cache_ts},
             'is_trigger_met':        is_trigger_met,
             'is_watchlist_eligible': is_watchlist_eligible,
-            'entry_price':           entry_price,
-            'stop_loss':             stop_loss,
-            'trigger_ts':            trigger_ts,
+            'entry_price':           active_signal['entry_price'] if active_signal else 0.0,
+            'stop_loss':             active_signal['stop_loss'] if active_signal else 0.0,
+            'trigger_ts':            cache_ts,
             'precision':             precision,
             'l1_18d_direction':      'LONG',
-            'l1_date':               last_active['l1_date'] if last_active else (latest_bd['date'] if latest_bd else '未知'),
-            'l2_date':               last_active.get('l2_date', '') if last_active else '',
-            'l3_date':               l3_date_str,
-            'l2_direction':          'LONG' if last_active else '',
+            'l1_date':               active_signal['l1_date'] if active_signal else (current_boundary['date'] if current_boundary else '未知'),
+            'l2_top':                active_signal['l2_top'] if active_signal else (current_boundary['level'] if current_boundary else -1.0),
+            'l3_date':               active_signal['l3_date'] if active_signal else '未知',
             'scan_state':            final_state,
-            'l1_open_ts':            last_active['l1_open_ts'] if last_active else 0,
-            'l2_open_ts':            last_active['l2_open_ts'] if last_active else 0,
             'historical_c2s':        all_historical_c2s,
-            'l2_top':                l2_top_val,
-            'l2_bottom':             float('inf'),
-            'l2_top_date':           l2_top_date,
-            'l2_bottom_date':        '—',
-            'l2_t1_level':           l2_top_val,
-            'l2_b1_date':            '—',
-            'l2_b2_date':            '',
         }
     except Exception as e:
         logger.warning(f"掃描異常 ({symbol}): {type(e).__name__}: {e}")
@@ -2399,24 +2336,16 @@ HTML_TEMPLATE = """
         </div>
         <div class="card-grid">
           <div class="detail-block">
-            <div class="detail-label">18D紅吞時間</div>
+            <div class="detail-label">18D黑吞日期</div>
             <div class="detail-value">${sig.l1_date || '—'}</div>
           </div>
           <div class="detail-block">
-            <div class="detail-label">1D突破時間</div>
-            <div class="detail-value">${fmt(sig.l3_date)}</div>
-          </div>
-          <div class="detail-block">
-            <div class="detail-label">1D頂點時間</div>
-            <div class="detail-value">${sig.l2_top > 0 ? (sig.l2_top_date||'—') : '—'}</div>
-          </div>
-          <div class="detail-block">
-            <div class="detail-label">1D底點確立(B2)</div>
-            <div class="detail-value">${fmt(sig.l2_date)}</div>
-          </div>
-          <div class="detail-block">
-            <div class="detail-label">界線價格</div>
+            <div class="detail-label">18D黑吞界線</div>
             <div class="detail-value">${sig.l2_top > 0 ? fmt(sig.l2_top, prec) : '—'}</div>
+          </div>
+          <div class="detail-block">
+            <div class="detail-label">3H突破時間</div>
+            <div class="detail-value">${fmt(sig.l3_date)}</div>
           </div>
           <div class="detail-block">
             <div class="detail-label">曾達最高RR</div>
@@ -2529,24 +2458,16 @@ HTML_TEMPLATE = """
         </div>
         <div class="card-grid">
           <div class="detail-block">
-            <div class="detail-label">18D紅吞時間</div>
+            <div class="detail-label">18D黑吞日期</div>
             <div class="detail-value">${sig.l1_date || '—'}</div>
           </div>
           <div class="detail-block">
-            <div class="detail-label">1D突破時間</div>
-            <div class="detail-value">${fmt(sig.l3_date)}</div>
-          </div>
-          <div class="detail-block">
-            <div class="detail-label">1D頂點時間</div>
-            <div class="detail-value">${sig.l2_top > 0 ? (sig.l2_top_date||'—') : '—'}</div>
-          </div>
-          <div class="detail-block">
-            <div class="detail-label">1D底點確立(B2)</div>
-            <div class="detail-value">${fmt(sig.l2_date)}</div>
-          </div>
-          <div class="detail-block">
-            <div class="detail-label">界線價格</div>
+            <div class="detail-label">18D黑吞界線</div>
             <div class="detail-value">${sig.l2_top > 0 ? fmt(sig.l2_top, prec) : '—'}</div>
+          </div>
+          <div class="detail-block">
+            <div class="detail-label">3H突破時間</div>
+            <div class="detail-value">${fmt(sig.l3_date)}</div>
           </div>
           <div class="detail-block">
             <div class="detail-label">曾達最高RR</div>
