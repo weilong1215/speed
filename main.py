@@ -1208,14 +1208,36 @@ def get_swallow(c_close, p_open, p_close):
     return 'NONE'
 
 def build_timeline(df_closed):
-    """
-    18D 紅黑吞 timeline 建立。
-    修正：從第一根 18D 棒的實際日期開始計算，不再顯示「新幣首發」。
-    """
     import pandas as pd
     timeline = []
     if df_closed.empty:
         return timeline
+
+    current_start = 0
+    current_date  = "新幣首發"
+    current_valid  = True
+
+    for i in range(1, len(df_closed)):
+        _prev = df_closed.iloc[i-1]
+        _curr = df_closed.iloc[i]
+        sw = get_swallow(float(_curr['close']), float(_prev['open']), float(_prev['close']))
+        c_ts = int(_curr['close_ts'])
+        if sw == 'RED':
+            if not current_valid or current_date == "新幣首發":
+                if not current_valid:
+                    timeline.append({'start': current_start, 'end': c_ts, 'valid': False, 'date': current_date})
+                current_valid  = True
+                current_start  = c_ts
+                current_date   = pd.to_datetime(int(_curr['ts']), unit='ms', utc=True).tz_convert('Asia/Taipei').strftime('%Y-%m-%d')
+        elif sw == 'BLACK':
+            if current_valid:
+                timeline.append({'start': current_start, 'end': c_ts, 'valid': True, 'date': current_date})
+                current_valid  = False
+                current_start  = c_ts
+                current_date   = "未知"
+
+    timeline.append({'start': current_start, 'end': float('inf'), 'valid': current_valid, 'date': current_date})
+    return timeline
 
     # 初始狀態：從第一根 18D 棒的開盤時間開始（而非 epoch=0）
     first_ts_ms = int(df_closed.iloc[0]['ts'])
