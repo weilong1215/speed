@@ -1443,36 +1443,51 @@ def scan_for_symbol_logic(symbol, name, precision, ohlcv_1d, ohlcv_1h, now_utc):
             return None
 
         # ================= L1 (18D) Timeline =================
+        # 規則：L1 有效必須先出現黑吞，才能觸發紅吞（黑→紅轉折）。
+        # 在第一根黑吞之前的時間段完全不納入 timeline，get_status 會回傳 False。
         l1_timeline = []
-        current_l1_valid = False  # 取消新幣首發，初始為無效
-        current_l1_start = 0
+        current_l1_valid = False
+        current_l1_start = None  # None = 尚未見到第一根黑吞
         current_l1_date = "未知"
+
         for i in range(1, len(df_18d_closed)):
             _prev = df_18d_closed.iloc[i-1]
             _curr = df_18d_closed.iloc[i]
             sw = get_swallow(_curr['close'], _prev['open'], _prev['close'])
             c_ts = int(_curr['close_ts'])
-            if sw == 'RED':
-                if not current_l1_valid:
-                    l1_timeline.append({
-                        'start': current_l1_start, 'end': c_ts, 'valid': False, 'date': "未知"
-                    })
-                    current_l1_valid = True
+
+            if sw == 'BLACK':
+                if current_l1_start is None:
+                    # 第一根黑吞：無效期從這裡開始
                     current_l1_start = c_ts
-                    current_l1_date = _fmt(int(_curr['ts']))
-            elif sw == 'BLACK':
-                if current_l1_valid:
+                elif current_l1_valid:
+                    # 紅吞→黑吞轉折：封存有效期
                     l1_timeline.append({
                         'start': current_l1_start, 'end': c_ts, 'valid': True, 'date': current_l1_date
                     })
                     current_l1_valid = False
                     current_l1_start = c_ts
                     current_l1_date = "未知"
-        l1_timeline.append({
-            'start': current_l1_start, 'end': float('inf'), 'valid': current_l1_valid, 'date': current_l1_date
-        })
+
+            elif sw == 'RED':
+                # 必須先見過黑吞，才算有效紅吞
+                if current_l1_start is not None and not current_l1_valid:
+                    # 黑吞→紅吞轉折：封存無效期，開始有效期
+                    l1_timeline.append({
+                        'start': current_l1_start, 'end': c_ts, 'valid': False, 'date': "未知"
+                    })
+                    current_l1_valid = True
+                    current_l1_start = c_ts
+                    current_l1_date = _fmt(int(_curr['ts']))
+
+        # 封存最後一個區段（若已見過黑吞）
+        if current_l1_start is not None:
+            l1_timeline.append({
+                'start': current_l1_start, 'end': float('inf'), 'valid': current_l1_valid, 'date': current_l1_date
+            })
 
         def get_status(target_ts):
+            # 若 timeline 為空（從未見過黑吞）或 target_ts 早於第一個黑吞，回傳 False
             if not l1_timeline:
                 return False, "未知", 0
             for block in l1_timeline:
