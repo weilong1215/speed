@@ -1581,9 +1581,8 @@ def scan_for_symbol_logic(symbol, name, precision, ohlcv_1d, ohlcv_1h, now_utc):
                             pending_top = -1.0
                             pending_bottom = float('inf')
                         else:
-                            if temp_bottom < pending_bottom:
-                                pending_bottom = temp_bottom
-                                pending_bottom_date = temp_bottom_date
+                            pending_bottom = temp_bottom
+                            pending_bottom_date = temp_bottom_date
                                 
                     temp_top = c_high
                     temp_top_date = c_date
@@ -1610,9 +1609,8 @@ def scan_for_symbol_logic(symbol, name, precision, ohlcv_1d, ohlcv_1h, now_utc):
                             pending_top = -1.0
                             pending_bottom = float('inf')
                         else:
-                            if temp_top > pending_top:
-                                pending_top = temp_top
-                                pending_top_date = temp_top_date
+                            pending_top = temp_top
+                            pending_top_date = temp_top_date
                                 
                     temp_bottom = c_low
                     temp_bottom_date = c_date
