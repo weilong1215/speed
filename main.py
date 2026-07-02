@@ -1443,11 +1443,27 @@ def scan_for_symbol_logic(symbol, name, precision, ohlcv_1d, ohlcv_1h, now_utc):
             return None
 
         # ================= L1 (18D) Timeline =================
-        # 規則：L1 有效必須先出現黑吞，才能觸發紅吞（黑→紅轉折）。
-        # 在第一根黑吞之前的時間段完全不納入 timeline，get_status 會回傳 False。
+        # 規則：為了避免資料截斷（例如只抓 1000 天）導致「明明是很久以前的黑轉紅，卻因為起點被切斷而誤判為起點在截斷處」，
+        # 我們必須判斷手上的資料是否為「完整歷史（即新幣）」。
+        # 若為完整歷史：允許開局直接是紅吞。
+        # 若為截斷歷史（老幣）：強制必須先看見第一根黑吞，才能將之後的紅吞認定為起點（保證抓到真正的黑轉紅）。
+        is_full_history = False
+        if len(ohlcv_1d) > 0:
+            if len(ohlcv_1d) == 1000:
+                is_full_history = False  # 即時掃描被 limit=1000 截斷
+            elif len(ohlcv_1d) > 1000:
+                # 背景全量掃描
+                if ohlcv_1d[0][0] > 1515000000000:  # 大於 2018-01-03
+                    is_full_history = True   # 代表抓到上市第一天
+                else:
+                    is_full_history = False  # 觸及 2018 停止線，被截斷
+            else:
+                is_full_history = True       # 資料不足 1000 筆，絕對是完整歷史（新幣）
+
         l1_timeline = []
         current_l1_valid = False
-        current_l1_start = None  # None = 尚未見到第一根黑吞
+        # 如果是完整歷史，起點設為 0，允許第一根就是紅吞；否則設為 None 強制等黑吞。
+        current_l1_start = 0 if is_full_history else None  
         current_l1_date = "未知"
 
         for i in range(1, len(df_18d_closed)):
